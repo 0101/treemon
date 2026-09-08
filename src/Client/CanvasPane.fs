@@ -86,6 +86,16 @@ let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
 let openDocInBrowserTab (wt: WorktreeStatus) (doc: CanvasDoc) : unit =
     Fable.Core.JsInterop.emitJsExpr (iframeSrc wt doc) "window.open($0,'_blank','noopener')"
 
+let focusActiveDoc () =
+    Dom.document.querySelector ".canvas-iframe-active"
+    |> Option.ofObj
+    |> Option.map (fun iframe ->
+        Fable.Core.JsInterop.emitJsExpr<unit>
+            iframe
+            "(function(f){f.focus();if(f.contentWindow)f.contentWindow.focus()})($0)"
+        true)
+    |> Option.defaultValue false
+
 /// Render a SystemView entry for the tab strip. SystemViews are deliberately not normal AgentDoc
 /// tabs: they use a distinct class, carry no liveness dot, and retain the shared double-click
 /// affordance for opening the exact iframe URL in a standalone browser tab.
@@ -556,10 +566,10 @@ type MessageListenerCallbacks =
       /// A canvas-origin object message arrived with no usable top-level string `action`, from the
       /// active (non-hidden) doc — surfaced instead of silently dropped.
       OnMalformedMessage: unit -> unit
-      /// Escape was pressed inside a canvas doc (reclaim-focus): a cross-origin doc's keydown can't
-      /// reach the dashboard's global focus-reclaim listener, so pull keyboard focus back to the
-      /// dashboard and revive navigation.
-      OnReclaimFocus: unit -> unit }
+      /// Escape inside the active cross-origin canvas doc requests dashboard focus reclaim.
+      OnReclaimFocus: unit -> unit
+      /// Ctrl+P inside the active cross-origin canvas doc requests the global worktree search.
+      OnOpenWorktreeSearch: unit -> unit }
 
 let messageListener (callbacks: MessageListenerCallbacks) =
     let { Dispatch = dispatch
@@ -567,7 +577,8 @@ let messageListener (callbacks: MessageListenerCallbacks) =
           OnMorphComplete = onMorphComplete
           OnDocError = onDocError
           OnMalformedMessage = onMalformedMessage
-          OnReclaimFocus = onReclaimFocus } = callbacks
+          OnReclaimFocus = onReclaimFocus
+          OnOpenWorktreeSearch = onOpenWorktreeSearch } = callbacks
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
@@ -618,7 +629,7 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                             Fable.Core.JS.console.warn "[canvas] morph-complete DROPPED: invalid identity or not from the active canvas doc iframe"
                     elif action = "reclaim-focus" then
                         // Escape inside a cross-origin canvas doc can't reach the dashboard's global
-                        // focus-reclaim listener, so the doc posts this instead (reclaimFocusScript).
+                        // focus-reclaim listener, so the doc posts this instead (globalKeyboardScript).
                         // Positively require the ACTIVE doc's window as sender — a hidden background,
                         // stale/detached, or sourceless sender must never yank the dashboard.
                         if isFromActiveCanvasIframe () then
@@ -626,6 +637,12 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                             onReclaimFocus ()
                         else
                             Fable.Core.JS.console.warn "[canvas] reclaim-focus DROPPED: not from the active canvas doc iframe"
+                    elif action = "open-worktree-search" then
+                        if isFromActiveCanvasIframe () then
+                            Fable.Core.JS.console.log "[canvas] open-worktree-search received"
+                            onOpenWorktreeSearch ()
+                        else
+                            Fable.Core.JS.console.warn "[canvas] open-worktree-search DROPPED: not from the active canvas doc iframe"
                     elif action = "canvas-doc-error" then
                         // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
                         // in the doc-error banner, never forwarded to the session like a normal payload.

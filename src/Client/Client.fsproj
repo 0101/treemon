@@ -11,6 +11,7 @@
     <Compile Include="CanvasTypes.fs" />
     <Compile Include="Components.fs" />
     <Compile Include="ModalOverlay.fs" />
+    <Compile Include="WorktreeSearch.fs" />
     <Compile Include="CreateWorktreeModal.fs" />
     <Compile Include="ArchiveViews.fs" />
     <Compile Include="ActionButtons.fs" />

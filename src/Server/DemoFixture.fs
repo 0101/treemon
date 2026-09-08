@@ -173,6 +173,7 @@ let private wtAzDoMain: WorktreeStatus =
       CodingTool = NoSession
       CodingToolProvider = None
       CodingToolSince = None
+      SessionActivityAt = None
       CurrentSkill = None
       LastUserMessage = None
       AgentActivity = None
@@ -201,6 +202,7 @@ let private wtRetryLogic: WorktreeStatus =
       CodingTool = Working
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-5.0))
+      SessionActivityAt = Some(baseTimestamp.AddSeconds(-20.0))
       CurrentSkill = None
       LastUserMessage = Some(userMessage "implement retry with jitter" (baseTimestamp.AddMinutes(-5.0)))
       AgentActivity = Some(AgentActivity.Intent("Adding jitter to the backoff delays", baseTimestamp.AddMinutes(-1.0)))
@@ -227,6 +229,7 @@ let private wtConfigLoading: WorktreeStatus =
       CodingTool = Working
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-15.0))
+      SessionActivityAt = Some(baseTimestamp.AddMinutes(-1.0))
       CurrentSkill = None
       LastUserMessage = Some(userMessage "refactor env-specific config loading" (baseTimestamp.AddMinutes(-15.0)))
       AgentActivity = Some(AgentActivity.Intent("Extracting env overrides into a typed loader", baseTimestamp.AddMinutes(-2.0)))
@@ -253,6 +256,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       CodingTool = Idle
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-8.0))
+      SessionActivityAt = Some(baseTimestamp.AddMinutes(-8.0))
       CurrentSkill = None
       LastUserMessage = Some(userMessage "add admin role check to delete endpoint" (baseTimestamp.AddMinutes(-35.0)))
       AgentActivity = Some(AgentActivity.Intent("Verifying the admin-role check on the delete endpoint", baseTimestamp.AddMinutes(-8.0)))
@@ -279,6 +283,7 @@ let private wtArchived: WorktreeStatus =
       CodingTool = Idle
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddHours(-48.0))
+      SessionActivityAt = Some(baseTimestamp.AddHours(-48.0))
       CurrentSkill = None
       LastUserMessage = None
       AgentActivity = None
@@ -305,6 +310,7 @@ let private wtGithubMain: WorktreeStatus =
       CodingTool = NoSession
       CodingToolProvider = None
       CodingToolSince = None
+      SessionActivityAt = None
       CurrentSkill = None
       LastUserMessage = None
       AgentActivity = None
@@ -334,6 +340,7 @@ let private wtStreaming: WorktreeStatus =
       CodingTool = Working
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-3.0))
+      SessionActivityAt = Some(baseTimestamp.AddSeconds(-20.0))
       CurrentSkill = None
       LastUserMessage = Some(userMessage "add tumbling window support" (baseTimestamp.AddMinutes(-3.0)))
       AgentActivity = Some(AgentActivity.Intent("Wiring tumbling windows into the aggregator", baseTimestamp.AddSeconds(-30.0)))
@@ -360,6 +367,7 @@ let private wtCsvFix: WorktreeStatus =
       CodingTool = Idle
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-60.0))
+      SessionActivityAt = Some(baseTimestamp.AddMinutes(-60.0))
       CurrentSkill = None
       LastUserMessage = None
       AgentActivity = None
@@ -460,6 +468,7 @@ let private f3 =
         { wt with
             CodingTool = Working
             CodingToolSince = Some baseTimestamp
+            SessionActivityAt = Some baseTimestamp
             Sessions = [ { Status = Working; Skill = Some "investigate"; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
     |> withCpu 45.0 14800
 
@@ -499,6 +508,7 @@ let private f8 =
         { wt with
             CodingTool = Idle
             CodingToolSince = Some baseTimestamp
+            SessionActivityAt = Some baseTimestamp
             Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
     |> withCpu 52.0 15800
 
@@ -521,7 +531,9 @@ let private f10 =
 let private f11 =
     f10
     |> withRetry (fun wt ->
-        { wt with LastUserMessage = Some(userMessage "add request deduplication" (baseTimestamp.AddMinutes(-1.0))) })
+        { wt with
+            SessionActivityAt = Some baseTimestamp
+            LastUserMessage = Some(userMessage "add request deduplication" (baseTimestamp.AddMinutes(-1.0))) })
     |> withCpu 39.0 14400
 
 // F12 (22-24s): Retry beads update, settling toward start
@@ -559,6 +571,8 @@ let private adjustWorktreeTimestamps (now: DateTimeOffset) (wt: WorktreeStatus) 
     { wt with
         LastCommitTime = wt.LastCommitTime + shift
         CodingToolSince = wt.CodingToolSince |> Option.map (fun ts -> ts + shift)
+        SessionActivityAt =
+            wt.SessionActivityAt |> Option.map (fun ts -> ts + shift)
         LastUserMessage =
             wt.LastUserMessage
             |> Option.map (fun message -> { message with Timestamp = message.Timestamp + shift }) }

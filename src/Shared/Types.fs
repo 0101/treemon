@@ -458,6 +458,9 @@ type WorktreeStatus =
       /// (Investigating/Executing/…), else its status (WaitingForUser/Idle). Recorded at the transition
       /// so the Overview band can show "time in category" (incl. time-since-idle). None when NoSession.
       CodingToolSince: DateTimeOffset option
+      /// Greatest real activity timestamp across this worktree's retained and live sessions.
+      /// Heartbeats and usage reports do not advance it.
+      SessionActivityAt: DateTimeOffset option
       CurrentSkill: string option
       /// The freshest activity signal for the card's "what it's doing" line, preserving whether it
       /// came from SDK `assistant.intent` or `session.title_changed`.

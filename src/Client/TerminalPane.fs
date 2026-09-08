@@ -33,6 +33,16 @@ type TerminalPaneCallbacks =
       ReconnectView: EmbeddedTerminalId -> unit
       ViewLoaded: EmbeddedTerminalId -> int -> unit }
 
+[<RequireQualifiedAccess>]
+type CycleDirection =
+    | Next
+    | Previous
+
+[<RequireQualifiedAccess>]
+type TerminalShortcut =
+    | OpenWorktreeSearch of EmbeddedTerminalId
+    | CycleTerminal of EmbeddedTerminalId * CycleDirection
+
 let private samePath left right =
     Shared.PathUtils.pathEquals
         (WorktreePath.value left)
@@ -80,6 +90,56 @@ let selectTerminal terminalId snapshot selections =
     |> Option.map (fun tab ->
         setPathValue tab.Worktree terminalId selections)
     |> Option.defaultValue selections
+
+let cycleTerminal direction selectedWorktree snapshot selections =
+    selectedWorktree
+    |> Option.bind (fun path ->
+        let tabs = tabsForWorktree path snapshot
+
+        if tabs.Length < 2 then
+            None
+        else
+            let currentIndex =
+                activeTerminalId (Some path) selections snapshot
+                |> Option.bind (fun terminalId ->
+                    tabs |> List.tryFindIndex (fun tab -> tab.Id = terminalId))
+                |> Option.defaultValue 0
+
+            let offset =
+                match direction with
+                | CycleDirection.Next -> 1
+                | CycleDirection.Previous -> -1
+
+            let nextIndex = (currentIndex + offset + tabs.Length) % tabs.Length
+            Some(selectTerminal tabs[nextIndex].Id snapshot selections))
+    |> Option.defaultValue selections
+
+let cycleTerminalFrom terminalId direction snapshot selections =
+    tryFindTab terminalId snapshot
+    |> Option.bind (fun tab ->
+        if
+            activeTerminalId
+                (Some tab.Worktree)
+                selections
+                snapshot
+            = Some terminalId
+        then
+            let updated =
+                cycleTerminal
+                    direction
+                    (Some tab.Worktree)
+                    snapshot
+                    selections
+
+            Some(
+                updated,
+                activeTerminalId
+                    (Some tab.Worktree)
+                    updated
+                    snapshot
+            )
+        else
+            None)
 
 let private replacementSelection path terminalId before after =
     let afterTabs = tabsForWorktree path after
@@ -241,13 +301,14 @@ let private frameMatchesGeneration generation (frame: HTMLElement) =
     |> Option.ofObj
     |> Option.contains (string generation)
 
-let private frameIsVisible (frame: HTMLElement) =
-    not (frame.hasAttribute("hidden"))
+let private frameIsActiveAndVisible (frame: HTMLElement) =
+    frame.classList.contains("terminal-iframe-active")
+    && not (frame.hasAttribute("hidden"))
     && (frame.closest(".terminal-pane")
         |> Option.exists (fun pane ->
             not (pane.hasAttribute("hidden"))))
 
-let private withTerminalFrame terminalId acceptsFrame action =
+let private withTerminalFrame terminalId acceptsFrame action onMissing =
     let rec tryResolve remainingAttempts =
         Dom.window?requestAnimationFrame(fun (_: float) ->
             match
@@ -257,26 +318,45 @@ let private withTerminalFrame terminalId acceptsFrame action =
             | Some frame when acceptsFrame frame -> action frame
             | _ when remainingAttempts > 1 ->
                 tryResolve (remainingAttempts - 1)
-            | _ -> ())
+            | _ -> onMissing ())
         |> ignore
 
     tryResolve 2
 
+let private focusTerminalFrame frame =
+    emitJsExpr<unit>
+        frame
+        "(function(f){f.focus();f.contentWindow.postMessage({action:'focus-terminal'},new URL(f.src,document.baseURI).origin)})($0)"
+
 let focusTerminal terminalId =
-    withTerminalFrame terminalId frameIsVisible _.focus()
+    withTerminalFrame
+        terminalId
+        frameIsActiveAndVisible
+        focusTerminalFrame
+        ignore
+
+let focusTerminalOrElse terminalId onMissing =
+    withTerminalFrame
+        terminalId
+        frameIsActiveAndVisible
+        focusTerminalFrame
+        onMissing
 
 let focusTerminalView terminalId generation =
     withTerminalFrame
         terminalId
         (fun frame ->
-            frameIsVisible frame
+            frameIsActiveAndVisible frame
             && frameMatchesGeneration generation frame)
-        _.focus()
+        focusTerminalFrame
+        ignore
 
 let focusTerminalWhenReady terminalId generation =
     withTerminalFrame
         terminalId
-        (frameMatchesGeneration generation)
+        (fun frame ->
+            frameIsActiveAndVisible frame
+            && frameMatchesGeneration generation frame)
         (fun frame ->
             let focusOnLoad (_: Event) =
                 focusTerminalView terminalId generation
@@ -293,6 +373,67 @@ let focusTerminalWhenReady terminalId generation =
             |> ignore
 
             focusTerminalView terminalId generation)
+        ignore
+
+let messageListener (dispatch: TerminalShortcut -> unit) =
+    let tryActiveTerminalId (message: MessageEvent) =
+        let value =
+            emitJsExpr<string>
+                message
+                "(function(f){return f&&f.contentWindow===$0.source&&new URL(f.src,document.baseURI).origin===$0.origin?(f.getAttribute('data-terminal-id')||''):''})(document.querySelector('.terminal-iframe-active'))"
+
+        if String.IsNullOrWhiteSpace value then
+            None
+        else
+            Some(EmbeddedTerminalId value)
+
+    let handler =
+        fun (event: Event) ->
+            let message = event :?> MessageEvent
+            let isObject =
+                Fable.Core.JsInterop.emitJsExpr<bool>
+                    message.data
+                    "$0 != null && typeof $0 === 'object'"
+
+            match isObject, tryActiveTerminalId message with
+            | true, Some terminalId ->
+                let action =
+                    emitJsExpr<string>
+                        message.data
+                        "typeof $0.action === 'string' ? $0.action : ''"
+
+                match action with
+                | "open-worktree-search" ->
+                    dispatch (TerminalShortcut.OpenWorktreeSearch terminalId)
+                | "cycle-terminal" ->
+                    match
+                        emitJsExpr<string>
+                            message.data
+                            "typeof $0.direction === 'string' ? $0.direction : ''"
+                    with
+                    | "next" ->
+                        dispatch (
+                            TerminalShortcut.CycleTerminal(
+                                terminalId,
+                                CycleDirection.Next
+                            )
+                        )
+                    | "previous" ->
+                        dispatch (
+                            TerminalShortcut.CycleTerminal(
+                                terminalId,
+                                CycleDirection.Previous
+                            )
+                        )
+                    | _ -> ()
+                | _ -> ()
+            | _ -> ()
+
+    Browser.Dom.window.addEventListener ("message", handler)
+
+    { new IDisposable with
+        member _.Dispose() =
+            Browser.Dom.window.removeEventListener ("message", handler) }
 
 let private lifecyclePresentation lifecycle =
     match lifecycle with

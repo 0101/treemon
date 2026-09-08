@@ -318,6 +318,7 @@ type NavigationArchiveTests() =
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
           CodingToolSince = None
+          SessionActivityAt = None
           CurrentSkill = None
           AgentActivity = None
           Sessions = []

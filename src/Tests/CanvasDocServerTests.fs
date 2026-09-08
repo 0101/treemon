@@ -15,7 +15,8 @@ open Tests.TestUtils
 let private baseStyleMarker = "scrollbar-color"          // unique to baseStyle (CSS)
 let private linkInterceptorMarker = "navigate-canvas-doc" // unique to linkInterceptor
 let private bridgeMarker = "/bridge/heartbeat"            // unique to bridgeScript
-let private reclaimMarker = "reclaim-focus"               // unique to reclaimFocusScript (Escape bridge)
+let private reclaimMarker = "reclaim-focus"
+let private worktreeSearchMarker = "open-worktree-search"
 
 // ── Item 1: dark-theme base reset markers ─────────────────────────────────────
 let private resetWrapMarker = ":where(body)"  // reset selectors are :where()-wrapped (zero specificity)
@@ -103,12 +104,31 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Contain(linkInterceptorMarker), "Both kinds keep the link interceptor")
 
     [<Test>]
-    member _.``both doc kinds inject the Escape focus-reclaim bridge``() =
+    member _.``both doc kinds inject global keyboard bridges``() =
         [ SystemView; AgentDoc ]
         |> List.iter (fun kind ->
             let injection = buildInjection kind "status.html"
-            Assert.That(injection, Does.Contain(reclaimMarker),
-                        $"{kind}: Escape inside a cross-origin canvas doc must post a reclaim-focus message so the pane can refocus the dashboard"))
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    injection,
+                    Does.Contain(reclaimMarker),
+                    $"{kind}: Escape inside a canvas doc must post a reclaim-focus message"
+                )
+                Assert.That(
+                    injection,
+                    Does.Contain(worktreeSearchMarker),
+                    $"{kind}: Ctrl+P inside a canvas doc must post an open-worktree-search message"
+                )
+                Assert.That(
+                    injection,
+                    Does.Contain("stopImmediatePropagation()"),
+                    $"{kind}: handled Ctrl+P must not reach doc-local handlers"
+                )
+                Assert.That(
+                    injection,
+                    Does.Contain("},true)"),
+                    $"{kind}: the global keyboard bridge must run in capture phase"
+                )))
 
     // ── Item 1: dark-theme base reset, injected for BOTH kinds, zero specificity ──
 
