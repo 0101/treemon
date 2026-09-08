@@ -9,6 +9,15 @@ open Microsoft.Playwright.NUnit
 open Shared
 open Tests.CanvasTestHelpers
 
+let private useOnePane (page: IPage) =
+    task {
+        do! page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use one-pane layout")).ClickAsync()
+        do! page.Locator(".app-layout.workspace-single").WaitForAsync()
+    }
+
+let private selectWorkspacePane (page: IPage) pane =
+    page.Locator($"#{WorkspaceLayout.tabId pane}").ClickAsync()
+
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("Terminal")>]
@@ -61,6 +70,92 @@ type WorkspaceLayoutTests() =
         task {
             let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
             do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+        }
+
+    [<Test>]
+    member this.``One-pane portrait layout keeps navigation above each pane without changing typography``() =
+        task {
+            let! fontSizes =
+                this.Page.EvaluateAsync<string[]>(
+                    "() => ['--fs-sm', '--fs-base', '--fs-lg'].map(name => getComputedStyle(document.documentElement).getPropertyValue(name))")
+            do! this.Page.SetViewportSizeAsync(390, 844)
+            do! useOnePane this.Page
+
+            for pane in [ WorkspaceLayout.Pane.Worktrees; WorkspaceLayout.Pane.Terminal; WorkspaceLayout.Pane.Canvas ] do
+                do! selectWorkspacePane this.Page pane
+                let! visible =
+                    this.Page.Locator(".app-layout > :visible").EvaluateAllAsync<string[]>(
+                        "panes => panes.map(pane => pane.id)")
+                let! geometry =
+                    this.Page.EvaluateAsync<bool>(
+                        """() => {
+                            const tabs = document.querySelector('.workspace-tabs').getBoundingClientRect();
+                            const layout = document.querySelector('.app-layout').getBoundingClientRect();
+                            return tabs.top >= 0 && tabs.bottom <= layout.top
+                                && layout.bottom <= innerHeight
+                                && document.documentElement.scrollWidth <= innerWidth;
+                        }""")
+                Assert.That(visible, Is.EqualTo([| WorkspaceLayout.paneId pane |]))
+                Assert.That(geometry, Is.True)
+
+            do! this.Page.SetViewportSizeAsync(390, 420)
+            let! fitsShortViewport =
+                this.Page.EvaluateAsync<bool>(
+                    "() => document.querySelector('.workspace-tabs').getBoundingClientRect().bottom < 100 && document.querySelector('.app-layout').getBoundingClientRect().bottom <= innerHeight")
+            let! phoneFontSizes =
+                this.Page.EvaluateAsync<string[]>(
+                    "() => ['--fs-sm', '--fs-base', '--fs-lg'].map(name => getComputedStyle(document.documentElement).getPropertyValue(name))")
+            Assert.That(fitsShortViewport, Is.True)
+            Assert.That(phoneFontSizes, Is.EqualTo(fontSizes))
+        }
+
+    [<Test>]
+    member this.``One-pane preference survives reload without changing another browser tab``() =
+        task {
+            do! useOnePane this.Page
+            let! _ = this.Page.ReloadAsync()
+            do! this.Page.Locator(".app-layout.workspace-single").WaitForAsync()
+            let! other = this.Context.NewPageAsync()
+            let! _ = other.GotoAsync(ServerFixture.viteUrl)
+            do! other.Locator(".wt-card").First.WaitForAsync()
+            let! otherMode = other.Locator(".app-layout.workspace-single").CountAsync()
+            do! other.CloseAsync()
+            Assert.That(otherMode, Is.Zero)
+
+            do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use desktop layout")).ClickAsync()
+            let! _ = this.Page.ReloadAsync()
+            do! this.Page.Locator(".wt-card").First.WaitForAsync()
+            let! restored = this.Page.Locator(".app-layout.workspace-single").CountAsync()
+            Assert.That(restored, Is.Zero)
+        }
+
+    [<Test>]
+    member this.``One-pane dialogs stay outside hidden content and fit the typing viewport``() =
+        task {
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getBranches",
+                    fun route ->
+                        route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = """["main"]""")))
+            do! useOnePane this.Page
+            do! this.Page.SetViewportSizeAsync(390, 420)
+            do! this.Page.Locator(".create-wt-btn").First.ClickAsync()
+            let dialog = this.Page.Locator(".modal-dialog")
+            do! dialog.Locator(".modal-input").FillAsync("phone-prototype")
+            do! this.Page.SetViewportSizeAsync(390, 300)
+            let! geometry =
+                dialog.EvaluateAsync<bool>(
+                    """dialog => {
+                        const box = dialog.getBoundingClientRect();
+                        const footer = dialog.querySelector('.modal-footer').getBoundingClientRect();
+                        return !dialog.closest('.dashboard') && box.top >= 0
+                            && box.bottom <= innerHeight && footer.bottom <= innerHeight;
+                    }""")
+            Assert.That(geometry, Is.True)
+            do! dialog.GetByRole(AriaRole.Button, LocatorGetByRoleOptions(Name = "Cancel")).ClickAsync()
+            let! _ = this.Page.WaitForFunctionAsync("() => !document.querySelector('.modal-overlay')")
+            let! focused = this.Page.Locator(".dashboard").EvaluateAsync<bool>("element => element === document.activeElement")
+            Assert.That(focused, Is.True)
         }
 
     [<Test>]
@@ -477,6 +572,87 @@ type TerminalPaneDomTests() =
                     .Locator(".terminal-pane.open")
                     .WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             do! focusCanvasCard this.Page "feature-active"
+        }
+
+    [<Test>]
+    member this.``One-pane switching preserves terminal frames and never writes desktop layout preferences``() =
+        task {
+            do! rememberFrames this.Page
+            let! originalLayout = this.Page.Locator(".app-layout").GetAttributeAsync("class")
+            let originalBody =
+                this.Page.FrameLocator($"[data-terminal-id=\"{EmbeddedTerminalId.value firstTerminalId}\"]").Locator("body")
+            let! _ = originalBody.EvaluateAsync("body => { body.dataset.paneRoundTrip = 'kept'; }")
+            // This counter observes network side effects within this one browser test.
+            let mutable layoutWrites = 0
+            this.Page.Request.Add(fun request ->
+                if [ "saveTerminalPaneOpen"; "saveCanvasPaneOpen"; "saveWorkspaceWidth" ]
+                   |> List.exists (fun name -> request.Url.EndsWith(name, StringComparison.Ordinal)) then
+                    layoutWrites <- layoutWrites + 1)
+
+            do! useOnePane this.Page
+            do! this.Page.SetViewportSizeAsync(390, 844)
+            do! selectWorkspacePane this.Page WorkspaceLayout.Pane.Terminal
+            do! (tabFor this.Page firstAlternateTerminalActivity).ClickAsync()
+            do! selectWorkspacePane this.Page WorkspaceLayout.Pane.Canvas
+            do! selectWorkspacePane this.Page WorkspaceLayout.Pane.Worktrees
+            do! selectWorkspacePane this.Page WorkspaceLayout.Pane.Terminal
+            let! mounted = framesStillMounted this.Page
+            let! selected = (selectedTab this.Page).Locator(".terminal-tab-label").TextContentAsync()
+            let! preserved = originalBody.GetAttributeAsync("data-pane-round-trip")
+            do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use desktop layout")).ClickAsync()
+            let! restoredLayout = this.Page.Locator(".app-layout").GetAttributeAsync("class")
+
+            Assert.Multiple(fun () ->
+                Assert.That(mounted, Is.True)
+                Assert.That(selected, Is.EqualTo(firstAlternateTerminalActivity))
+                Assert.That(preserved, Is.EqualTo("kept"))
+                Assert.That(startCalls, Is.Zero)
+                Assert.That(closeCalls, Is.Zero)
+                Assert.That(layoutWrites, Is.Zero)
+                Assert.That(restoredLayout, Is.EqualTo(originalLayout)))
+        }
+
+    [<Test>]
+    member this.``A late terminal iframe load cannot reclaim focus from another workspace pane``() =
+        task {
+            let requested = TaskCompletionSource<IRoute>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let release = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            do!
+                this.Page.RouteAsync(
+                    "http://127.0.0.1:61236/**",
+                    Func<IRoute, Task>(fun route ->
+                        task {
+                            requested.TrySetResult(route) |> ignore
+                            do! release.Task
+                        }))
+            try
+                do! useOnePane this.Page
+                do! selectWorkspacePane this.Page WorkspaceLayout.Pane.Terminal
+                do! this.Page.Locator(".terminal-new-btn").ClickAsync()
+                let! route = requested.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+                do! selectWorkspacePane this.Page WorkspaceLayout.Pane.Canvas
+                do!
+                    route.FulfillAsync(
+                        RouteFulfillOptions(
+                            ContentType = "text/html",
+                            Body = terminalDocument "late-load"))
+                release.TrySetResult(()) |> ignore
+                do!
+                    this.Page
+                        .FrameLocator("""[data-terminal-id="00000000000000000000000000000101"]""")
+                        .Locator("""[data-terminal-marker="late-load"]""")
+                        .WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Attached))
+                let! _ =
+                    this.Page.EvaluateAsync(
+                        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+                let! focused =
+                    this.Page.EvaluateAsync<string>("() => document.activeElement.id")
+                Assert.That(focused, Is.EqualTo(WorkspaceLayout.tabId WorkspaceLayout.Pane.Canvas))
+                let! visible =
+                    this.Page.Locator(".app-layout > :visible").EvaluateAllAsync<string[]>("panes => panes.map(pane => pane.id)")
+                Assert.That(visible, Is.EqualTo([| WorkspaceLayout.paneId WorkspaceLayout.Pane.Canvas |]))
+            finally
+                release.TrySetResult(()) |> ignore
         }
 
     [<Test>]

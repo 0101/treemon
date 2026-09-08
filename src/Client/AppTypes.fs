@@ -46,6 +46,7 @@ type Model =
       AutoSyncPending: Set<WorktreePath>
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
+      Workspace: WorkspaceLayout.State
       TerminalPaneOpen: bool
       // A card's terminal action can target that worktree without changing dashboard/canvas focus.
       // The next explicit focus transition clears the override and restores normal focus-following.
@@ -71,6 +72,10 @@ type Msg =
     | DataFailed of exn
     | ToggleSort
     | ToggleCompact
+    | SetWorkspaceMode of WorkspaceLayout.Mode
+    | WorkspaceModeLoaded of WorkspaceLayout.Mode
+    | WorkspacePreferenceFailed of string
+    | SelectWorkspacePane of WorkspaceLayout.Pane
     | ToggleCollapse of repoId: RepoId
     | Tick of now: float
     | OpenTerminal of WorktreePath

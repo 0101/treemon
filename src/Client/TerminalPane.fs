@@ -163,12 +163,21 @@ let private withTerminalFrame terminalId action =
 
     tryResolve 2
 
+let private focusVisibleFrame (frame: HTMLElement) =
+    let canFocus =
+        emitJsExpr<bool> frame
+            "$0.classList.contains('terminal-iframe-active') && $0.getClientRects().length > 0 && !document.querySelector('.modal-overlay')"
+    if canFocus then frame.focus()
+
 let focusTerminal terminalId =
-    withTerminalFrame terminalId _.focus()
+    withTerminalFrame terminalId focusVisibleFrame
 
 let focusTerminalWhenReady terminalId =
     withTerminalFrame terminalId (fun frame ->
-        let focusOnLoad (_: Event) = frame.focus ()
+        let focusOnLoad (_: Event) =
+            withTerminalFrame terminalId (fun current ->
+                if obj.ReferenceEquals(Dom.document.activeElement, current) then
+                    focusVisibleFrame current)
 
         frame?addEventListener(
             "load",
@@ -181,7 +190,7 @@ let focusTerminalWhenReady terminalId =
             10_000
         |> ignore
 
-        frame.focus ())
+        focusVisibleFrame frame)
 
 let private lifecyclePresentation lifecycle =
     match lifecycle with
@@ -459,6 +468,7 @@ let view state callbacks =
             "terminal-pane"
 
     Html.div [
+        prop.id (WorkspaceLayout.paneId WorkspaceLayout.Pane.Terminal)
         prop.className paneClass
         prop.hidden (not state.IsOpen)
         prop.role "region"

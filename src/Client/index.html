@@ -946,6 +946,48 @@
                 border-bottom: 1px solid #313244;
             }
         }
+        .workspace-tabs[hidden] { display: none; }
+        .workspace-single-header {
+            height: 72px;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            grid-template-rows: 36px 36px;
+            gap: 0 8px;
+            padding: 0 8px;
+        }
+        .workspace-single-header .header-left { min-width: 0; overflow: hidden; }
+        .workspace-single-header .header-center,
+        .workspace-single-header .deploy-branch,
+        .workspace-single-header .header-controls > :not(.workspace-mode-toggle) { display: none; }
+        .workspace-context { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .workspace-preference-error { color: #f38ba8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .workspace-tabs { grid-column: 1 / -1; display: flex; gap: 4px; align-items: center; min-width: 0; }
+        .workspace-tab { flex: 1 1 0; min-width: 0; }
+        .workspace-tab .canvas-badge { margin-left: 4px; }
+        .workspace-tab:focus-visible,
+        .workspace-mode-toggle:focus-visible { outline: 2px solid #89b4fa; outline-offset: 1px; }
+        .app-layout.workspace-single {
+            flex-direction: row;
+            height: calc(100vh - 72px);
+            height: calc(100dvh - 72px);
+            margin-top: 72px;
+        }
+        .app-layout.workspace-single > .canvas-pane.open { flex: 1 1 0; min-width: 0; min-height: 0; }
+        .app-layout.workspace-single > .canvas-pane:not(.open),
+        .app-layout.workspace-single > .dashboard[hidden] { display: none; }
+        .app-layout.workspace-single > .dashboard,
+        .app-layout.workspace-single > .canvas-pane { transition: none; }
+        .workspace-single .canvas-width-group { display: none; }
+        .workspace-single-overlays .modal-overlay { align-items: flex-start; padding: 8px; }
+        .workspace-single-overlays .modal-dialog {
+            display: flex;
+            flex-direction: column;
+            max-height: calc(100vh - 16px);
+            max-height: calc(100dvh - 16px);
+        }
+        .workspace-single-overlays .modal-body { min-height: 0; overflow-y: auto; }
+        .workspace-single-overlays .modal-header,
+        .workspace-single-overlays .modal-footer { flex-shrink: 0; }
         .canvas-tab-bar {
             display: flex;
             justify-content: space-between;

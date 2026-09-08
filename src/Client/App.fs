@@ -105,6 +105,7 @@ let init () =
       AutoSyncPending = Set.empty
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
+      Workspace = WorkspaceLayout.empty
       TerminalPaneOpen = false
       TerminalPaneTarget = None
       EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
@@ -120,6 +121,11 @@ let init () =
       OverviewHistoryRequestInFlight = None
       EmbeddedTerminalPollInFlight = false },
     Cmd.batch [
+        Cmd.OfFunc.either
+            WorkspaceLayout.readMode
+            ()
+            WorkspaceModeLoaded
+            (fun _ -> WorkspacePreferenceFailed "Could not restore the view preference. Desktop layout is being used.")
         fetchWorktrees ()
         fetchSyncStatus ()
         Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp)
@@ -184,7 +190,8 @@ let terminalAction (wt: WorktreeStatus) =
 
 let targetEmbeddedTerminal path model =
     { model with
-        TerminalPaneOpen = true
+        Workspace.ActivePane = WorkspaceLayout.Pane.Terminal
+        TerminalPaneOpen = model.Workspace.Mode = WorkspaceLayout.Mode.Desktop || model.TerminalPaneOpen
         TerminalPaneTarget = Some path }
 
 let private targetEmbeddedTerminalStart startState path model =
@@ -225,11 +232,14 @@ let private beginFocusedEmbeddedTerminalStart path model =
     targetFocusedEmbeddedTerminalLaunch path model,
     alreadyStarting
 
-let private saveTerminalPaneOpenCmd isOpen =
-    Cmd.OfAsync.attempt
-        (fun () -> worktreeApi.Value.saveTerminalPaneOpen isOpen)
-        ()
-        (fun _ -> NoOp)
+let private saveTerminalPaneOpenCmd isOpen model =
+    match model.Workspace.Mode with
+    | WorkspaceLayout.Mode.OnePane -> Cmd.none
+    | WorkspaceLayout.Mode.Desktop ->
+        Cmd.OfAsync.attempt
+            (fun () -> worktreeApi.Value.saveTerminalPaneOpen isOpen)
+            ()
+            (fun _ -> NoOp)
 
 let private focusEmbeddedTerminalCmd terminalId =
     Cmd.ofEffect (fun _ -> TerminalPane.focusTerminal terminalId)
@@ -238,14 +248,14 @@ let private focusEmbeddedTerminalWhenReadyCmd terminalId =
     Cmd.ofEffect (fun _ ->
         TerminalPane.focusTerminalWhenReady terminalId)
 
-let private launchEmbeddedTerminalCmd path start =
+let private launchEmbeddedTerminalCmd model path start =
     Cmd.batch [
         Cmd.OfAsync.either
             start
             ()
             (fun result -> EmbeddedTerminalStarted(path, result))
             (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
-        saveTerminalPaneOpenCmd true
+        saveTerminalPaneOpenCmd true model
     ]
 
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
@@ -270,6 +280,38 @@ let private focusDashboard: Cmd<Msg> =
 
 let update msg model =
     match msg with
+    | SetWorkspaceMode mode ->
+        let updated =
+            { model with
+                Workspace.Mode = mode
+                Workspace.PreferenceError = None }
+        updated,
+        Cmd.batch [
+            Cmd.OfFunc.either
+                WorkspaceLayout.saveMode
+                mode
+                (fun () -> NoOp)
+                (fun _ -> WorkspacePreferenceFailed "Could not save the view preference. This layout will not be remembered after reloading.")
+            CanvasUpdate.syncVisibleDocCmd updated
+        ]
+    | WorkspaceModeLoaded mode ->
+        let updated = { model with Workspace.Mode = mode }
+        updated, CanvasUpdate.syncVisibleDocCmd updated
+    | WorkspacePreferenceFailed error ->
+        { model with Workspace.PreferenceError = Some error }, Cmd.none
+    | SelectWorkspacePane pane ->
+        let updated, syncCmd =
+            match pane, model.Workspace.Mode with
+            | WorkspaceLayout.Pane.Canvas, WorkspaceLayout.Mode.OnePane ->
+                CanvasUpdate.toggleCanvasPane model
+            | _ ->
+                let updated = { model with Workspace.ActivePane = pane }
+                updated, CanvasUpdate.syncVisibleDocCmd updated
+        updated,
+        Cmd.batch [
+            syncCmd
+            Cmd.ofEffect (fun _ -> WorkspaceLayout.focusTab pane)
+        ]
     | DataLoaded (response, now) ->
         match model.AppVersion with
         | Some v when v <> response.AppVersion ->
@@ -327,7 +369,8 @@ let update msg model =
                 changedDocs
                 |> List.filter (fun (scopedKey, filename) -> CanvasState.canvasDocKind repos scopedKey filename = Some AgentDoc)
             let autoDisplayTarget =
-                if isIdle && not (List.isEmpty agentChangedDocs)
+                if model.Workspace.Mode = WorkspaceLayout.Mode.Desktop
+                   && isIdle && not (List.isEmpty agentChangedDocs)
                 then findMostRecentChangedDoc repos agentChangedDocs
                 else None
             // Delivery signal for a queued canvas message — see CanvasAwareness.clearWaitingOnDelivery.
@@ -335,7 +378,7 @@ let update msg model =
             // change must not dismiss the banner (that would falsely report delivery). This is the
             // success edge the wall-clock timer used to (wrongly) report as a failure.
             let canvasSendState = clearWaitingOnDelivery model.Canvas.CanvasSendState agentChangedDocs
-            let canvasShowingDoc = model.Canvas.CanvasPaneOpen && Option.isSome (CanvasUpdate.activeVisibleDoc model)
+            let canvasShowingDoc = CanvasUpdate.isPaneVisible model && Option.isSome (CanvasUpdate.activeVisibleDoc model)
             let repos, autoExpanded =
                 match autoDisplayTarget with
                 | Some (scopedKey, _) when not canvasShowingDoc -> expandRepoOwning scopedKey repos
@@ -401,8 +444,7 @@ let update msg model =
                     if List.isEmpty allPaths then Cmd.none
                     else Cmd.OfAsync.perform worktreeApi.Value.getBridgeLiveness allPaths BridgeLivenessLoaded
                 let visibleSyncCmd =
-                    if updatedModel.Canvas.CanvasPaneOpen then CanvasUpdate.syncVisibleDocCmd updatedModel
-                    else Cmd.none
+                    CanvasUpdate.syncVisibleDocCmd updatedModel
                 let seedSaveCmd =
                     if updatedModel.Canvas.LastViewedHashes <> model.Canvas.LastViewedHashes then
                         saveLastViewedHashesCmd updatedModel.Canvas.LastViewedHashes
@@ -479,7 +521,7 @@ let update msg model =
             |> Option.defaultValue Cmd.none
 
         updated,
-        Cmd.batch [ saveTerminalPaneOpenCmd true; focusCmd ]
+        Cmd.batch [ saveTerminalPaneOpenCmd true model; focusCmd ]
     | OpenEmbeddedTerminal path
     | StartEmbeddedTerminal path ->
         let updated, alreadyStarting =
@@ -487,9 +529,10 @@ let update msg model =
 
         updated,
         if alreadyStarting then
-            saveTerminalPaneOpenCmd true
+            saveTerminalPaneOpenCmd true model
         else
             launchEmbeddedTerminalCmd
+                model
                 path
                 (fun () -> worktreeApi.Value.startEmbeddedTerminal path)
     | EmbeddedTerminalSnapshotChanged snapshot ->
@@ -521,7 +564,11 @@ let update msg model =
                         path
                         model.EmbeddedTerminalStarts
                 with
-                | Some TerminalPane.TerminalStartState.StartingAndFocus -> true
+                | Some TerminalPane.TerminalStartState.StartingAndFocus ->
+                    WorkspaceLayout.isVisible WorkspaceLayout.Pane.Terminal model.TerminalPaneOpen model.Workspace
+                    && TerminalPane.selectedWorktree model.TerminalPaneTarget model.FocusedElement = Some path
+                    && model.ConfirmModal = ConfirmModal.NoConfirm
+                    && not (CreateWorktreeModal.isOpen model.CreateModal)
                 | _ -> false
 
             let updated =
@@ -580,9 +627,13 @@ let update msg model =
     | EmbeddedTerminalCloseFailed ->
         model, fetchEmbeddedTerminals worktreeApi
     | ToggleTerminalPane ->
-        let isOpen = not model.TerminalPaneOpen
-        { model with TerminalPaneOpen = isOpen },
-        saveTerminalPaneOpenCmd isOpen
+        match model.Workspace.Mode with
+        | WorkspaceLayout.Mode.OnePane ->
+            { model with Workspace.ActivePane = WorkspaceLayout.Pane.Terminal }, Cmd.none
+        | WorkspaceLayout.Mode.Desktop ->
+            let isOpen = not model.TerminalPaneOpen
+            { model with TerminalPaneOpen = isOpen },
+            saveTerminalPaneOpenCmd isOpen model
     | EmbeddedTerminalClosed(_, before, snapshot) ->
         { model with
             EmbeddedTerminals = snapshot
@@ -755,9 +806,10 @@ let update msg model =
 
         updated,
         if alreadyStarting then
-            saveTerminalPaneOpenCmd true
+            saveTerminalPaneOpenCmd true model
         else
             launchEmbeddedTerminalCmd
+                model
                 path
                 (fun () -> worktreeApi.Value.resumeSession path)
 
@@ -766,6 +818,7 @@ let update msg model =
         | Some(path, action) ->
             targetEmbeddedTerminalLaunch path model,
             launchEmbeddedTerminalCmd
+                model
                 path
                 (fun () ->
                     worktreeApi.Value.launchAction
@@ -787,6 +840,7 @@ let update msg model =
                 ActionCooldowns = model.ActionCooldowns.Add path },
             Cmd.batch [
                 launchEmbeddedTerminalCmd
+                    model
                     path
                     (fun () ->
                         worktreeApi.Value.launchAction
@@ -845,7 +899,9 @@ let update msg model =
             let m, retargetCmd = CanvasUpdate.applyFocus true newFocus model
             m, Cmd.batch (extra @ [ retargetCmd; scrollToFocus scrollHint newFocus ])
         match key with
-        | "Escape" when Option.isSome model.SelectedOverviewGroup ->
+        | "Escape"
+            when Option.isSome model.SelectedOverviewGroup
+                 && WorkspaceLayout.isVisible WorkspaceLayout.Pane.Worktrees true model.Workspace ->
             // Esc closes the drill-down breakdown panel when a group is selected.
             { model with SelectedOverviewGroup = None }, Cmd.none
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
@@ -863,7 +919,9 @@ let update msg model =
             focusWithRetarget (navigateToLast model.Repos) ScrollToBottom []
         | "Escape" ->
             let newFocus = reclaimFocusTarget model.Repos model.FocusedElement
-            { model with FocusedElement = newFocus },
+            { model with
+                FocusedElement = newFocus
+                Workspace.ActivePane = WorkspaceLayout.Pane.Worktrees },
             Cmd.batch [ focusDashboard; scrollToFocus Normal newFocus ]
         | _ when hasModifier ->
             model, Cmd.none
@@ -980,14 +1038,14 @@ let update msg model =
     | SelectCanvasDoc (scopedKey, filename) -> CanvasUpdate.selectCanvasDoc scopedKey filename model
 
     | FocusOverviewCard scopedKey ->
-        let openPane = not model.Canvas.CanvasPaneOpen
+        let paneModel, paneCmd = CanvasUpdate.openCanvasPane model
         let repos, expanded = expandRepoOwning scopedKey model.Repos
         let retargetedModel, retargetCmd =
-            { model with Repos = repos; Canvas.CanvasPaneOpen = true }
+            { paneModel with Repos = repos }
             |> CanvasUpdate.applyFocus true (Some (Card scopedKey))
         retargetedModel,
         Cmd.batch [
-            if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
+            paneCmd
             if expanded then saveCollapsedReposCmd repos
             retargetCmd
         ]
@@ -1031,6 +1089,11 @@ let update msg model =
 
     | DismissCanvasDocError -> CanvasUpdate.dismissCanvasDocError model
 
+    | MarkDocViewed (scopedKey, filename)
+        when model.Workspace.Mode = WorkspaceLayout.Mode.OnePane
+             && (not (CanvasUpdate.isPaneVisible model)
+                 || CanvasUpdate.activeVisibleDoc model <> Some (scopedKey, filename)) ->
+        model, Cmd.none
     | MarkDocViewed (scopedKey, filename) ->
         let updatedHashes = markDocViewed model.Repos model.Canvas.LastViewedHashes scopedKey filename
         if updatedHashes = model.Canvas.LastViewedHashes then
@@ -1109,7 +1172,9 @@ let appSubscriptions (model: Model) : Sub<Msg> =
           [ "focus-reclaim" ], focusReclaim ]
 
     let subs =
-        if model.OverviewPanelOpen && OverviewBand.hasAgentGroups model.Repos then
+        if model.OverviewPanelOpen
+           && WorkspaceLayout.isVisible WorkspaceLayout.Pane.Worktrees true model.Workspace
+           && OverviewBand.hasAgentGroups model.Repos then
             ([ "overview-sticky" ], overviewSticky) :: baseSubs
         else
             baseSubs
@@ -1181,13 +1246,24 @@ let viewSystemMetrics (metrics: SystemMetrics option) =
         ]
 
 let viewAppHeader model dispatch =
+    let onePane = model.Workspace.Mode = WorkspaceLayout.Mode.OnePane
     Html.div [
-        prop.className "app-header"
+        prop.className (if onePane then "app-header workspace-single-header" else "app-header")
         prop.children [
             Html.div [
                 prop.className "header-left"
                 prop.children [
-                    viewSystemMetrics model.SystemMetrics
+                    if onePane then WorkspaceView.context model
+                    else viewSystemMetrics model.SystemMetrics
+                    match model.Workspace.PreferenceError with
+                    | Some error ->
+                        Html.span [
+                            prop.className "workspace-preference-error"
+                            prop.role "alert"
+                            prop.title error
+                            prop.text error
+                        ]
+                    | None -> ()
                 ]
             ]
             Html.div [
@@ -1210,6 +1286,7 @@ let viewAppHeader model dispatch =
                     Html.div [
                         prop.className "header-controls"
                         prop.children [
+                            WorkspaceView.modeButton model dispatch
                             Html.button [
                                 prop.className "ctrl-btn"
                                 yield! noFocusProps
@@ -1255,6 +1332,7 @@ let viewAppHeader model dispatch =
                     ]
                 ]
             ]
+            WorkspaceView.tabs model dispatch
         ]
     ]
 
@@ -1264,7 +1342,10 @@ let private isEditableEventTarget (e: Browser.Types.KeyboardEvent) =
     | None -> false
 
 let view model dispatch =
-    let terminalPaneOpen = model.TerminalPaneOpen
+    let onePane = model.Workspace.Mode = WorkspaceLayout.Mode.OnePane
+    let terminalPaneOpen =
+        WorkspaceLayout.isVisible WorkspaceLayout.Pane.Terminal model.TerminalPaneOpen model.Workspace
+    let canvasPaneOpen = CanvasUpdate.isPaneVisible model
 
     let workspaceWidthClass =
         match model.Canvas.WorkspaceWidth with
@@ -1272,15 +1353,17 @@ let view model dispatch =
         | WorkspaceWidth.WideCanvas -> "workspace-wide-canvas"
 
     let dashboardClass =
-        match model.Canvas.CanvasPaneOpen with
+        match canvasPaneOpen with
         | true -> "dashboard canvas-open"
         | false -> "dashboard"
 
     let layoutClass =
         [ "app-layout"
-          if model.Canvas.CanvasPaneOpen then "canvas-open"
-          if model.Canvas.CanvasPaneOpen then workspaceWidthClass
-          if not terminalPaneOpen then "terminal-hidden" ]
+          if onePane then "workspace-single"
+          else
+              if canvasPaneOpen then "canvas-open"
+              if canvasPaneOpen then workspaceWidthClass
+              if not terminalPaneOpen then "terminal-hidden" ]
         |> String.concat " "
 
     let cardProps: CardViewProps =
@@ -1291,7 +1374,7 @@ let view model dispatch =
           ActionCooldowns = model.ActionCooldowns
           AutoSyncPending = model.AutoSyncPending
           CanvasEvents = model.Canvas.CanvasEvents
-          CanvasPaneOpen = model.Canvas.CanvasPaneOpen }
+          CanvasPaneOpen = canvasPaneOpen }
 
     let cardCallbacks: CardCallbacks =
         { FocusCard = fun key -> dispatch (SetFocus (Some (Card key)))
@@ -1312,7 +1395,9 @@ let view model dispatch =
 
     let dashboardEl =
         Html.div [
+            prop.id (WorkspaceLayout.paneId WorkspaceLayout.Pane.Worktrees)
             prop.className dashboardClass
+            prop.hidden (not (WorkspaceLayout.isVisible WorkspaceLayout.Pane.Worktrees true model.Workspace))
             prop.tabIndex 0
             prop.autoFocus true
             prop.onKeyDown (fun e ->
@@ -1349,9 +1434,6 @@ let view model dispatch =
                     ]
 
                 OverviewViews.schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
-
-                CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
-                ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
             ]
         ]
 
@@ -1397,6 +1479,13 @@ let view model dispatch =
         Html.div [
             prop.className layoutClass
             prop.children [ terminalEl; canvasEl; dashboardEl ]
+        ]
+        Html.div [
+            prop.className (if onePane then "workspace-overlays workspace-single-overlays" else "workspace-overlays")
+            prop.children [
+                CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
+                ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
+            ]
         ]
     ]
 
