@@ -1062,7 +1062,10 @@ let internal worktreeApiWithLaunch
                       // compiler flags this match when a new provider case is added.
                       let sessionId =
                           match provider |> Option.defaultValue CodingToolProvider.Default with
-                          | CodingToolProvider.CopilotCli ->
+                          // Both resume by stored session id: `copilot --resume <id>` and
+                          // `claude --resume <id>` take the same id their status reports carry.
+                          | CodingToolProvider.CopilotCli
+                          | CodingToolProvider.ClaudeCode ->
                               activityStore
                               |> Option.bind _.LatestSessionIdForWorktree(PathUtils.toWorktreePath path)
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)

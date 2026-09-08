@@ -431,6 +431,10 @@ type ParseReportTests() =
         Assert.That(parseErr { baseReq "turn_started" with provider = "openai" }, Does.Contain "provider")
 
     [<Test>]
+    member _.``claude_code is accepted as a provider``() =
+        Assert.That((parseOk { baseReq "turn_started" with provider = "claude_code" }).Provider, Is.EqualTo ClaudeCode)
+
+    [<Test>]
     member _.``a malformed occurredAt is rejected``() =
         Assert.That(parseErr { baseReq "turn_started" with occurredAt = "not-a-date" }, Does.Contain "timestamp")
 

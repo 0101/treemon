@@ -84,10 +84,12 @@ let private parseStatus =
 let private providerText =
     function
     | CopilotCli -> "copilot_cli"
+    | ClaudeCode -> "claude_code"
 
 let private parseProvider =
     function
     | "copilot_cli" -> CopilotCli
+    | "claude_code" -> ClaudeCode
     | other -> failwithf "SessionActivityStore: unknown provider text %A" other
 
 /// A `string option` as a parameter value: `Some s` binds the text, `None` binds SQL NULL.

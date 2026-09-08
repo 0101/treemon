@@ -108,11 +108,13 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 ### Coding Tool Detection
 
-Coding-tool status is **pushed** by the Copilot CLI extension, not parsed from session log files —
-the per-provider log-parsing detectors (`ClaudeDetector`, `CopilotDetector`, `VsCodeCopilotDetector`,
-`getStatusFromFiles`) have been **removed**. The extension observes the SDK session event stream and
-POSTs lifecycle events to the server, which folds them into live per-session state and collapses each
-worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). Explicit background-agent
+Coding-tool status is **pushed** by each provider, not parsed from session log files — the
+per-provider log-parsing detectors (`ClaudeDetector`, `CopilotDetector`, `VsCodeCopilotDetector`,
+`getStatusFromFiles`) have been **removed**. The Copilot CLI extension observes the SDK session event
+stream; Claude Code has no extension host to observe from the inside, so it reports through hooks
+(`src/ClaudeHooks/`). Both POST the same lifecycle events to the server, which folds them into live
+per-session state and collapses each worktree's sessions in `CodingToolStatus.fs`
+(`fromPushSessions`). Explicit background-agent
 lifecycle events are folded into process-local per-tool clocks so a root turn cannot settle Idle
 while delegated agents are still running. The clocks are intentionally forgotten on a Treemon
 restart in exchange for a much simpler persistence model. See

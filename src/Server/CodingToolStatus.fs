@@ -22,6 +22,7 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
             | true, elem ->
                 match elem.GetString().ToLowerInvariant() with
                 | "copilot" -> Some CopilotCli
+                | "claude" -> Some ClaudeCode
                 | other ->
                     Log.log "CodingTool" $"Unknown/unsupported codingTool value '{other}' in {configPath} — using the default"
                     None
@@ -46,12 +47,13 @@ type CodingToolResult =
       LastActivity: DateTimeOffset option }
 
 /// Wraps an arbitrary argument in a provider-aware skill invocation. The Copilot CLI uses the
-/// natural-language "use {skill} skill with {arg}" form. Shared by actionPrompt (FixPr/FixBuild) and
-/// the worktree-create auto-launch flow so both stay byte-identical. Provider-matched so a future
-/// provider must supply its own form.
+/// natural-language "use {skill} skill with {arg}" form; Claude Code invokes a skill as a slash
+/// command. Shared by actionPrompt (FixPr/FixBuild) and the worktree-create auto-launch flow so both
+/// stay byte-identical. Provider-matched so a future provider must supply its own form.
 let skillInvocation (provider: CodingToolProvider option) (skill: string) (arg: string) =
     match provider |> Option.defaultValue CodingToolProvider.Default with
     | CopilotCli -> $"use {skill} skill with {arg}"
+    | ClaudeCode -> $"/{skill} {arg}"
 
 let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     match action with

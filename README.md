@@ -27,7 +27,7 @@ When orchestrating massive parallel work by agents (like Claude Code or Copilot)
 
 Point Treemon at one or more directories, and it runs a lightweight background polling loop (reading git, CLI tools, and file mtimes) to track:
 
-- **AI Agent Status:** Claude Code and Copilot session tracking (Working / Waiting / Done / Idle)
+- **AI Agent Status:** Claude Code and Copilot session tracking (Working / Waiting / Done / Idle), including delegated sub-agents. Copilot reports through its session extension; Claude Code through hooks — see [`src/ClaudeHooks`](src/ClaudeHooks/README.md). Set `{ "codingTool": "claude" }` in a worktree's `.treemon.json` to have Treemon launch and resume Claude there.
 - **Terminal Management:** Embedded terminals per worktree on every platform, plus spawning and focusing native Windows Terminal tabs on Windows
 - **Git State:** Dirty / behind-base indicators, persistent agent-driven auto-sync, and commit metrics
 - **PR Tracking:** Azure DevOps and GitHub PR badges, comment counts, and build results

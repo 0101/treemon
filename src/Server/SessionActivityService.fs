@@ -56,6 +56,7 @@ type SessionActivityRequest =
 let private parseProvider (s: string) : Result<CodingToolProvider, string> =
     match s with
     | "copilot_cli" -> Ok CopilotCli
+    | "claude_code" -> Ok ClaudeCode
     | other -> Error $"unknown provider '{other}'"
 
 let private parseTerminalSessionId (value: string option) : Result<TerminalSessionId option, string> =

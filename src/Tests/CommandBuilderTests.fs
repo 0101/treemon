@@ -35,6 +35,39 @@ type BuildInteractiveCommandTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type ClaudeCodeCommandTests() =
+
+    [<Test>]
+    member _.``an interactive prompt is positional``() =
+        let result = (build (Some CodingToolProvider.ClaudeCode) (Interactive "/pr https://github.com/org/repo/pull/7")).AsShellString
+        Assert.That(result, Is.EqualTo("claude --permission-mode bypassPermissions '/pr https://github.com/org/repo/pull/7'"))
+
+    [<Test>]
+    member _.``a non-interactive prompt goes behind -p``() =
+        let result = (build (Some CodingToolProvider.ClaudeCode) (NonInteractive "summarise the diff")).AsShellString
+        Assert.That(result, Is.EqualTo("claude --permission-mode bypassPermissions -p 'summarise the diff'"))
+
+    [<Test>]
+    member _.``resume by id, and by --continue without one``() =
+        Assert.Multiple(fun () ->
+            Assert.That(
+                (build (Some CodingToolProvider.ClaudeCode) (Resume(Some "abc-123"))).AsShellString,
+                Is.EqualTo("claude --permission-mode bypassPermissions --resume 'abc-123'"))
+
+            Assert.That(
+                (build (Some CodingToolProvider.ClaudeCode) (Resume None)).AsShellString,
+                Is.EqualTo("claude --permission-mode bypassPermissions --continue")))
+
+    // A session id reaches this from stored activity, which arrives over HTTP, so it stays inside
+    // the quoted argument rather than becoming a second command.
+    [<Test>]
+    member _.``a hostile resume id stays inside the quoted argument``() =
+        let inv = build (Some CodingToolProvider.ClaudeCode) (Resume(Some "$(calc); '"))
+        Assert.That(inv.AsShellString, Is.EqualTo("claude --permission-mode bypassPermissions --resume '$(calc); '''"))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type ResumeCommandTests() =
 
     [<Test>]
@@ -130,6 +163,11 @@ type SkillInvocationTests() =
         let arg = "first line\nsecond line"
         let result = skillInvocation (Some CodingToolProvider.CopilotCli) "investigate" arg
         Assert.That(result, Is.EqualTo("use investigate skill with first line\nsecond line"))
+
+    [<Test>]
+    member _.``Claude Code invokes a skill as a slash command``() =
+        let result = skillInvocation (Some CodingToolProvider.ClaudeCode) "investigate" "why is the build slow"
+        Assert.That(result, Is.EqualTo("/investigate why is the build slow"))
 
     // Locks the refactor's byte-identical guarantee: actionPrompt's FixPr/FixBuild
     // cases must delegate to skillInvocation with the "pr"/"fix-build" skill names.
