@@ -78,6 +78,17 @@ the persistent top-bar **Terminal** control hides or shows the pane, using the s
 as the **Canvas** control. Middle-clicking a tab invokes the same exact-terminal close action as its
 close button.
 
+Beside **New**, a selected running terminal with a validated attachment endpoint shows
+**Reconnect view**. The action replaces only that terminal's browser iframe and attachment while
+preserving its terminal ID, endpoint, selected tab, shell, agent, and every sibling iframe. It is
+hidden for an empty selection, an interrupted terminal, or a rejected endpoint. The replacement
+restores iframe focus only when that view generation is still current, the terminal remains
+selected, and the pane is visible; selection changes, closure, and newer reconnects make late load
+work inert. Reconnect does not call start, close, resume, command-input, host-replacement, or process
+APIs, and an iframe load does not create a connected-success state. The new attachment receives the
+host's bounded raw replay, so the action remains a recovery affordance rather than a guarantee that
+prior terminal mouse mode can be reconstructed.
+
 ### Launch routing and command startup
 
 The card's `>` / Enter action remains the explicit native Windows Terminal choice, and its `+`
@@ -376,6 +387,11 @@ while replacement runs asynchronously, then alone applies the replacement's regi
 The client stores active terminal IDs and in-flight start state per worktree. Registry refreshes
 retain exact selections while IDs remain valid, choose the same-worktree neighbor after a close,
 and preserve the selected sibling ordinal across replacement.
+It also stores a client-only view generation for terminals whose iframe is manually reconnected.
+The generation participates only in the React iframe key; advancing one generation remounts that
+iframe without changing the authoritative registry. Iframe load completion returns through Elmish,
+and the focus effect re-resolves the current DOM node and checks its generation and visibility
+before focusing it.
 Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
 port into the loopback dashboard origins supplied to `EmbeddedTerminal`. Production omits the
 option and allows only the configured server origin aliases, so the terminal client never infers a
@@ -467,6 +483,9 @@ ports, and state.
   mailboxes responsive; type-only diagnostics preserve the no-terminal-content logging boundary.
 - **One upstream and one browser writer per terminal:** the host preserves each shell across browser
   reconnects without defining multi-writer input semantics.
+- **Client-only manual view reconnect:** a per-terminal React key generation replaces one browser
+  attachment without introducing a lifecycle API or claiming connection health. Generation,
+  selection, and visibility guards prevent stale load focus from targeting a newer or hidden view.
 - **Separate state from proxy hosting:** the replay/attachment mailbox remains independently
   testable while HTTP/WebSocket hosting shares one loopback-only Kestrel bootstrap with the control
   API, preventing security-sensitive host configuration from drifting.
@@ -591,11 +610,12 @@ ports, and state.
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
 | `src/Server/Program.fs` | Host client and replacement-loop lifecycle without terminal shutdown on server stop |
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
+| `src/Client/AppTypes.fs` and `src/Client/App.fs` | Reconnect view generation, Elmish messages, guarded load completion, and focus effect |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus real proxy command delivery, control rejection, UTF-8 frame boundaries, replacement, crash, security, and cleanup coverage |
 | `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
 | `src/Tests/EmbeddedLaunchEndToEndTests.fs`, `src/Tests/TestAgentRecorder`, and `scripts/verify-embedded-launch-routing.ps1` | Reproducible isolated real-host launch matrix, exact argv recorder, raw route evidence, forced-delivery rollback, native HWND preservation, and exact cleanup |
-| `src/Tests/TerminalPaneTests.fs` | Exact server-returned terminal selection and direct Canvas launch routing |
+| `src/Tests/TerminalPaneTests.fs` and `src/Tests/WorkspaceLayoutTests.fs` | Terminal selection, reconnect generation/focus guards, and selected-only iframe replacement |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
 | `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |
 

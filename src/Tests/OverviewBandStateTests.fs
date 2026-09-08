@@ -63,6 +63,7 @@ let private modelWith repos =
       EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
       ActiveEmbeddedTerminals = Map.empty
       EmbeddedTerminalStarts = Map.empty
+      EmbeddedTerminalViewStates = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = true
       OverviewAgentsStuck = false

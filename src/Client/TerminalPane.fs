@@ -14,17 +14,24 @@ type TerminalStartState =
     | StartingAndFocus
     | Failed of error: string
 
+type TerminalViewState =
+    { Generation: int
+      FocusAfterLoad: bool }
+
 type TerminalPaneState =
     { IsOpen: bool
       Snapshot: EmbeddedTerminalSnapshot
       ActiveTerminal: EmbeddedTerminalId option
       SelectedWorktree: WorktreePath option
-      StartState: TerminalStartState option }
+      StartState: TerminalStartState option
+      ViewStates: Map<EmbeddedTerminalId, TerminalViewState> }
 
 type TerminalPaneCallbacks =
     { SelectTab: EmbeddedTerminalId -> unit
       CloseTab: EmbeddedTerminalId -> unit
-      StartTerminal: WorktreePath -> unit }
+      StartTerminal: WorktreePath -> unit
+      ReconnectView: EmbeddedTerminalId -> unit
+      ViewLoaded: EmbeddedTerminalId -> int -> unit }
 
 let private samePath left right =
     Shared.PathUtils.pathEquals
@@ -111,6 +118,61 @@ let setStartState path state states =
 let clearStartState path states =
     removePath path states
 
+let viewGeneration terminalId states =
+    states
+    |> Map.tryFind terminalId
+    |> Option.map _.Generation
+    |> Option.defaultValue 0
+
+let reconnectView terminalId states =
+    let generation = viewGeneration terminalId states + 1
+    let updated =
+        states
+        |> Map.add
+            terminalId
+            { Generation = generation
+              FocusAfterLoad = true }
+
+    updated, generation
+
+let completeViewLoad terminalId generation states =
+    match states |> Map.tryFind terminalId with
+    | Some state
+        when state.Generation = generation
+             && state.FocusAfterLoad ->
+        let updated =
+            states
+            |> Map.add
+                terminalId
+                { state with FocusAfterLoad = false }
+
+        updated, true
+    | Some _
+    | None -> states, false
+
+let cancelViewFocus terminalId states =
+    match states |> Map.tryFind terminalId with
+    | Some state when state.FocusAfterLoad ->
+        states
+        |> Map.add
+            terminalId
+            { state with FocusAfterLoad = false }
+    | Some _
+    | None -> states
+
+let cancelAllViewFocus states =
+    states
+    |> Map.map (fun _ state ->
+        { state with FocusAfterLoad = false })
+
+let cancelOtherViewFocus selectedTerminal states =
+    states
+    |> Map.map (fun terminalId state ->
+        if terminalId = selectedTerminal then
+            state
+        else
+            { state with FocusAfterLoad = false })
+
 let private startInFlight state =
     match state with
     | TerminalStartState.Starting
@@ -145,43 +207,92 @@ let safeEndpoint (endpoint: string) =
             Some endpoint
         | _ -> None
 
+let tryReconnectableTab activeTerminal snapshot =
+    activeTerminal
+    |> Option.bind (fun terminalId ->
+        tryFindTab terminalId snapshot)
+    |> Option.filter (fun tab ->
+        match tab.Lifecycle with
+        | EmbeddedTerminalLifecycle.Running endpoint ->
+            safeEndpoint endpoint |> Option.isSome
+        | EmbeddedTerminalLifecycle.Interrupted _ -> false)
+
+let reconcileViewStates snapshot states =
+    let reconnectableIds =
+        snapshot.Tabs
+        |> List.choose (fun tab ->
+            match tab.Lifecycle with
+            | EmbeddedTerminalLifecycle.Running endpoint
+                when safeEndpoint endpoint |> Option.isSome ->
+                Some tab.Id
+            | EmbeddedTerminalLifecycle.Running _
+            | EmbeddedTerminalLifecycle.Interrupted _ -> None)
+        |> Set.ofList
+
+    states
+    |> Map.filter (fun terminalId _ ->
+        reconnectableIds.Contains terminalId)
+
 let private terminalFrameId terminalId =
     $"terminal-iframe-{EmbeddedTerminalId.value terminalId}"
 
-let private withTerminalFrame terminalId action =
+let private frameMatchesGeneration generation (frame: HTMLElement) =
+    frame.getAttribute("data-terminal-view-generation")
+    |> Option.ofObj
+    |> Option.contains (string generation)
+
+let private frameIsVisible (frame: HTMLElement) =
+    not (frame.hasAttribute("hidden"))
+    && (frame.closest(".terminal-pane")
+        |> Option.exists (fun pane ->
+            not (pane.hasAttribute("hidden"))))
+
+let private withTerminalFrame terminalId acceptsFrame action =
     let rec tryResolve remainingAttempts =
         Dom.window?requestAnimationFrame(fun (_: float) ->
             match
                 Dom.document.getElementById(terminalFrameId terminalId)
                 |> Option.ofObj
             with
-            | Some frame -> action frame
-            | None when remainingAttempts > 1 ->
+            | Some frame when acceptsFrame frame -> action frame
+            | _ when remainingAttempts > 1 ->
                 tryResolve (remainingAttempts - 1)
-            | None -> ())
+            | _ -> ())
         |> ignore
 
     tryResolve 2
 
 let focusTerminal terminalId =
-    withTerminalFrame terminalId _.focus()
+    withTerminalFrame terminalId frameIsVisible _.focus()
 
-let focusTerminalWhenReady terminalId =
-    withTerminalFrame terminalId (fun frame ->
-        let focusOnLoad (_: Event) = frame.focus ()
+let focusTerminalView terminalId generation =
+    withTerminalFrame
+        terminalId
+        (fun frame ->
+            frameIsVisible frame
+            && frameMatchesGeneration generation frame)
+        _.focus()
 
-        frame?addEventListener(
-            "load",
-            focusOnLoad,
-            createObj [ "once" ==> true ])
+let focusTerminalWhenReady terminalId generation =
+    withTerminalFrame
+        terminalId
+        (frameMatchesGeneration generation)
+        (fun frame ->
+            let focusOnLoad (_: Event) =
+                focusTerminalView terminalId generation
 
-        Fable.Core.JS.setTimeout
-            (fun () ->
-                frame?removeEventListener("load", focusOnLoad))
-            10_000
-        |> ignore
+            frame?addEventListener(
+                "load",
+                focusOnLoad,
+                createObj [ "once" ==> true ])
 
-        frame.focus ())
+            Fable.Core.JS.setTimeout
+                (fun () ->
+                    frame?removeEventListener("load", focusOnLoad))
+                10_000
+            |> ignore
+
+            focusTerminalView terminalId generation)
 
 let private lifecyclePresentation lifecycle =
     match lifecycle with
@@ -299,6 +410,32 @@ let private header state callbacks =
             |> List.mapi (terminalTab callbacks state.ActiveTerminal))
         |> Option.defaultValue []
 
+    let reconnectViewButton =
+        match
+            state.Snapshot
+            |> tryReconnectableTab state.ActiveTerminal
+        with
+        | None -> Html.none
+        | Some tab ->
+            let terminalIndex =
+                state.Snapshot
+                |> tabsForWorktree tab.Worktree
+                |> List.tryFindIndex (fun candidate ->
+                    candidate.Id = tab.Id)
+                |> Option.defaultValue 0
+
+            let label = tabLabel terminalIndex tab
+            let worktreeName = WorktreePath.displayName tab.Worktree
+
+            Html.button [
+                prop.className "ctrl-btn terminal-reconnect-btn"
+                prop.ariaLabel $"Reconnect view for {label} in {worktreeName}"
+                prop.title "Reload this terminal view without restarting its shell or agent."
+                prop.onClick (fun _ ->
+                    callbacks.ReconnectView tab.Id)
+                prop.text "Reconnect view"
+            ]
+
     let newTerminalButton =
         match state.SelectedWorktree with
         | None -> Html.none
@@ -331,7 +468,10 @@ let private header state callbacks =
             ]
             Html.div [
                 prop.className "terminal-pane-actions"
-                prop.children [ newTerminalButton ]
+                prop.children [
+                    reconnectViewButton
+                    newTerminalButton
+                ]
             ]
         ]
     ]
@@ -421,6 +561,12 @@ let private runningIframes state callbacks =
                 let terminalId = tab.Id
                 let isActive =
                     state.ActiveTerminal = Some terminalId
+                let viewState =
+                    state.ViewStates
+                    |> Map.tryFind terminalId
+                let generation =
+                    state.ViewStates
+                    |> viewGeneration terminalId
 
                 let terminalIndex =
                     state.Snapshot
@@ -432,7 +578,7 @@ let private runningIframes state callbacks =
                 let label = tabLabel terminalIndex tab
 
                 Html.iframe [
-                    prop.key (EmbeddedTerminalId.value terminalId)
+                    prop.key $"{EmbeddedTerminalId.value terminalId}:{generation}"
                     prop.id (terminalFrameId terminalId)
                     prop.className (
                         if isActive then
@@ -444,9 +590,13 @@ let private runningIframes state callbacks =
                     prop.src src
                     prop.custom ("data-terminal-id", EmbeddedTerminalId.value terminalId)
                     prop.custom ("data-terminal-worktree", WorktreePath.value tab.Worktree)
+                    prop.custom ("data-terminal-view-generation", string generation)
                     prop.custom ("sandbox", "allow-scripts allow-same-origin")
                     prop.custom ("referrerpolicy", "no-referrer")
                     prop.custom ("scrolling", "no")
+                    if viewState |> Option.exists _.FocusAfterLoad then
+                        prop.onLoad (fun _ ->
+                            callbacks.ViewLoaded terminalId generation)
                 ])
         | EmbeddedTerminalLifecycle.Interrupted _ ->
             None)

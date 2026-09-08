@@ -493,9 +493,15 @@ type TerminalPaneDomTests() =
             let! tabCount = tabs.CountAsync()
             let! tabLabels = labels.AllTextContentsAsync()
             let selected = selectedTab this.Page
+            let reconnect = this.Page.Locator(".terminal-reconnect-btn")
             let! selectedLabel =
                 selected.Locator(".terminal-tab-label").TextContentAsync()
             let! selectedAria = selected.GetAttributeAsync("aria-selected")
+            let! reconnectCount = reconnect.CountAsync()
+            let! reconnectText = reconnect.TextContentAsync()
+            let! reconnectLabel = reconnect.GetAttributeAsync("aria-label")
+            let! reconnectTitle = reconnect.GetAttributeAsync("title")
+            let! reconnectClass = reconnect.GetAttributeAsync("class")
             let! iframeCount = iframes.CountAsync()
             let! activeIframeCount =
                 this.Page.Locator(".terminal-iframe-active").CountAsync()
@@ -528,12 +534,133 @@ type TerminalPaneDomTests() =
                 )
                 Assert.That(selectedLabel, Is.EqualTo(firstTerminalActivity))
                 Assert.That(selectedAria, Is.EqualTo("true"))
+                Assert.That(reconnectCount, Is.EqualTo(1))
+                Assert.That(reconnectText, Is.EqualTo("Reconnect view"))
+                Assert.That(
+                    reconnectLabel,
+                    Is.EqualTo(
+                        $"Reconnect view for {firstTerminalActivity} in feature-active"
+                    )
+                )
+                Assert.That(
+                    reconnectTitle,
+                    Is.EqualTo(
+                        "Reload this terminal view without restarting its shell or agent."
+                    )
+                )
+                Assert.That(reconnectClass, Does.Contain("ctrl-btn"))
+                Assert.That(reconnectClass, Does.Contain("terminal-reconnect-btn"))
                 Assert.That(iframeCount, Is.EqualTo(3))
                 Assert.That(activeIframeCount, Is.EqualTo(1))
                 Assert.That(scrollingValues, Is.All.EqualTo("no"))
                 Assert.That(geometry[0], Is.EqualTo(0.5).Within(0.03))
                 Assert.That(geometry[1], Is.InRange(34.0, 48.0))
                 Assert.That(geometry[2], Is.EqualTo(geometry[3]).Within(1.0)))
+        }
+
+    [<Test>]
+    member this.``Reconnect replaces only the selected iframe and preserves terminal identity``() =
+        task {
+            let selectedId = EmbeddedTerminalId.value firstTerminalId
+            let siblingId = EmbeddedTerminalId.value firstAlternateTerminalId
+            let hiddenId = EmbeddedTerminalId.value secondTerminalId
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    $"""() => {{
+                        const frames = Array.from(
+                            document.querySelectorAll('.terminal-iframe'));
+                        window.__terminalReconnectFrames =
+                            Object.fromEntries(
+                                frames.map(frame => [
+                                    frame.dataset.terminalId,
+                                    frame
+                                ]));
+                        window.__terminalReconnectSrc =
+                            window.__terminalReconnectFrames['{selectedId}']
+                                .getAttribute('src');
+                    }}""")
+
+            do! this.Page.Locator(".terminal-reconnect-btn").ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    $"""() => {{
+                        const current = document.querySelector(
+                            '[data-terminal-id="{selectedId}"]');
+                        return current
+                            && current !==
+                                window.__terminalReconnectFrames['{selectedId}']
+                            && current.dataset.terminalViewGeneration === '1';
+                    }}""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    $"""() =>
+                        document.activeElement?.dataset.terminalId ===
+                            '{selectedId}'""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let! facts =
+                this.Page.EvaluateAsync<string[]>(
+                    $"""() => {{
+                        const before = window.__terminalReconnectFrames;
+                        const current = document.querySelector(
+                            '[data-terminal-id="{selectedId}"]');
+                        const sibling = document.querySelector(
+                            '[data-terminal-id="{siblingId}"]');
+                        const hidden = document.querySelector(
+                            '[data-terminal-id="{hiddenId}"]');
+
+                        return [
+                            String(current !== before['{selectedId}']),
+                            String(!before['{selectedId}'].isConnected),
+                            String(
+                                sibling === before['{siblingId}']
+                                && sibling.isConnected),
+                            String(
+                                hidden === before['{hiddenId}']
+                                && hidden.isConnected),
+                            current.dataset.terminalId,
+                            String(
+                                current.getAttribute('src') ===
+                                    window.__terminalReconnectSrc),
+                            current.dataset.terminalViewGeneration,
+                            sibling.dataset.terminalViewGeneration,
+                            hidden.dataset.terminalViewGeneration,
+                            document.querySelector(
+                                '.terminal-tab.selected .terminal-tab-label')
+                                .textContent,
+                            String(
+                                document.querySelectorAll('.terminal-tab')
+                                    .length),
+                            String(
+                                document.querySelectorAll('.terminal-iframe')
+                                    .length)
+                        ];
+                    }}""")
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    facts,
+                    Is.EqualTo(
+                        [| "true"
+                           "true"
+                           "true"
+                           "true"
+                           selectedId
+                           "true"
+                           "1"
+                           "0"
+                           "0"
+                           firstTerminalActivity
+                           "2"
+                           "3" |])
+                )
+                Assert.That(startCalls, Is.Zero)
+                Assert.That(closeCalls, Is.Zero))
         }
 
     [<Test>]
@@ -580,6 +707,8 @@ type TerminalPaneDomTests() =
             let emptyState = this.Page.Locator(".terminal-pane-empty")
             let! emptyText = emptyState.TextContentAsync()
             let! mountedInEmptyState = framesStillMounted this.Page
+            let! emptyReconnectCount =
+                this.Page.Locator(".terminal-reconnect-btn").CountAsync()
 
             do!
                 emptyState
@@ -607,6 +736,7 @@ type TerminalPaneDomTests() =
                 Assert.That(selectedCount, Is.EqualTo(0))
                 Assert.That(emptyText, Does.Contain("feature-multidoc"))
                 Assert.That(mountedInEmptyState, Is.True)
+                Assert.That(emptyReconnectCount, Is.Zero)
                 Assert.That(startCalls, Is.EqualTo(1))
                 Assert.That(startedSelected, Is.EqualTo("Terminal 1"))
                 Assert.That(startedFrameCount, Is.EqualTo(4)))
@@ -627,11 +757,14 @@ type TerminalPaneDomTests() =
             let! mounted = framesStillMounted this.Page
             let! visibleTabs =
                 (tabFor this.Page "Terminal 1").CountAsync()
+            let! reconnectCount =
+                this.Page.Locator(".terminal-reconnect-btn").CountAsync()
 
             Assert.Multiple(fun () ->
                 Assert.That(error, Does.Contain("ttyd exited with code 1"))
                 Assert.That(visibleTabs, Is.EqualTo(1))
                 Assert.That(activeFrameCount, Is.EqualTo(0))
+                Assert.That(reconnectCount, Is.Zero)
                 Assert.That(mounted, Is.True))
         }
 
@@ -649,10 +782,13 @@ type TerminalPaneDomTests() =
                     .Locator(
                         "[data-terminal-worktree=\"Q:/code/TestProject/feature-stale\"]")
                     .CountAsync()
+            let! reconnectCount =
+                this.Page.Locator(".terminal-reconnect-btn").CountAsync()
 
             Assert.Multiple(fun () ->
                 Assert.That(error, Does.Contain("unsafe endpoint"))
-                Assert.That(unsafeIframeCount, Is.EqualTo(0)))
+                Assert.That(unsafeIframeCount, Is.EqualTo(0))
+                Assert.That(reconnectCount, Is.Zero))
         }
 
     [<Test>]
