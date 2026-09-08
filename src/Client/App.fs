@@ -1182,7 +1182,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
     // Document-level shortcuts remain available when focus is in the header, canvas pane, or body.
-    // Editable fields retain Escape, while Ctrl+P intentionally opens search from any app input.
+    // Editable fields retain Escape; Ctrl+P is handled globally unless another modal owns focus.
     let globalKeyboard (dispatch: Dispatch<Msg>) =
         let insideDashboard (el: Browser.Types.Element) =
             let ancestor: Browser.Types.Element = el?closest(".dashboard")
@@ -1190,16 +1190,16 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         let handler =
             fun (e: Browser.Types.Event) ->
                 let ke = e :?> Browser.Types.KeyboardEvent
-                if
-                    canOpenOverlay model
-                    && WorktreeSearch.isOpenShortcut
-                        ke.key
-                        ke.ctrlKey
-                        ke.metaKey
-                        ke.altKey
-                then
-                    ke.preventDefault()
-                    dispatch (WorktreeSearchMsg WorktreeSearch.Msg.Open)
+                if WorktreeSearch.isOpenShortcut ke.key ke.ctrlKey ke.metaKey ke.altKey then
+                    match activeOverlay model with
+                    | None ->
+                        ke.preventDefault()
+                        dispatch (WorktreeSearchMsg WorktreeSearch.Msg.Open)
+                    | Some ActiveOverlay.WorktreeSearch ->
+                        ke.preventDefault()
+                    | Some ActiveOverlay.Confirmation
+                    | Some ActiveOverlay.CreateWorktree ->
+                        ()
                 elif ke.key = "Escape" then
                     match Option.ofObj Dom.document.activeElement with
                     | Some el when insideDashboard el || isEditableElement el -> ()

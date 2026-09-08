@@ -482,24 +482,27 @@ let private resultView dispatch selected index (result: SearchResult) =
     ]
 
 let private inputKeyDown dispatch (event: Browser.Types.KeyboardEvent) =
-    let handle message =
+    let consume () =
         event.preventDefault()
         event.stopPropagation()
+
+    let handle message =
+        consume ()
         dispatch message
 
-    if
-        not (
-            emitJsExpr<bool>
-                event
-                "$0.isComposing === true || ($0.nativeEvent && $0.nativeEvent.isComposing === true)"
-        )
-    then
-        match event.key with
-        | "ArrowDown" -> handle (Msg.MoveSelection SelectionDirection.Down)
-        | "ArrowUp" -> handle (Msg.MoveSelection SelectionDirection.Up)
-        | "Enter" -> handle Msg.ChooseSelection
-        | "Escape" -> handle Msg.Close
-        | _ -> ()
+    let isComposing =
+        emitJsExpr<bool>
+            event
+            "$0.isComposing === true || ($0.nativeEvent && $0.nativeEvent.isComposing === true)"
+
+    match event.key with
+    | "Tab" -> consume ()
+    | _ when isComposing -> ()
+    | "ArrowDown" -> handle (Msg.MoveSelection SelectionDirection.Down)
+    | "ArrowUp" -> handle (Msg.MoveSelection SelectionDirection.Up)
+    | "Enter" -> handle Msg.ChooseSelection
+    | "Escape" -> handle Msg.Close
+    | _ -> ()
 
 let scrollSelectedIntoView () =
     Dom.window?requestAnimationFrame(fun (_: float) ->
@@ -558,8 +561,10 @@ let view dispatch repos state =
                                     prop.spellCheck false
                                     prop.value openState.Query
                                     prop.placeholder "Search branch, repository, or path..."
+                                    prop.role "combobox"
                                     prop.ariaLabel "Search worktrees"
                                     prop.custom ("aria-controls", "worktree-search-results")
+                                    prop.custom ("aria-expanded", "true")
                                     prop.custom ("aria-autocomplete", "list")
                                     if not results.IsEmpty then
                                         prop.custom (

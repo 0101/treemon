@@ -33,6 +33,10 @@ type DashboardTests() =
         page.EvaluateAsync<obj>(
             "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
 
+    let dispatchCtrlP (page: IPage) =
+        page.EvaluateAsync<bool>(
+            "() => { const event = new KeyboardEvent('keydown',{key:'p',ctrlKey:true,bubbles:true,cancelable:true}); document.activeElement.dispatchEvent(event); return event.defaultPrevented; }")
+
     override this.ContextOptions() =
         let opts = base.ContextOptions()
         opts.IgnoreHTTPSErrors <- true
@@ -4447,7 +4451,79 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Blocked Ctrl P leaves the browser shortcut unconsumed``() =
+    member this.``Open worktree search consumes Ctrl P and exposes combobox semantics``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Control+P")
+
+            let dialog = this.Page.Locator(".worktree-search-dialog")
+            let input = this.Page.Locator("#worktree-search-input")
+            let results = this.Page.Locator("#worktree-search-results")
+            do! dialog.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! defaultPrevented = dispatchCtrlP this.Page
+            let! dialogCount = dialog.CountAsync()
+            let! inputRole = input.GetAttributeAsync("role")
+            let! expanded = input.GetAttributeAsync("aria-expanded")
+            let! controls = input.GetAttributeAsync("aria-controls")
+            let! resultsRole = results.GetAttributeAsync("role")
+
+            Assert.Multiple(fun () ->
+                Assert.That(defaultPrevented, Is.True)
+                Assert.That(dialogCount, Is.EqualTo(1))
+                Assert.That(inputRole, Is.EqualTo("combobox"))
+                Assert.That(expanded, Is.EqualTo("true"))
+                Assert.That(controls, Is.EqualTo("worktree-search-results"))
+                Assert.That(resultsRole, Is.EqualTo("listbox")))
+
+            do! input.PressAsync("Escape")
+            do!
+                dialog.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Worktree search focus-lock keeps Tab on the input``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Control+P")
+
+            let dialog = this.Page.Locator(".worktree-search-dialog")
+            let input = this.Page.Locator("#worktree-search-input")
+            do! dialog.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            do! this.Page.Keyboard.PressAsync("Tab")
+            let! focusedAfterTab =
+                input.EvaluateAsync<bool>("element => document.activeElement === element")
+
+            do! this.Page.Keyboard.PressAsync("Shift+Tab")
+            let! focusedAfterShiftTab =
+                input.EvaluateAsync<bool>("element => document.activeElement === element")
+
+            Assert.Multiple(fun () ->
+                Assert.That(focusedAfterTab, Is.True)
+                Assert.That(focusedAfterShiftTab, Is.True))
+
+            do! input.PressAsync("Escape")
+            do!
+                dialog.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Create and confirmation modals leave Ctrl P unconsumed``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
             do! plusBtn.ClickAsync()
@@ -4455,15 +4531,32 @@ type DashboardTests() =
             let overlay = this.Page.Locator(".modal-overlay")
             do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let! defaultPrevented =
-                this.Page.EvaluateAsync<bool>(
-                    "() => { const event = new KeyboardEvent('keydown',{key:'p',ctrlKey:true,bubbles:true,cancelable:true}); document.dispatchEvent(event); return event.defaultPrevented; }"
-                )
-            let! searchCount = this.Page.Locator(".worktree-search-dialog").CountAsync()
+            let! createDefaultPrevented = dispatchCtrlP this.Page
+            let! createSearchCount = this.Page.Locator(".worktree-search-dialog").CountAsync()
 
             Assert.Multiple(fun () ->
-                Assert.That(defaultPrevented, Is.False)
-                Assert.That(searchCount, Is.Zero))
+                Assert.That(createDefaultPrevented, Is.False)
+                Assert.That(createSearchCount, Is.Zero))
+
+            do! this.Page.Locator(".modal-btn.cancel").ClickAsync()
+            do!
+                overlay.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+
+            do! this.Page.Locator(".wt-card .delete-btn").First.ClickAsync()
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! confirmationDefaultPrevented = dispatchCtrlP this.Page
+            let! confirmationSearchCount =
+                this.Page.Locator(".worktree-search-dialog").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(confirmationDefaultPrevented, Is.False)
+                Assert.That(confirmationSearchCount, Is.Zero))
 
             do! this.Page.Locator(".modal-btn.cancel").ClickAsync()
             do!
