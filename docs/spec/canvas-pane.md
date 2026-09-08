@@ -68,7 +68,8 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 ### Authoring runtime
 
 Every served document receives a zero-specificity dark typographic base, design tokens,
-`canvasSend`, link interception, Escape focus reclaim, and the selected-text
+`canvasSend`, link interception, the global keyboard bridge (Ctrl+P worktree search and Escape
+focus reclaim), and the selected-text
 Explain/Remove/Comment runtime. Authored rules always override the base theme.
 
 AgentDocs additionally receive author heartbeat, `canvasExpand`, JavaScript error reporting, and
@@ -213,8 +214,9 @@ theme and an inert `canvasSend` so author controls remain harmless outside Treem
   context for diff summaries.
 - `GET /{encodedWorktreePath}/beads-data` serves beads issue data as JSON for the beadspace dashboard (see `docs/spec/beadspace-canvas.md`).
 - The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds
-  receive the shared base style, link interceptor, Escape focus-reclaim bridge, `canvasSend`, and
-  selected-text actions. An `AgentDoc` additionally receives the author heartbeat, `canvasExpand`,
+  receive the shared base style, link interceptor, capture-phase global keyboard bridge
+  (Ctrl+P worktree search and Escape focus reclaim), `canvasSend`, and selected-text actions. An
+  `AgentDoc` additionally receives the author heartbeat, `canvasExpand`,
   JS error reporting, idiomorph, and the morph controller with its changed-content highlight style.
 - `</head>` replacement is case-insensitive by using `StringComparison.OrdinalIgnoreCase`.
 - If no `<head>` close tag exists, the injected content is prepended.

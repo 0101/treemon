@@ -22,6 +22,7 @@ let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeSt
       CodingTool = CodingToolStatus.Idle
       CodingToolProvider = None
       CodingToolSince = None
+      SessionActivityAt = None
       CurrentSkill = None
       AgentActivity = None
       Sessions = []
@@ -97,6 +98,7 @@ let private defaultModel : Model =
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
       OverviewHistoryRequestInFlight = None
+      WorktreeSearch = WorktreeSearch.initial
       EmbeddedTerminalPollInFlight = false }
 
 let private dispatchedMsgs cmd : Msg list =

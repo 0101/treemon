@@ -42,8 +42,8 @@ type CodingToolResult =
       AgentActivity: AgentActivity option
       LastUserMessage: UserFooterMessage option
       LastAssistantMessage: (string * DateTimeOffset) option
-      /// `LastSeen` of the active session that won status resolution. None when every session is Idle.
-      LastActivity: DateTimeOffset option }
+      /// Greatest `UpdatedAt` across retained and live sessions. Heartbeats and usage do not move it.
+      SessionActivityAt: DateTimeOffset option }
 
 /// Wraps an arbitrary argument in a provider-aware skill invocation. The Copilot CLI uses the
 /// natural-language "use {skill} skill with {arg}" form. Shared by actionPrompt (FixPr/FixBuild) and
@@ -86,7 +86,7 @@ let noSessionPushResult: CodingToolResult =
       AgentActivity = None
       LastUserMessage = None
       LastAssistantMessage = None
-      LastActivity = None }
+      SessionActivityAt = None }
 
 let private toFooterMessage maxLength (message: Message) =
     FileUtils.truncateMessage maxLength message.Text, message.At
@@ -137,7 +137,8 @@ let private sessionStatusOrder =
 type private SessionSelection =
     { OpenInstances: StoredInstance list
       AdjustedOpen: StoredInstance list
-      ActiveWinner: StoredInstance option }
+      ActiveWinner: StoredInstance option
+      MostRecentActivity: StoredInstance option }
 
 let private selectInstances (now: DateTimeOffset) (instances: StoredInstance list) =
     let openInstances =
@@ -160,7 +161,9 @@ let private selectInstances (now: DateTimeOffset) (instances: StoredInstance lis
 
     { OpenInstances = openInstances
       AdjustedOpen = adjustedOpen
-      ActiveWinner = activeWinner }
+      ActiveWinner = activeWinner
+      MostRecentActivity =
+        instances |> StoredInstance.tryMostRecentActivity }
 
 type private FooterSource =
     { Provider: CodingToolProvider
@@ -253,6 +256,13 @@ let fromPushInstances
             |> List.choose id
             |> mostRecentFooter)
 
+    let mostRecentActivity =
+        [ selection.MostRecentActivity
+          |> Option.map footerFromInstance
+          retained |> Option.map footerFromRetained ]
+        |> List.choose id
+        |> mostRecentFooter
+
     { Status = status
       SessionStatuses = sessionStatuses
       Provider = footer |> Option.map _.Provider
@@ -268,7 +278,10 @@ let fromPushInstances
         footer
         |> Option.bind (_.Status >> _.LastAssistantMessage)
         |> Option.map (toFooterMessage 80)
-      LastActivity = selection.ActiveWinner |> Option.map _.LastSeen }
+      SessionActivityAt =
+        mostRecentActivity
+        |> Option.map _.UpdatedAt
+        |> Option.filter ((<>) DateTimeOffset.MinValue) }
 
 /// Group exact process instances by worktree path and collapse each group into the
 /// card's coding-tool fields (the openness-driven status dot + the decoupled footer). Keyed by the

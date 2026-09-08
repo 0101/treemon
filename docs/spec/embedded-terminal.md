@@ -695,9 +695,13 @@ isolated server and fails on incomplete exact process cleanup.
 - **Origin-scoped attachment framing:** attachment responses use CSP `frame-ancestors` with every
   configured dashboard origin, rather than same-origin framing that would reject the legitimate
   cross-port dashboard iframe.
-- **Proxy-owned terminal scrollbar chrome:** the attachment proxy adds one CSS override to ttyd's
-  root page instead of carrying a forked custom index. It hides the rendered xterm scrollbar while
-  preserving wheel, keyboard, and programmatic scrollback.
+- **Proxy-owned terminal page integration:** the attachment proxy adds one CSS override and one
+  capture-phase global-shortcut bridge to ttyd's root page instead of carrying a forked custom
+  index. It hides the rendered xterm scrollbar while preserving scrollback, forwards Ctrl+P to
+  worktree search, and forwards Ctrl+Tab / Ctrl+Shift+Tab to next/previous terminal selection before
+  xterm consumes those keys. The dashboard accepts a forwarded shortcut only from the active
+  loopback terminal iframe, then sends an exact-origin focus request back after terminal selection
+  or worktree-search dismissal so the active xterm input keeps keyboard ownership.
 - **Graceful shutdown before automatic Resume:** replacement requests exact SDK session shutdown
   for every exact target before terminal teardown and aborts while the old host is healthy if any
   shutdown is unavailable, rejected, or times out. Endpoint acceptance is not completion; exact
@@ -715,11 +719,10 @@ isolated server and fails on incomplete exact process cleanup.
 - **Safe lifecycle diagnostics:** record counts, typed outcomes, and exact safe identities for
   multiplicity, shutdown, rollback, and survivor cleanup without logging terminal content,
   capabilities, prompts, tokens, or raw records.
-- **Resume without widening TerminalHost lifecycle APIs:** after each replacement terminal is
+- **Resume without widening the control API:** after each replacement terminal is
   recreated, Treemon briefly attaches through the existing authenticated ttyd protocol and submits
-  the opaque command selected by `TerminalSessionActivity`. A terminal without an exact open
-  instance receives no input and remains a plain PowerShell shell. Submitted terminal input is a raw shell
-  boundary:
+  selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no
+  input and remains a plain PowerShell shell. Submitted terminal input is a raw shell boundary:
   direct commands carrying a control character are rejected rather than written, while
   `CodingToolCli` first converts control-bearing prompt data to a control-free UTF-8/base64 form.
   A stored Copilot `SessionId` therefore cannot inject an extra command line into a recreated shell.

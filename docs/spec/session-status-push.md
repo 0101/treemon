@@ -85,6 +85,9 @@ shared state; no session-log parsing remains.
 - The footer is independent of the dot. Skill, activity, and last messages come from the active
   winner or otherwise the session with the greatest `(UpdatedAt, SessionId)`, including the durable
   retained representative. They therefore survive Idle, NoSession, and server restart.
+- The worktree response exposes the greatest session `UpdatedAt` as `SessionActivityAt`. The empty
+  Ctrl+P palette uses it for newest-first ordering; heartbeat-only `LastSeen` and usage reports
+  cannot reorder the palette.
 - Card activity is the freshest source-tagged value from `assistant.intent` or the session title.
   Intent is optional enrichment; the title is the reliable fallback and is restored from
   `metadata.snapshot().summary` when no live title event arrived during startup.

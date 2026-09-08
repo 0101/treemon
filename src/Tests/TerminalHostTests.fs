@@ -2029,28 +2029,35 @@ type TerminalHostProxyTests() =
                     ))))
 
     [<Test>]
-    member _.``terminal page hides viewport scrollbar without disabling scrolling``() =
+    member _.``terminal page adds chrome and global shortcut interception``() =
         let html =
             "<html><head><style>.xterm-viewport{overflow-y:scroll}</style></head><body></body></html>"
 
-        let styled = TerminalProxy.hideViewportScrollbar html
+        let customized = TerminalProxy.customizeTerminalPage html
 
         Assert.Multiple(fun () ->
             Assert.That(
-                styled,
+                customized,
                 Does.Contain(".xterm-viewport{scrollbar-width:none}")
             )
 
             Assert.That(
-                styled,
+                customized,
                 Does.Contain(".xterm-viewport::-webkit-scrollbar{display:none}")
             )
 
-            Assert.That(styled, Does.Contain("overflow-y:scroll"))
+            Assert.That(customized, Does.Contain("overflow-y:scroll"))
+            Assert.That(customized, Does.Contain("open-worktree-search"))
+            Assert.That(customized, Does.Contain("cycle-terminal"))
+            Assert.That(customized, Does.Contain("focus-terminal"))
+            Assert.That(customized, Does.Contain(".xterm-helper-textarea"))
+            Assert.That(customized, Does.Contain("e.source!==parent"))
+            Assert.That(customized, Does.Contain("e.stopImmediatePropagation()"))
+            Assert.That(customized, Does.Contain("},true)"))
 
             Assert.That(
-                styled.IndexOf("scrollbar-width:none", StringComparison.Ordinal),
-                Is.LessThan(styled.IndexOf("</head>", StringComparison.Ordinal))
+                customized.IndexOf("open-worktree-search", StringComparison.Ordinal),
+                Is.LessThan(customized.IndexOf("</head>", StringComparison.Ordinal))
             ))
 
     [<Test>]
@@ -2699,6 +2706,16 @@ type private FakeCleanupBoundary(
 [<Platform("Win")>]
 type TerminalHostJobObjectTests() =
     let powershell = executableOnPath "pwsh.exe"
+    let testOutput = DirectoryInfo AppContext.BaseDirectory
+    let consoleProbe =
+        Path.Combine(
+            __SOURCE_DIRECTORY__,
+            "TestAgentRecorder",
+            "bin",
+            testOutput.Parent.Name,
+            testOutput.Name,
+            "copilot.exe"
+        )
 
     let identity processId startTicks: JobProcess.ProcessIdentity =
         { ProcessId = processId
@@ -2881,13 +2898,8 @@ type TerminalHostJobObjectTests() =
 
             let owned =
                 JobProcess.start
-                    { Executable = powershell
-                      Arguments =
-                        [ "-NoLogo"
-                          "-NoProfile"
-                          "-NonInteractive"
-                          "-Command"
-                          """Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'; [ConsoleProbe]::GetConsoleWindow().ToInt64() | Set-Content -LiteralPath $env:TM_CONSOLE_HANDLE_FILE; Start-Sleep -Seconds 300""" ]
+                    { Executable = consoleProbe
+                      Arguments = []
                       WorkingDirectory = root
                       Environment = [ "TM_CONSOLE_HANDLE_FILE", consoleHandleFile ] }
                 |> requireOk

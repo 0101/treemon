@@ -33,6 +33,10 @@ type DashboardTests() =
         page.EvaluateAsync<obj>(
             "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
 
+    let dispatchCtrlP (page: IPage) =
+        page.EvaluateAsync<bool>(
+            "() => { const event = new KeyboardEvent('keydown',{key:'p',ctrlKey:true,bubbles:true,cancelable:true}); document.activeElement.dispatchEvent(event); return event.defaultPrevented; }")
+
     override this.ContextOptions() =
         let opts = base.ContextOptions()
         opts.IgnoreHTTPSErrors <- true
@@ -2268,6 +2272,213 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Embedded terminal forwards global search and tab switching shortcuts``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let worktreePath = WorktreePath "Q:/code/TestProject/feature-recent"
+            let firstTerminal = EmbeddedTerminalId "shortcut-first"
+            let secondTerminal = EmbeddedTerminalId "shortcut-second"
+
+            let terminalPage label =
+                TerminalHost.TerminalProxy.customizeTerminalPage (
+                    "<!doctype html><html><head><title>"
+                    + label
+                    + "</title></head><body><textarea class=\"xterm-helper-textarea\" id=\"terminal-target\">"
+                    + label
+                    + "</textarea><script>window.__terminalKeydowns=0;"
+                    + "document.addEventListener('keydown',function(e){"
+                    + "var key=e.key.toLowerCase();"
+                    + "if(key==='p'||key==='tab')window.__terminalKeydowns++})"
+                    + "</script></body></html>"
+                )
+
+            let snapshot =
+                { Tabs =
+                    [ { Id = firstTerminal
+                        Worktree = worktreePath
+                        ReportedActivity = Some "First terminal"
+                        Lifecycle =
+                            EmbeddedTerminalLifecycle.Running
+                                $"{ServerFixture.canvasUrl}/fixture-terminal-first" }
+                      { Id = secondTerminal
+                        Worktree = worktreePath
+                        ReportedActivity = Some "Second terminal"
+                        Lifecycle =
+                            EmbeddedTerminalLifecycle.Running
+                                $"{ServerFixture.canvasUrl}/fixture-terminal-second" } ] }
+
+            let body = JsonConvert.SerializeObject(snapshot, converter)
+
+            do!
+                page.RouteAsync(
+                    "**/IWorktreeApi/getEmbeddedTerminals",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                )
+
+            do!
+                page.RouteAsync(
+                    "**/fixture-terminal-first",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "text/html; charset=utf-8",
+                                Body = terminalPage "first"
+                            )
+                        )
+                )
+
+            do!
+                page.RouteAsync(
+                    "**/fixture-terminal-second",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "text/html; charset=utf-8",
+                                Body = terminalPage "second"
+                            )
+                        )
+                )
+
+            let! _ = page.GotoAsync(baseUrl)
+            let targetCard =
+                page.Locator(
+                    ".wt-card:has(.branch-name:text-is('feature-recent'))"
+                )
+            do! targetCard.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+            do! targetCard.ClickAsync()
+
+            let terminalToggle =
+                page.Locator(
+                    ".header-controls .ctrl-btn",
+                    PageLocatorOptions(HasText = "Terminal")
+                )
+            do! terminalToggle.ClickAsync()
+
+            let firstIframe =
+                page.Locator(
+                    $"iframe[data-terminal-id='{EmbeddedTerminalId.value firstTerminal}']"
+                )
+            let secondIframe =
+                page.Locator(
+                    $"iframe[data-terminal-id='{EmbeddedTerminalId.value secondTerminal}']"
+                )
+            do! firstIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do!
+                secondIframe.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Attached,
+                        Timeout = 5000.0f
+                    )
+                )
+            let firstActiveIframe =
+                page.Locator(
+                    $"iframe.terminal-iframe-active[data-terminal-id='{EmbeddedTerminalId.value firstTerminal}']"
+                )
+            let secondActiveIframe =
+                page.Locator(
+                    $"iframe.terminal-iframe-active[data-terminal-id='{EmbeddedTerminalId.value secondTerminal}']"
+                )
+            do! firstActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let firstTarget =
+                page
+                    .FrameLocator(
+                        $"iframe[data-terminal-id='{EmbeddedTerminalId.value firstTerminal}']"
+                    )
+                    .Locator("#terminal-target")
+
+            let secondTarget =
+                page
+                    .FrameLocator(
+                        $"iframe[data-terminal-id='{EmbeddedTerminalId.value secondTerminal}']"
+                    )
+                    .Locator("#terminal-target")
+
+            let! _ =
+                secondTarget.EvaluateAsync<obj>(
+                    "element => window.parent.postMessage({action:'cycle-terminal',direction:'next'},'*')"
+                )
+            let! _ = settleBrowserEvents page
+
+            let! activeAfterHiddenMessage =
+                page.Locator(".terminal-iframe-active").GetAttributeAsync("data-terminal-id")
+            Assert.That(
+                activeAfterHiddenMessage,
+                Is.EqualTo(EmbeddedTerminalId.value firstTerminal),
+                "A hidden terminal iframe must not switch the active terminal"
+            )
+
+            do! firstTarget.FocusAsync()
+            do! firstTarget.PressAsync("Control+P")
+
+            let searchInput = page.Locator("#worktree-search-input")
+            do! searchInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! searchFocused =
+                searchInput.EvaluateAsync<bool>(
+                    "element => document.activeElement === element"
+                )
+            let! terminalKeydownsAfterSearch =
+                firstTarget.EvaluateAsync<int>(
+                    "element => window.__terminalKeydowns"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(searchFocused, Is.True)
+                Assert.That(
+                    terminalKeydownsAfterSearch,
+                    Is.Zero,
+                    "Ctrl+P must be stopped before terminal-local handlers run"
+                ))
+
+            do! searchInput.PressAsync("Escape")
+            do!
+                searchInput.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+
+            do! Assertions.Expect(firstTarget).ToBeFocusedAsync()
+
+            do! page.Keyboard.PressAsync("Control+Tab")
+            do! secondActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(secondTarget).ToBeFocusedAsync()
+
+            do! page.Keyboard.PressAsync("Control+Shift+Tab")
+            do! firstActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(firstTarget).ToBeFocusedAsync()
+
+            do! page.Keyboard.PressAsync("Control+Tab")
+            do! secondActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(secondTarget).ToBeFocusedAsync()
+
+            let! firstTerminalKeydowns =
+                firstTarget.EvaluateAsync<int>(
+                    "element => window.__terminalKeydowns"
+                )
+            let! secondTerminalKeydowns =
+                secondTarget.EvaluateAsync<int>(
+                    "element => window.__terminalKeydowns"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(firstTerminalKeydowns, Is.Zero)
+                Assert.That(secondTerminalKeydowns, Is.Zero))
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Empty terminal snapshot discovers a background terminal without stealing focus``() =
         task {
             let! page = this.Context.NewPageAsync()
@@ -4136,6 +4347,282 @@ type DashboardTests() =
             let! _ = this.Page.EvaluateAsync("() => document.getElementById('e2e-editable-probe').remove()")
             Assert.That(keptFocus, Is.True,
                 "The global Escape reclaim must skip editable fields and leave their focus intact")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Ctrl P finds a worktree across repository and branch then reveals its collapsed card``() =
+        task {
+            let expandedSection = this.Page.Locator(".repo-section:has(.wt-card)").First
+            let! sectionIndex =
+                expandedSection.EvaluateAsync<int>(
+                    "element => Array.from(element.parentElement.children).indexOf(element)"
+                )
+            let section = this.Page.Locator(".repo-section").Nth(sectionIndex)
+            let header = section.Locator(".repo-header")
+            let! repository = header.Locator(".repo-name").TextContentAsync()
+            let! branch = section.Locator(".wt-card .branch-name").First.TextContentAsync()
+
+            do! header.ClickAsync()
+            do!
+                section.Locator(".card-grid").WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+            let! collapsedGridCount = section.Locator(".card-grid").CountAsync()
+            Assert.That(collapsedGridCount, Is.Zero, "The target repository should be collapsed before search")
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => { const input = document.createElement('input'); input.id = 'worktree-search-shortcut-probe'; document.body.appendChild(input); input.focus(); }")
+
+            do! this.Page.Keyboard.PressAsync("Control+P")
+
+            let dialog = this.Page.Locator(".worktree-search-dialog")
+            let input = this.Page.Locator("#worktree-search-input")
+            do! dialog.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! inputFocused =
+                input.EvaluateAsync<bool>("element => document.activeElement === element")
+            Assert.That(inputFocused, Is.True, "Ctrl+P should focus the search input from outside the dashboard")
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => document.getElementById('worktree-search-shortcut-probe').remove()")
+
+            do! input.FillAsync(repository + branch)
+
+            let result = this.Page.Locator(".worktree-search-result").First
+            do! result.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! resultRepository = result.Locator(".worktree-search-repository").TextContentAsync()
+            let! resultBranch = result.Locator(".worktree-search-branch").TextContentAsync()
+            let! resultPath = result.Locator(".worktree-search-path").TextContentAsync()
+            let! detailDisplay = result.Locator(".worktree-search-detail") |> computedStyle "display"
+
+            Assert.Multiple(fun () ->
+                Assert.That(resultRepository, Is.EqualTo(repository))
+                Assert.That(resultBranch, Is.EqualTo(branch))
+                Assert.That(resultPath, Is.Not.Empty)
+                Assert.That(
+                    detailDisplay,
+                    Is.EqualTo("flex"),
+                    "The worktree and path should share the compact detail row"
+                ))
+
+            do! this.Page.Keyboard.PressAsync("Enter")
+            do!
+                dialog.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+
+            let focusedCard = section.Locator(".wt-card.focused")
+            do! focusedCard.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! focusedBranch = focusedCard.Locator(".branch-name").TextContentAsync()
+            let! expandedGridCount = section.Locator(".card-grid").CountAsync()
+            let! dashboardFocused =
+                this.Page.EvaluateAsync<bool>(
+                    "() => document.activeElement === document.querySelector('.dashboard')"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    expandedGridCount,
+                    Is.EqualTo(1),
+                    "Search selection should expand the target repository"
+                )
+                Assert.That(
+                    focusedBranch,
+                    Is.EqualTo(branch),
+                    "Search selection should focus the target card"
+                )
+                Assert.That(
+                    dashboardFocused,
+                    Is.True,
+                    "Search selection should restore dashboard keyboard focus"
+                ))
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Open worktree search consumes Ctrl P and exposes combobox semantics``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Control+P")
+
+            let dialog = this.Page.Locator(".worktree-search-dialog")
+            let input = this.Page.Locator("#worktree-search-input")
+            let results = this.Page.Locator("#worktree-search-results")
+            do! dialog.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! defaultPrevented = dispatchCtrlP this.Page
+            let! dialogCount = dialog.CountAsync()
+            let! inputRole = input.GetAttributeAsync("role")
+            let! expanded = input.GetAttributeAsync("aria-expanded")
+            let! controls = input.GetAttributeAsync("aria-controls")
+            let! resultsRole = results.GetAttributeAsync("role")
+
+            Assert.Multiple(fun () ->
+                Assert.That(defaultPrevented, Is.True)
+                Assert.That(dialogCount, Is.EqualTo(1))
+                Assert.That(inputRole, Is.EqualTo("combobox"))
+                Assert.That(expanded, Is.EqualTo("true"))
+                Assert.That(controls, Is.EqualTo("worktree-search-results"))
+                Assert.That(resultsRole, Is.EqualTo("listbox")))
+
+            do! input.PressAsync("Escape")
+            do!
+                dialog.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Worktree search focus-lock keeps Tab on the input``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Control+P")
+
+            let dialog = this.Page.Locator(".worktree-search-dialog")
+            let input = this.Page.Locator("#worktree-search-input")
+            do! dialog.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            do! this.Page.Keyboard.PressAsync("Tab")
+            let! focusedAfterTab =
+                input.EvaluateAsync<bool>("element => document.activeElement === element")
+
+            do! this.Page.Keyboard.PressAsync("Shift+Tab")
+            let! focusedAfterShiftTab =
+                input.EvaluateAsync<bool>("element => document.activeElement === element")
+
+            Assert.Multiple(fun () ->
+                Assert.That(focusedAfterTab, Is.True)
+                Assert.That(focusedAfterShiftTab, Is.True))
+
+            do! input.PressAsync("Escape")
+            do!
+                dialog.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Create and confirmation modals leave Ctrl P unconsumed``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! createDefaultPrevented = dispatchCtrlP this.Page
+            let! createSearchCount = this.Page.Locator(".worktree-search-dialog").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(createDefaultPrevented, Is.False)
+                Assert.That(createSearchCount, Is.Zero))
+
+            do! this.Page.Locator(".modal-btn.cancel").ClickAsync()
+            do!
+                overlay.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+
+            do! this.Page.Locator(".wt-card .delete-btn").First.ClickAsync()
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! confirmationDefaultPrevented = dispatchCtrlP this.Page
+            let! confirmationSearchCount =
+                this.Page.Locator(".worktree-search-dialog").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(confirmationDefaultPrevented, Is.False)
+                Assert.That(confirmationSearchCount, Is.Zero))
+
+            do! this.Page.Locator(".modal-btn.cancel").ClickAsync()
+            do!
+                overlay.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Worktree search keeps composed input and selected results visible``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Control+P")
+
+            let dialog = this.Page.Locator(".worktree-search-dialog")
+            let input = this.Page.Locator("#worktree-search-input")
+            let results = this.Page.Locator("#worktree-search-results")
+            do! dialog.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            do! input.FillAsync("-")
+            let! heading =
+                this.Page.Locator(".worktree-search-meta span").First.TextContentAsync()
+            let! selectedBefore = input.GetAttributeAsync("aria-activedescendant")
+
+            let! _ =
+                input.EvaluateAsync(
+                    "element => { const send = key => { const event = new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}); Object.defineProperty(event,'isComposing',{value:true}); element.dispatchEvent(event); }; send('ArrowDown'); send('Enter'); }"
+                )
+            let! _ = settleBrowserEvents this.Page
+            let! selectedAfterComposition =
+                input.GetAttributeAsync("aria-activedescendant")
+            let! dialogVisibleAfterComposition = dialog.IsVisibleAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(heading, Is.EqualTo("All worktrees"))
+                Assert.That(selectedAfterComposition, Is.EqualTo(selectedBefore))
+                Assert.That(dialogVisibleAfterComposition, Is.True))
+
+            let! scrolls =
+                results.EvaluateAsync<bool>(
+                    "element => element.scrollHeight > element.clientHeight"
+                )
+            Assert.That(scrolls, Is.True, "The fixture must overflow the search result viewport")
+
+            let! _ = results.EvaluateAsync("element => { element.scrollTop = 0; }")
+            do! input.PressAsync("ArrowUp")
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => { const list = document.getElementById('worktree-search-results'); const selected = list && list.querySelector('.worktree-search-result.selected'); if (!list || !selected) return false; const l = list.getBoundingClientRect(); const s = selected.getBoundingClientRect(); return s.top >= l.top && s.bottom <= l.bottom; }",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 3000.0f)
+                )
+
+            do! input.PressAsync("Escape")
+            do!
+                dialog.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
         }
 
     [<Test>]
