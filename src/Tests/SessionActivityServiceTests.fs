@@ -27,10 +27,20 @@ let private refNow = ts "2026-03-01T10:05:00Z"
 let private noMsg: MessageDto = Unchecked.defaultof<MessageDto>
 let private msgDto text at : MessageDto = { text = text; at = at }
 
+/// An absolute path on whichever platform these run. The service requires one, and a Windows-
+/// shaped literal is a *relative* path on Linux - which GetFullPath used to rebase onto the
+/// server's own directory rather than reject.
+let private wtA =
+    if OperatingSystem.IsWindows() then @"C:\wt\a" else "/wt/a"
+
+/// Absolute, and neither above nor below `wtA`, so it resolves to no worktree at all.
+let private wtElsewhere =
+    if OperatingSystem.IsWindows() then @"C:\wt\elsewhere" else "/wt/elsewhere"
+
 let private baseReq kind : SessionActivityRequest =
     { sessionId = "s1"
       terminalSessionId = null
-      worktreePath = "C:/wt/a"
+      worktreePath = wtA
       provider = "copilot_cli"
       eventId = "e1"
       occurredAt = "2026-03-01T10:00:00Z"
@@ -563,8 +573,12 @@ type ParseReportTests() =
 
     [<Test>]
     member _.``the worktree path is normalized on the parsed report``() =
-        let req = { baseReq "turn_started" with worktreePath = "C:\\wt\\a" }
-        Assert.That((parseOk req).WorktreePath, Is.EqualTo(WorktreePath(PathUtils.normalizePath "C:\\wt\\a")))
+        // A trailing separator is exactly the difference the scheduler's known paths never carry.
+        let req =
+            { baseReq "turn_started" with
+                worktreePath = wtA + string Path.DirectorySeparatorChar }
+
+        Assert.That((parseOk req).WorktreePath, Is.EqualTo(WorktreePath(PathUtils.normalizePath wtA)))
 
     // --- Server-side max text length (defence-in-depth; independent of the client's 2000-char cap) ---
 
@@ -609,15 +623,15 @@ type TryAcceptReportTests() =
 
     [<Test>]
     member _.``a valid report for a monitored worktree is accepted``() =
-        withService "C:/wt/a" (fun (_, agent, _) ->
+        withService wtA (fun (_, agent, _) ->
             match runAsync (tryAcceptReport agent (baseReq "turn_started")) with
             | Accepted report -> Assert.That(report.SessionId, Is.EqualTo(SessionId "s1"))
             | other -> Assert.Fail $"expected Accepted, got {other}")
 
     [<Test>]
     member _.``a valid report for an unmonitored worktree is a soft accept (nothing recorded)``() =
-        withService "C:/wt/a" (fun (_, agent, _) ->
-            match runAsync (tryAcceptReport agent { baseReq "turn_started" with worktreePath = "C:/wt/elsewhere" }) with
+        withService wtA (fun (_, agent, _) ->
+            match runAsync (tryAcceptReport agent { baseReq "turn_started" with worktreePath = wtElsewhere }) with
             | Unmonitored _ -> ()
             | other -> Assert.Fail $"expected Unmonitored, got {other}")
 
@@ -627,14 +641,14 @@ type TryAcceptReportTests() =
             { baseReq "user_prompt" with
                 message = msgDto "<system_reminder>internal runtime guidance" "2026-03-01T10:00:00Z" }
 
-        withService "C:/wt/a" (fun (_, agent, _) ->
+        withService wtA (fun (_, agent, _) ->
             match runAsync (tryAcceptReport agent request) with
             | IgnoredSystemReminder -> ()
             | other -> Assert.Fail $"expected IgnoredSystemReminder, got {other}")
 
     [<Test>]
     member _.``an invalid body is rejected before the guard``() =
-        withService "C:/wt/a" (fun (_, agent, _) ->
+        withService wtA (fun (_, agent, _) ->
             match runAsync (tryAcceptReport agent (baseReq "bogus_kind")) with
             | Rejected reason -> Assert.That(reason, Does.Contain "unknown kind")
             | other -> Assert.Fail $"expected Rejected, got {other}")
@@ -648,15 +662,15 @@ type IngestTests() =
 
     [<Test>]
     member _.``ingesting turn_started makes the session Working in the live map``() =
-        withService "C:/wt/a" (fun (svc, _, _) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
+        withService wtA (fun (svc, _, _) ->
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" TurnStarted)
             let live = svc.LiveSnapshot()
             Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo SessionLevelStatus.Working))
 
     [<Test>]
     member _.``an ingested status is fed to the scheduler``() =
-        withService "C:/wt/a" (fun (svc, agent, _) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
+        withService wtA (fun (svc, agent, _) ->
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" TurnStarted)
             svc.LiveSnapshot() |> ignore // barrier: the mailbox has posted UpdateSessionStatus by now
             match schedulerStatus agent "s1" with
             | Some stored -> Assert.That(stored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
@@ -664,10 +678,10 @@ type IngestTests() =
 
     [<Test>]
     member _.``a folded sequence surfaces the last user + assistant message and status``() =
-        withService "C:/wt/a" (fun (svc, _, _) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:01Z" (UserPrompt(msg "do it" "2026-03-01T10:00:01Z")))
-            svc.Submit(mkReport "s1" "C:/wt/a" "e3" "2026-03-01T10:00:02Z" (AssistantMessage(msg "on it" "2026-03-01T10:00:02Z")))
+        withService wtA (fun (svc, _, _) ->
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" wtA "e2" "2026-03-01T10:00:01Z" (UserPrompt(msg "do it" "2026-03-01T10:00:01Z")))
+            svc.Submit(mkReport "s1" wtA "e3" "2026-03-01T10:00:02Z" (AssistantMessage(msg "on it" "2026-03-01T10:00:02Z")))
             let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
             Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(s.LastUserMessage, Is.EqualTo(Some(msg "do it" "2026-03-01T10:00:01Z")))
@@ -675,12 +689,12 @@ type IngestTests() =
 
     [<Test>]
     member _.``ask_user state is correct when idle arrives before the earlier request``() =
-        withService "C:/wt/a" (fun (svc, _, store) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:01Z" WentIdle)
+        withService wtA (fun (svc, _, store) ->
+            svc.Submit(mkReport "s1" wtA "e2" "2026-03-01T10:00:01Z" WentIdle)
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "e1"
                     "2026-03-01T10:00:00Z"
                     (AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
@@ -693,7 +707,7 @@ type IngestTests() =
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "e3"
                     "2026-03-01T10:00:02Z"
                     (UserInputCompleted(ts "2026-03-01T10:00:02Z")))
@@ -707,11 +721,11 @@ type IngestTests() =
 
     [<Test>]
     member _.``a system reminder cannot release a pending ask_user wait``() =
-        withService "C:/wt/a" (fun (svc, agent, _) ->
+        withService wtA (fun (svc, agent, _) ->
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "e1"
                     "2026-03-01T10:00:00Z"
                     (AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
@@ -725,17 +739,17 @@ type IngestTests() =
             | IgnoredSystemReminder -> ()
             | other -> Assert.Fail $"expected IgnoredSystemReminder, got {other}"
 
-            svc.Submit(mkReport "s1" "C:/wt/a" "e3" "2026-03-01T10:00:02Z" WentIdle)
+            svc.Submit(mkReport "s1" wtA "e3" "2026-03-01T10:00:02Z" WentIdle)
             let status = svc.LiveSnapshot() |> Map.find (SessionId "s1") |> _.Status |> effectiveStatus
             Assert.That(status, Is.EqualTo SessionLevelStatus.WaitingForUser))
 
     [<Test>]
     member _.``a background start as the first report creates a Working shell and publishes the authoritative row``() =
-        withService "C:/wt/a" (fun (svc, agent, store) ->
+        withService wtA (fun (svc, agent, store) ->
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "bg-start"
                     "2026-03-01T10:00:00Z"
                     (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
@@ -743,8 +757,8 @@ type IngestTests() =
             let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             let persisted = store.StatusBySession(SessionId "s1") |> Option.get
             let latestSessionId =
-                store.LatestSessionIdForWorktree(WorktreePath(PathUtils.normalizePath "C:/wt/a"))
-            let retained = store.RetainedByWorktree() |> Map.find (PathUtils.normalizePath "C:/wt/a")
+                store.LatestSessionIdForWorktree(WorktreePath(PathUtils.normalizePath wtA))
+            let retained = store.RetainedByWorktree() |> Map.find (PathUtils.normalizePath wtA)
 
             Assert.Multiple(fun () ->
                 Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Idle, "the parent base is an Idle shell")
@@ -772,18 +786,18 @@ type IngestTests() =
 
     [<Test>]
     member _.``a terminal first stays inactive and an older late start cannot resurrect it``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, agent, store, dbPath) ->
+        withServiceAndPath wtA (fun (svc, agent, store, dbPath) ->
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "bg-finish"
                     "2026-03-01T10:00:05Z"
                     (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:05Z")))
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "bg-start"
                     "2026-03-01T10:00:04Z"
                     (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:04Z")))
@@ -813,34 +827,34 @@ type IngestTests() =
 
     [<Test>]
     member _.``heartbeats expire completed clocks without removing active agents or accepting older starts``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, agent, _, dbPath) ->
+        withServiceAndPath wtA (fun (svc, agent, _, dbPath) ->
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "completed-start"
                     "2026-03-01T10:00:00Z"
                     (BackgroundAgentStarted("completed", ts "2026-03-01T10:00:00Z")))
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "completed-finish"
                     "2026-03-01T10:00:10Z"
                     (BackgroundAgentFinished("completed", ts "2026-03-01T10:00:10Z")))
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "active-start"
                     "2026-03-01T10:00:20Z"
                     (BackgroundAgentStarted("active", ts "2026-03-01T10:00:20Z")))
-            svc.Submit(mkReport "s1" "C:/wt/a" "heartbeat-1" "2026-03-01T10:04:00Z" Heartbeat)
-            svc.Submit(mkReport "s1" "C:/wt/a" "heartbeat-2" "2026-03-01T10:06:00Z" Heartbeat)
+            svc.Submit(mkReport "s1" wtA "heartbeat-1" "2026-03-01T10:04:00Z" Heartbeat)
+            svc.Submit(mkReport "s1" wtA "heartbeat-2" "2026-03-01T10:06:00Z" Heartbeat)
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "expired-start"
                     "2026-03-01T10:00:05Z"
                     (BackgroundAgentStarted("completed", ts "2026-03-01T10:00:05Z")))
@@ -864,18 +878,18 @@ type IngestTests() =
 
     [<Test>]
     member _.``an older terminal after a newer start cannot finish the active agent``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, agent, store, dbPath) ->
+        withServiceAndPath wtA (fun (svc, agent, store, dbPath) ->
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "bg-start"
                     "2026-03-01T10:00:06Z"
                     (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:06Z")))
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "bg-finish"
                     "2026-03-01T10:00:05Z"
                     (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:05Z")))
@@ -899,20 +913,20 @@ type IngestTests() =
 
     [<Test>]
     member _.``a delayed finish within retention records event-time history without regressing newer root work``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, agent, store, dbPath) ->
+        withServiceAndPath wtA (fun (svc, agent, store, dbPath) ->
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "bg-start"
                     "2026-03-01T10:55:00Z"
                     (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:55:00Z")))
-            svc.Submit(mkReport "s1" "C:/wt/a" "root-start" "2026-03-01T11:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "root-skill" "2026-03-01T11:00:01Z" (SkillInvoked "review"))
+            svc.Submit(mkReport "s1" wtA "root-start" "2026-03-01T11:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" wtA "root-skill" "2026-03-01T11:00:01Z" (SkillInvoked "review"))
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "bg-finish"
                     "2026-03-01T10:56:00Z"
                     (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:56:00Z")))
@@ -946,18 +960,18 @@ type IngestTests() =
 
     [<Test>]
     member _.``a duplicate background event id changes neither lifecycle nor history``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
+        withServiceAndPath wtA (fun (svc, _, _, dbPath) ->
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "same-event"
                     "2026-03-01T10:00:00Z"
                     (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "same-event"
                     "2026-03-01T10:10:00Z"
                     (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:10:00Z")))
@@ -1120,7 +1134,7 @@ type IngestTests() =
         let parent =
             { SessionId = SessionId "s1"
               TerminalSessionId = None
-              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
+              WorktreePath = WorktreePath(PathUtils.normalizePath wtA)
               Provider = CopilotCli
               Status =
                 { Status = SessionLevelStatus.Idle
@@ -1138,13 +1152,13 @@ type IngestTests() =
               ContextUsageAt = Some(ts "2026-03-01T09:58:30Z") }
 
         withServiceSeeded
-            "C:/wt/a"
+            wtA
             (fun store -> store.UpsertContextUsage parent |> ignore)
             (fun (svc, agent, store) ->
                 svc.Submit(
                     mkReport
                         "s1"
-                        "C:/wt/a"
+                        wtA
                         "bg-start"
                         "2026-03-01T10:00:00Z"
                         (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
@@ -1174,18 +1188,18 @@ type IngestTests() =
 
     [<Test>]
     member _.``background lifecycle history records the resulting effective status``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
+        withServiceAndPath wtA (fun (svc, _, _, dbPath) ->
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "bg-start"
                     "2026-03-01T10:00:00Z"
                     (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
             svc.Submit(
                 mkReport
                     "s1"
-                    "C:/wt/a"
+                    wtA
                     "bg-finish"
                     "2026-03-01T10:00:05Z"
                     (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:05Z")))
@@ -1203,8 +1217,8 @@ type IngestTests() =
 
     [<Test>]
     member _.``ingested events are persisted to the durable mirror``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
+        withServiceAndPath wtA (fun (svc, _, store, dbPath) ->
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" TurnStarted)
             svc.LiveSnapshot() |> ignore
             let loaded = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z")
             Assert.That(loaded |> List.exists (fun s -> s.SessionId = SessionId "s1"), Is.True)
@@ -1212,23 +1226,23 @@ type IngestTests() =
 
     [<Test>]
     member _.``a duplicate event_id is a no-op: no second event row, status unchanged``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" WentIdle)
+        withServiceAndPath wtA (fun (svc, _, _, dbPath) ->
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" wtA "e2" "2026-03-01T10:00:05Z" WentIdle)
             svc.LiveSnapshot() |> ignore
             // Replay the first event verbatim.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" TurnStarted)
             let live = svc.LiveSnapshot()
             Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo SessionLevelStatus.Idle, "replay must not resurrect Working")
             Assert.That(eventCount dbPath, Is.EqualTo 2, "the duplicate event_id must be deduped"))
 
     [<Test>]
     member _.``an out-of-order event is retained for idempotency but does not regress live state``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" TurnStarted)
+        withServiceAndPath wtA (fun (svc, _, store, dbPath) ->
+            svc.Submit(mkReport "s1" wtA "e2" "2026-03-01T10:00:05Z" TurnStarted)
             svc.LiveSnapshot() |> ignore
             // An older, distinct event arrives late.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "stale" "2026-03-01T10:00:00Z")))
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "stale" "2026-03-01T10:00:00Z")))
             let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
             Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(s.LastAssistantMessage, Is.EqualTo None, "the stale message must not overwrite live state")
@@ -1238,9 +1252,9 @@ type IngestTests() =
 
     [<Test>]
     member _.``title bootstrap persists without an activity event and cannot block an earlier lifecycle event``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
+        withServiceAndPath wtA (fun (svc, _, store, dbPath) ->
             let title = msg "Investigate Intent Title Runtime" "2026-03-01T10:00:05Z"
-            svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:00:05Z" (TitleBootstrap title))
+            svc.Submit(mkReport "s1" wtA "tb1" "2026-03-01T10:00:05Z" (TitleBootstrap title))
 
             let hydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.That(hydrated.Status.Title, Is.EqualTo(Some title))
@@ -1252,7 +1266,7 @@ type IngestTests() =
 
             // A replayed lifecycle event has an older SDK timestamp but must still apply after the
             // newer join-time hydration report.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:03Z" TurnStarted)
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:03Z" TurnStarted)
             let replayed = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.That(replayed.Status.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(replayed.Status.Title, Is.EqualTo(Some title))
@@ -1265,7 +1279,7 @@ type IngestTests() =
         let retained =
             { SessionId = SessionId "s1"
               TerminalSessionId = None
-              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
+              WorktreePath = WorktreePath(PathUtils.normalizePath wtA)
               Provider = CopilotCli
               Status =
                 { Status = SessionLevelStatus.Working
@@ -1283,11 +1297,11 @@ type IngestTests() =
               ContextUsageAt = None }
 
         withServiceSeededAndPath
-            "C:/wt/a"
+            wtA
             (fun store -> store.UpsertStatus retained)
             (fun (svc, _, store, dbPath) ->
                 let title = msg "Current metadata title" "2026-03-01T10:30:00Z"
-                svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:30:00Z" (TitleBootstrap title))
+                svc.Submit(mkReport "s1" wtA "tb1" "2026-03-01T10:30:00Z" (TitleBootstrap title))
 
                 let hydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
                 Assert.Multiple(fun () ->
@@ -1305,17 +1319,17 @@ type IngestTests() =
                 Assert.That(durable, Is.EqualTo hydrated, "mailbox and durable store must use the same hydrated row")
                 Assert.That(eventCount dbPath, Is.Zero)
 
-                svc.Submit(mkReport "s1" "C:/wt/a" "idle" "2026-03-01T10:30:01Z" WentIdle)
+                svc.Submit(mkReport "s1" wtA "idle" "2026-03-01T10:30:01Z" WentIdle)
                 let settled = svc.LiveSnapshot() |> Map.find (SessionId "s1")
                 Assert.That(effectiveStatus settled.Status, Is.EqualTo SessionLevelStatus.Idle))
 
     [<Test>]
     member _.``an older title bootstrap cannot overwrite a newer live title``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
+        withServiceAndPath wtA (fun (svc, _, _, dbPath) ->
             let liveTitle = msg "New live title" "2026-03-01T10:00:10Z"
             let staleSnapshot = msg "Old snapshot" "2026-03-01T10:00:05Z"
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:10Z" (TitleReported liveTitle))
-            svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:00:05Z" (TitleBootstrap staleSnapshot))
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:10Z" (TitleReported liveTitle))
+            svc.Submit(mkReport "s1" wtA "tb1" "2026-03-01T10:00:05Z" (TitleBootstrap staleSnapshot))
 
             let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.That(s.Status.Title, Is.EqualTo(Some liveTitle))
@@ -1324,10 +1338,10 @@ type IngestTests() =
 
     [<Test>]
     member _.``a newer intent arriving first does not block an older lifecycle transition``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
+        withServiceAndPath wtA (fun (svc, _, store, dbPath) ->
             let intent = msg "Implementing the fix" "2026-03-01T10:00:06Z"
-            svc.Submit(mkReport "s1" "C:/wt/a" "i1" "2026-03-01T10:00:06Z" (IntentReported intent))
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:05Z" TurnStarted)
+            svc.Submit(mkReport "s1" wtA "i1" "2026-03-01T10:00:06Z" (IntentReported intent))
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:05Z" TurnStarted)
 
             let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.Multiple(fun () ->
@@ -1340,12 +1354,12 @@ type IngestTests() =
 
     [<Test>]
     member _.``a title arriving after a newer lifecycle event still updates the activity field``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
+        withServiceAndPath wtA (fun (svc, _, store, dbPath) ->
             let oldTitle = msg "Initial title" "2026-03-01T10:00:04Z"
             let newTitle = msg "Updated title" "2026-03-01T10:00:05Z"
-            svc.Submit(mkReport "s1" "C:/wt/a" "t1" "2026-03-01T10:00:04Z" (TitleReported oldTitle))
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:06Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "t2" "2026-03-01T10:00:05Z" (TitleReported newTitle))
+            svc.Submit(mkReport "s1" wtA "t1" "2026-03-01T10:00:04Z" (TitleReported oldTitle))
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:06Z" TurnStarted)
+            svc.Submit(mkReport "s1" wtA "t2" "2026-03-01T10:00:05Z" (TitleReported newTitle))
 
             let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.Multiple(fun () ->
@@ -1358,14 +1372,14 @@ type IngestTests() =
 
     [<Test>]
     member _.``a heartbeat bumps last_seen for openness without appending, moving updated_at, or changing status``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
+        withServiceAndPath wtA (fun (svc, _, store, dbPath) ->
             let terminalSessionId =
                 TerminalSessionId "dddddddddddddddddddddddddddddddd"
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")))
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")))
             svc.LiveSnapshot() |> ignore
             // A later liveness heartbeat: newer timestamp, but pure openness — not a status event.
             svc.Submit
-                { mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:01:00Z" Heartbeat with
+                { mkReport "s1" wtA "hb1" "2026-03-01T10:01:00Z" Heartbeat with
                     TerminalSessionId = Some terminalSessionId }
             let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:01:00Z"), "heartbeat advances last_seen")
@@ -1382,7 +1396,7 @@ type IngestTests() =
 
     [<Test>]
     member _.``omitted origins preserve initial terminal attribution across every report path``() =
-        withService "C:/wt/a" (fun (svc, _, store) ->
+        withService wtA (fun (svc, _, store) ->
             let terminalSessionId =
                 TerminalSessionId "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
             let withOrigin (report: SessionActivityReport) =
@@ -1396,19 +1410,19 @@ type IngestTests() =
                     Assert.That(live.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
                     Assert.That(persisted.TerminalSessionId, Is.EqualTo(Some terminalSessionId)))
 
-            mkReport "s1" "C:/wt/a" "started" "2026-03-01T10:00:00Z" TurnStarted
+            mkReport "s1" wtA "started" "2026-03-01T10:00:00Z" TurnStarted
             |> withOrigin
             |> submitAndAssertOrigin
 
-            mkReport "s1" "C:/wt/a" "heartbeat" "2026-03-01T10:01:00Z" Heartbeat
+            mkReport "s1" wtA "heartbeat" "2026-03-01T10:01:00Z" Heartbeat
             |> submitAndAssertOrigin
 
-            mkReport "s1" "C:/wt/a" "usage" "2026-03-01T10:02:00Z" (UsageInfo(1000, 2000))
+            mkReport "s1" wtA "usage" "2026-03-01T10:02:00Z" (UsageInfo(1000, 2000))
             |> submitAndAssertOrigin
 
             mkReport
                 "s1"
-                "C:/wt/a"
+                wtA
                 "bootstrap"
                 "2026-03-01T10:03:00Z"
                 (TitleBootstrap(msg "Terminal session" "2026-03-01T10:03:00Z"))
@@ -1416,13 +1430,13 @@ type IngestTests() =
 
             mkReport
                 "s1"
-                "C:/wt/a"
+                wtA
                 "intent"
                 "2026-03-01T10:04:00Z"
                 (IntentReported(msg "Preserve ownership" "2026-03-01T10:04:00Z"))
             |> submitAndAssertOrigin
 
-            mkReport "s1" "C:/wt/a" "ended" "2026-03-01T10:05:00Z" TurnEnded
+            mkReport "s1" wtA "ended" "2026-03-01T10:05:00Z" TurnEnded
             |> submitAndAssertOrigin)
 
     [<Test>]
@@ -1430,7 +1444,7 @@ type IngestTests() =
         let retained =
             { SessionId = SessionId "s1"
               TerminalSessionId = None
-              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
+              WorktreePath = WorktreePath(PathUtils.normalizePath wtA)
               Provider = CopilotCli
               Status =
                 { emptyStatus with
@@ -1441,7 +1455,7 @@ type IngestTests() =
               ContextUsageAt = None }
 
         withServiceSeeded
-            "C:/wt/a"
+            wtA
             (fun store -> store.UpsertStatus retained)
             (fun (svc, agent, store) ->
                 svc.Start()
@@ -1451,7 +1465,7 @@ type IngestTests() =
                     "the restart rebuild excludes retained sessions outside the idle window"
                 )
 
-                svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:30:00Z" Heartbeat)
+                svc.Submit(mkReport "s1" wtA "hb1" "2026-03-01T10:30:00Z" Heartbeat)
                 let rehydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
 
                 Assert.Multiple(fun () ->
@@ -1468,22 +1482,22 @@ type IngestTests() =
 
     [<Test>]
     member _.``a heartbeat for a session with no prior event is ignored``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:00:00Z" Heartbeat)
+        withServiceAndPath wtA (fun (svc, _, _, dbPath) ->
+            svc.Submit(mkReport "s1" wtA "hb1" "2026-03-01T10:00:00Z" Heartbeat)
             let live = svc.LiveSnapshot()
             Assert.That(live.ContainsKey(SessionId "s1"), Is.False, "a heartbeat never creates a session")
             Assert.That(eventCount dbPath, Is.Zero))
 
     [<Test>]
     member _.``a real event never regresses last_seen below a fresher heartbeat``() =
-        withService "C:/wt/a" (fun (svc, _, store) ->
+        withService wtA (fun (svc, _, store) ->
             // Establish the session, then a heartbeat advances openness to 10:02.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")))
-            svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:02:00Z" Heartbeat)
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")))
+            svc.Submit(mkReport "s1" wtA "hb1" "2026-03-01T10:02:00Z" Heartbeat)
             svc.LiveSnapshot() |> ignore
             // A real, IN-ORDER event (updated_at advances past e1) whose OccurredAt predates the
             // heartbeat: it must fold, but must NOT pull last_seen back before the heartbeat.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:01:00Z" (UserPrompt(msg "go" "2026-03-01T10:01:00Z")))
+            svc.Submit(mkReport "s1" wtA "e2" "2026-03-01T10:01:00Z" (UserPrompt(msg "go" "2026-03-01T10:01:00Z")))
             let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:02:00Z"), "last_seen stays monotonic (kept at the heartbeat)")
             Assert.That(s.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:01:00Z"), "the real event still advances the write clock")
@@ -1493,12 +1507,12 @@ type IngestTests() =
 
     [<Test>]
     member _.``an out-of-order event row records its own status, not the newest live status``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
+        withServiceAndPath wtA (fun (svc, _, _, dbPath) ->
             // Newest applied: turn_ended -> Idle.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" TurnEnded)
+            svc.Submit(mkReport "s1" wtA "e2" "2026-03-01T10:00:05Z" TurnEnded)
             svc.LiveSnapshot() |> ignore
             // An older assistant_message arrives late; its OWN effect is Working, not the newest Idle.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "stale" "2026-03-01T10:00:00Z")))
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "stale" "2026-03-01T10:00:00Z")))
             svc.LiveSnapshot() |> ignore
             Assert.That(
                 eventStatusCount dbPath "e1" "working",
@@ -1508,10 +1522,10 @@ type IngestTests() =
 
     [<Test>]
     member _.``a usage_info gauge updates ContextUsage without moving the status clock or appending an event``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, agent, _, dbPath) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
+        withServiceAndPath wtA (fun (svc, agent, _, dbPath) ->
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" TurnStarted)
             svc.LiveSnapshot() |> ignore
-            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:05Z" (UsageInfo(120000, 200000)))
+            svc.Submit(mkReport "s1" wtA "u1" "2026-03-01T10:00:05Z" (UsageInfo(120000, 200000)))
             let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.That(s.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }), "the gauge is recorded")
             Assert.That(s.Status.Status, Is.EqualTo SessionLevelStatus.Working, "a gauge never changes status")
@@ -1528,7 +1542,7 @@ type IngestTests() =
         let retained =
             { SessionId = SessionId "s1"
               TerminalSessionId = None
-              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
+              WorktreePath = WorktreePath(PathUtils.normalizePath wtA)
               Provider = CopilotCli
               Status =
                 { emptyStatus with
@@ -1540,7 +1554,7 @@ type IngestTests() =
         let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
 
         withServiceSeeded
-            "C:/wt/a"
+            wtA
             (fun store -> store.UpsertStatus retained)
             (fun (svc, agent, store) ->
                 svc.Start()
@@ -1550,7 +1564,7 @@ type IngestTests() =
                     "the restart rebuild excludes retained sessions outside the idle window"
                 )
 
-                svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:30:00Z" (UsageInfo(usage.CurrentTokens, usage.TokenLimit)))
+                svc.Submit(mkReport "s1" wtA "u1" "2026-03-01T10:30:00Z" (UsageInfo(usage.CurrentTokens, usage.TokenLimit)))
                 let rehydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
 
                 Assert.Multiple(fun () ->
@@ -1569,42 +1583,42 @@ type IngestTests() =
 
     [<Test>]
     member _.``a later usage report does not block a slightly-earlier status transition``() =
-        withService "C:/wt/a" (fun (svc, _, _) ->
+        withService wtA (fun (svc, _, _) ->
             // The gauge (10:00:05) is NEWER than the turn_ended (10:00:03) but arrives first. Sharing the
             // status clock would reject the turn_ended as out-of-order and leave the card stuck Working.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:05Z" (UsageInfo(120000, 200000)))
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:03Z" TurnEnded)
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" wtA "u1" "2026-03-01T10:00:05Z" (UsageInfo(120000, 200000)))
+            svc.Submit(mkReport "s1" wtA "e2" "2026-03-01T10:00:03Z" TurnEnded)
             let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
             Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Idle, "the turn still ends despite the newer gauge")
             Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }), "the gauge is preserved across the transition"))
 
     [<Test>]
     member _.``a usage snapshot arriving after a newer status event is not discarded``() =
-        withService "C:/wt/a" (fun (svc, _, _) ->
+        withService wtA (fun (svc, _, _) ->
             // The gauge (10:00:03) is OLDER than the turn_ended (10:00:05) and arrives after it. Sharing
             // the status clock would reject it as out-of-order and drop the snapshot.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" TurnEnded)
-            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:03Z" (UsageInfo(50000, 200000)))
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" wtA "e2" "2026-03-01T10:00:05Z" TurnEnded)
+            svc.Submit(mkReport "s1" wtA "u1" "2026-03-01T10:00:03Z" (UsageInfo(50000, 200000)))
             let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
             Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 50000; TokenLimit = 200000 }), "the gauge survives a newer status event")
             Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Idle, "the gauge never changes status"))
 
     [<Test>]
     member _.``an out-of-order older usage snapshot does not clobber a fresher gauge``() =
-        withService "C:/wt/a" (fun (svc, _, _) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "u2" "2026-03-01T10:00:10Z" (UsageInfo(150000, 200000)))
+        withService wtA (fun (svc, _, _) ->
+            svc.Submit(mkReport "s1" wtA "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" wtA "u2" "2026-03-01T10:00:10Z" (UsageInfo(150000, 200000)))
             // A delayed OLDER snapshot arrives last; its own usage LWW clock rejects it.
-            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:05Z" (UsageInfo(80000, 200000)))
+            svc.Submit(mkReport "s1" wtA "u1" "2026-03-01T10:00:05Z" (UsageInfo(80000, 200000)))
             let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
             Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 150000; TokenLimit = 200000 }), "the fresher gauge is kept"))
 
     [<Test>]
     member _.``a usage_info for a session with no prior status is dropped``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:00Z" (UsageInfo(120000, 200000)))
+        withServiceAndPath wtA (fun (svc, _, _, dbPath) ->
+            svc.Submit(mkReport "s1" wtA "u1" "2026-03-01T10:00:00Z" (UsageInfo(120000, 200000)))
             let live = svc.LiveSnapshot()
             Assert.That(live.ContainsKey(SessionId "s1"), Is.False, "a gauge never creates a session")
             Assert.That(eventCount dbPath, Is.Zero))
@@ -1785,14 +1799,14 @@ type RestartRebuildTests() =
             store.UpsertStatus
                 { SessionId = SessionId "stale"
                   TerminalSessionId = None
-                  WorktreePath = WorktreePath "C:/wt/a"
+                  WorktreePath = WorktreePath wtA
                   Provider = CopilotCli
                   Status = { emptyStatus with Status = SessionLevelStatus.Working }
                   UpdatedAt = now - idleWindow - TimeSpan.FromMinutes 5.0
                   LastSeen = now - idleWindow - TimeSpan.FromMinutes 5.0
                   ContextUsageAt = None }
 
-        withServiceSeeded "C:/wt/a" seed (fun (svc, _, _) ->
+        withServiceSeeded wtA seed (fun (svc, _, _) ->
             svc.Start()
             Assert.That((svc.LiveSnapshot()).ContainsKey(SessionId "stale"), Is.False))
 
@@ -1806,7 +1820,7 @@ type TerminalOwnershipQueryTests() =
     let ownedStored terminalSessionId sessionId lastSeen =
         { SessionId = SessionId sessionId
           TerminalSessionId = Some terminalSessionId
-          WorktreePath = WorktreePath "C:/wt/a"
+          WorktreePath = WorktreePath wtA
           Provider = CopilotCli
           Status = { emptyStatus with Status = SessionLevelStatus.Idle }
           UpdatedAt = lastSeen
@@ -1870,11 +1884,11 @@ type TerminalOwnershipQueryTests() =
         let snapshot =
             { Tabs =
                 [ { Id = EmbeddedTerminalId(TerminalSessionId.value terminalA)
-                    Worktree = WorktreePath "C:/wt/a"
+                    Worktree = WorktreePath wtA
                     ReportedActivity = None
                     Lifecycle = EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61001/" }
                   { Id = EmbeddedTerminalId(TerminalSessionId.value terminalB)
-                    Worktree = WorktreePath "C:/wt/a"
+                    Worktree = WorktreePath wtA
                     ReportedActivity = None
                     Lifecycle = EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61002/" } ] }
 
@@ -1937,12 +1951,12 @@ type TerminalOwnershipQueryTests() =
         let withOrigin terminalSessionId (report: SessionActivityReport) =
             { report with TerminalSessionId = Some terminalSessionId }
 
-        withService "C:/wt/a" (fun (service, _, _) ->
-            mkReport "old" "C:/wt/a" "old-event" "2026-03-01T10:00:00Z" TurnStarted
+        withService wtA (fun (service, _, _) ->
+            mkReport "old" wtA "old-event" "2026-03-01T10:00:00Z" TurnStarted
             |> withOrigin oldTerminal
             |> service.Submit
 
-            mkReport "fresh" "C:/wt/a" "fresh-event" "2026-03-01T12:01:00Z" TurnStarted
+            mkReport "fresh" wtA "fresh-event" "2026-03-01T12:01:00Z" TurnStarted
             |> withOrigin freshTerminal
             |> service.Submit
 
@@ -2028,12 +2042,12 @@ type TerminalOwnershipQueryTests() =
         let oldAt = ts "2026-01-01T10:00:00Z"
         let now = oldAt + retentionPeriod + TimeSpan.FromDays 1.0
 
-        withService "C:/wt/a" (fun (service, _, store) ->
+        withService wtA (fun (service, _, store) ->
             queryActivityOk service (Set.singleton current) |> ignore
 
             mkReport
                 "expired"
-                "C:/wt/a"
+                wtA
                 "expired-event"
                 "2026-01-01T10:00:00Z"
                 TurnStarted
@@ -2101,7 +2115,7 @@ type TerminalOwnershipQueryTests() =
     member _.``every exact waiting session gates past freshness until input completes``() =
         let terminalSessionId =
             TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        let worktreePath = "C:/wt/a"
+        let worktreePath = wtA
         let awaitingAt = ts "2026-03-01T10:00:00Z"
         let completedAt = ts "2026-03-01T10:01:00Z"
         let now = ts "2026-03-01T10:20:00Z"
@@ -2172,21 +2186,21 @@ type TerminalOwnershipQueryTests() =
             TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         let now = ts "2026-03-01T10:00:30Z"
         let replacementTarget =
-            replacementTerminal terminalA "C:/wt/a"
+            replacementTerminal terminalA wtA
         let withOrigin
             terminalSessionId
             (report: SessionActivityReport)
             : SessionActivityReport =
             { report with TerminalSessionId = Some terminalSessionId }
 
-        withService "C:/wt/a" (fun (service, _, store) ->
-            mkReport "owned" "C:/wt/a" "owned-idle" "2026-03-01T10:00:00Z" TurnEnded
+        withService wtA (fun (service, _, store) ->
+            mkReport "owned" wtA "owned-idle" "2026-03-01T10:00:00Z" TurnEnded
             |> withOrigin terminalA
             |> service.Submit
 
             mkReport
                 "owned"
-                "C:/wt/a"
+                wtA
                 "owned-background"
                 "2026-03-01T10:00:05Z"
                 (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:05Z"))
@@ -2216,10 +2230,10 @@ type TerminalOwnershipQueryTests() =
                         TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
                 ))
 
-            mkReport "same-worktree-unowned" "C:/wt/a" "unowned" "2026-03-01T10:00:10Z" TurnStarted
+            mkReport "same-worktree-unowned" wtA "unowned" "2026-03-01T10:00:10Z" TurnStarted
             |> service.Submit
 
-            mkReport "other-terminal" "C:/wt/a" "other" "2026-03-01T10:00:11Z" TurnStarted
+            mkReport "other-terminal" wtA "other" "2026-03-01T10:00:11Z" TurnStarted
             |> withOrigin terminalB
             |> service.Submit
 
@@ -2241,7 +2255,7 @@ type TerminalOwnershipQueryTests() =
 
             mkReport
                 "owned"
-                "C:/wt/a"
+                wtA
                 "owned-finished"
                 "2026-03-01T10:00:15Z"
                 (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:15Z"))
@@ -2273,7 +2287,7 @@ type TerminalOwnershipQueryTests() =
                     Is.EqualTo None
                 ))
 
-            mkReport "owned" "C:/wt/a" "origin-omitted" "2026-03-01T10:00:20Z" WentIdle
+            mkReport "owned" wtA "origin-omitted" "2026-03-01T10:00:20Z" WentIdle
             |> service.Submit
 
             let retained =
@@ -2356,3 +2370,87 @@ type TerminalOwnershipQueryTests() =
                               "copilot --yolo --resume 'latest'" ]
                     )
                 )))
+
+/// A reporter is not obliged to sit at a worktree root. An agent that has moved into a subdirectory
+/// reports from inside one; an agent that works across several repositories from a single folder
+/// reports from above them. Both are the same session as far as a card is concerned.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type MonitoredWorktreeResolutionTests() =
+    let path segments =
+        let root = Path.GetPathRoot(Directory.GetCurrentDirectory())
+        segments |> List.fold (fun (acc: string) segment -> Path.Combine(acc, segment)) root
+
+    let centro = path [ "git"; "CentroSpectrum"; "blue"; "git"; "Centro" ]
+    let clabe = path [ "git"; "CentroSpectrum"; "red"; "git"; "Clabe" ]
+    let known = Set.ofList [ centro ]
+
+    [<Test>]
+    member _.``a worktree root resolves to itself``() =
+        Assert.That(resolveMonitoredWorktree known centro, Is.EqualTo(Some centro))
+
+    [<Test>]
+    member _.``a directory inside a worktree resolves to that worktree``() =
+        let inside = Path.Combine(centro, "src", "Centro.ManagementApi")
+        Assert.That(resolveMonitoredWorktree known inside, Is.EqualTo(Some centro))
+
+    [<Test>]
+    member _.``a folder above a single worktree resolves to it``() =
+        // The agent's working folder sits a couple of directories above the repository it edits.
+        let workingFolder = path [ "git"; "CentroSpectrum"; "blue" ]
+        Assert.That(resolveMonitoredWorktree known workingFolder, Is.EqualTo(Some centro))
+
+    [<Test>]
+    member _.``a folder above several worktrees names none of them``() =
+        let both = Set.ofList [ centro; clabe ]
+        let above = path [ "git"; "CentroSpectrum" ]
+        Assert.That(resolveMonitoredWorktree both above, Is.EqualTo None)
+
+    [<Test>]
+    member _.``the deepest enclosing worktree wins when one is nested in another``() =
+        let nested = Path.Combine(centro, "vendor", "library")
+        let deeper = Set.ofList [ centro; nested ]
+        Assert.That(resolveMonitoredWorktree deeper (Path.Combine(nested, "src")), Is.EqualTo(Some nested))
+
+    [<Test>]
+    member _.``an unrelated path stays unmonitored``() =
+        Assert.That(resolveMonitoredWorktree known (path [ "somewhere"; "else" ]), Is.EqualTo None)
+
+    [<Test>]
+    member _.``a sibling whose name merely starts the same is not a match``() =
+        Assert.That(resolveMonitoredWorktree known (centro + "-backup"), Is.EqualTo None)
+
+/// The reported directory arrives over HTTP from whatever working directory an agent happens to have,
+/// so it is validated rather than trusted. None of it touches the filesystem: a directory that does
+/// not exist, or whose parents cannot be read, is judged purely as text.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ReportedWorktreePathTests() =
+
+    // GetFullPath resolves a relative path against the server's own working directory, which would
+    // attribute the report to whatever worktree Treemon itself is running in.
+    [<Test>]
+    member _.``a relative path is rejected rather than resolved against the server``() =
+        Assert.Multiple(fun () ->
+            Assert.That(parseErr { baseReq "heartbeat" with worktreePath = "." }, Does.Contain "absolute")
+            Assert.That(
+                parseErr { baseReq "heartbeat" with worktreePath = Path.Combine("src", "Centro") },
+                Does.Contain "absolute"))
+
+    [<Test>]
+    member _.``a malformed path is rejected rather than throwing``() =
+        // A NUL is rejected by GetFullPath itself, which used to escape the parse chain.
+        Assert.That(
+            parseErr { baseReq "heartbeat" with worktreePath = wtA + string (char 0) + "bad" },
+            Does.Contain "valid path")
+
+    [<Test>]
+    member _.``a directory that does not exist still parses, because nothing is read from disk``() =
+        let absent = Path.Combine(wtA, "no-such-directory", "nor-this")
+        let report = parseOk { baseReq "heartbeat" with worktreePath = absent }
+
+        Assert.That(
+            WorktreePath.value report.WorktreePath,
+            Is.EqualTo(Server.PathUtils.normalizePath absent))

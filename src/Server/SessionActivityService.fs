@@ -2,6 +2,7 @@ module Server.SessionActivityService
 
 open System
 open System.Globalization
+open System.IO
 open System.Threading
 open Giraffe
 open Microsoft.AspNetCore.Http
@@ -211,6 +212,26 @@ let private withMessageTimestamp at =
     | UserInputCompleted _ -> UserInputCompleted at
     | event -> event
 
+/// The reported directory, in the absolute normalised form the scheduler's known paths use.
+///
+/// Rooted is required rather than assumed: GetFullPath resolves a relative path against *this
+/// server's* working directory, so a reporter sending "." would silently be attributed to whatever
+/// worktree the server itself is running in. GetFullPath also throws on a malformed path, and a
+/// reporter with an odd working directory should get a rejected request, not an unhandled one.
+///
+/// Note this asks nothing of the filesystem: the path need not exist, and no directory above it is
+/// read, so an unreadable or deleted parent cannot affect the outcome.
+let private parseWorktreePath (raw: string) =
+    if not (Path.IsPathFullyQualified raw) then
+        Error "worktreePath must be an absolute path"
+    else
+        try
+            Ok(WorktreePath(PathUtils.normalizePath raw))
+        with
+        | :? ArgumentException
+        | :? PathTooLongException
+        | :? NotSupportedException -> Error "worktreePath is not a valid path"
+
 /// Validate a wire request and build the domain report, or return a human-readable reason. The
 /// worktree path is normalised here so it matches the scheduler's known-path set, and `occurredAt`
 /// is clamped against `now` so a future timestamp can't poison freshness or activity ordering.
@@ -227,6 +248,8 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
     elif String.IsNullOrWhiteSpace req.occurredAt then Error "missing occurredAt"
     elif String.IsNullOrWhiteSpace req.kind then Error "missing kind"
     else
+        parseWorktreePath req.worktreePath
+        |> Result.bind (fun worktreePath ->
         parseProvider req.provider
         |> Result.bind (fun provider ->
             parseTerminalSessionId (Option.ofObj req.terminalSessionId)
@@ -238,11 +261,11 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
                     |> Result.map (fun ev ->
                         { SessionId = SessionId req.sessionId
                           TerminalSessionId = terminalSessionId
-                          WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
+                          WorktreePath = worktreePath
                           Provider = provider
                           EventId = EventId req.eventId
                           OccurredAt = occurredAt
-                          Event = withMessageTimestamp occurredAt ev }))))
+                          Event = withMessageTimestamp occurredAt ev })))))
 
 // --- Known-worktree guard (mirrors CanvasDocServer) --------------------------------------------
 
@@ -251,9 +274,51 @@ let private allKnownPaths (agent: MailboxProcessor<SchedulerState.StateMsg>) = a
     return state.Repos |> Map.values |> Seq.collect _.KnownPaths |> Set.ofSeq
 }
 
-let private isKnownWorktree agent path = async {
+/// How far above a worktree a reporter may sit and still be attributed to it. An agent that works
+/// across several repositories from one folder starts a directory or two above them, so its reports
+/// arrive from there; searching further up would start matching unrelated trees.
+let [<Literal>] internal MaxAncestorDepth = 3
+
+/// Which monitored worktree a reported path belongs to, if any. Reporters do not necessarily sit at
+/// a worktree root: an agent that has moved into a subdirectory reports from inside one, and an
+/// agent working across repositories from a parent folder reports from above them. Both are the same
+/// session as far as a dashboard is concerned, so both resolve to the worktree rather than being
+/// discarded as unmonitored.
+///
+/// A path above several monitored worktrees names none of them in particular, so it resolves to
+/// nothing rather than picking one arbitrarily or lighting up every card.
+let internal resolveMonitoredWorktree (known: Set<string>) (reported: string) =
+    let separator = string Path.DirectorySeparatorChar
+
+    if known.Contains reported then
+        Some reported
+    else
+        let isBelow (candidate: string) =
+            reported.StartsWith(candidate + separator, StringComparison.Ordinal)
+
+        let depthBelow (candidate: string) =
+            candidate
+                .Substring(reported.Length)
+                .Split([| Path.DirectorySeparatorChar |], StringSplitOptions.RemoveEmptyEntries)
+                .Length
+
+        // Inside a worktree: the deepest enclosing one, so a worktree nested in another still wins.
+        match known |> Seq.filter isBelow |> Seq.sortByDescending _.Length |> Seq.tryHead with
+        | Some enclosing -> Some enclosing
+        | None ->
+            known
+            |> Seq.filter (fun candidate ->
+                candidate.StartsWith(reported + separator, StringComparison.Ordinal)
+                && depthBelow candidate <= MaxAncestorDepth)
+            |> Seq.truncate 2
+            |> Seq.toList
+            |> function
+                | [ single ] -> Some single
+                | _ -> None
+
+let private monitoredWorktreeFor agent path = async {
     let! paths = allKnownPaths agent
-    return paths |> Set.contains path
+    return resolveMonitoredWorktree paths path
 }
 
 let private isSyntheticSystemReminder (report: SessionActivityReport) =
@@ -283,11 +348,15 @@ let tryAcceptReport (agent: MailboxProcessor<SchedulerState.StateMsg>) (req: Ses
         | Error reason -> return Rejected reason
         | Ok report ->
             let path = WorktreePath.value report.WorktreePath
-            let! known = isKnownWorktree agent path
+            let! monitored = monitoredWorktreeFor agent path
             return
-                if not known then Unmonitored path
-                elif isSyntheticSystemReminder report then IgnoredSystemReminder
-                else Accepted report
+                match monitored with
+                | None -> Unmonitored path
+                | Some _ when isSyntheticSystemReminder report -> IgnoredSystemReminder
+                | Some worktree ->
+                    // Stored against the worktree, not the directory the reporter happened to be in,
+                    // so every session for one worktree collapses onto its card.
+                    Accepted { report with WorktreePath = WorktreePath worktree }
     }
 
 // --- Retention ---------------------------------------------------------------------------------
