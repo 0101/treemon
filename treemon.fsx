@@ -500,22 +500,8 @@ module Server =
 
         if trimmed.EndsWith ':' then root else trimmed
 
-    let start (roots: string list) =
-        if not (File.Exists serverExecutable) then
-            failwith $"No published server at '{serverExecutable}'. Run 'publish' first."
-
-        match runningPid () with
-        | Some existing ->
-            // Without this the launch still "succeeds": the old server keeps the port bound, so the
-            // post-start check passes while the process just started has already died on the port.
-            // Deliberately no URL: the pid file records the process, not the port it was given, so
-            // the port asked for now may not be the one it is serving. It is also per checkout, which
-            // is why a second instance needs a second checkout rather than only its own ports.
-            Out.warn $"Treemon is already running (PID {existing}); this checkout tracks one server."
-            Out.plain "Use 'stop' first, or 'restart'."
-            1
-        | None ->
-
+    /// The startup path proper, once it is known that nothing is already running.
+    let private startFresh (roots: string list) =
         Directory.CreateDirectory logDir |> ignore
         let stamp = DateTime.Now.ToString "yyyyMMdd-HHmmss"
         let logPath = Path.Combine(logDir, $"treemon-prod.{stamp}.log")
@@ -590,6 +576,23 @@ module Server =
                 ignore launcher.Id
                 1
 
+    let start (roots: string list) =
+        if not (File.Exists serverExecutable) then
+            failwith $"No published server at '{serverExecutable}'. Run 'publish' first."
+
+        match runningPid () with
+        | Some existing ->
+            // Without this the launch still "succeeds": the old server keeps the port bound, so the
+            // post-start check passes while the process just started has already died on the port.
+            // Deliberately no URL: the pid file records the process, not the port it was given, so
+            // the port asked for now may not be the one it is serving. It is also per checkout, which
+            // is why a second instance needs a second checkout rather than only its own ports.
+            Out.warn $"Treemon is already running (PID {existing}); this checkout tracks one server."
+            Out.plain "Use 'stop' first, or 'restart'."
+            1
+        | None ->
+            startFresh roots
+
     let stop () =
         // runningPid is the single gate: it already refuses a pid the server no longer owns, so a
         // reused pid arrives here as None and is cleared rather than killed.
@@ -644,7 +647,12 @@ module Frontend =
             Out.warn "wwwroot/ is empty, building the frontend..."
             build ()
 
+/// Publishing is how a Linux install takes an update, and there is no `deploy` there to rebuild the
+/// client for it. Rebuilding here rather than relying on `ensure` - which only asks whether wwwroot
+/// has anything in it at all - is what stops a server update from serving last release's assets.
 let private publish () =
+    Frontend.build ()
+
     Exec.runOrFail
         "dotnet"
         [ "publish"
@@ -745,10 +753,26 @@ let private startDev (roots: string list) =
 
     // The reporting extension defaults to production's 5000, so without TREEMON_PORTS every session
     // started from a dev terminal would report its activity to production instead.
+    // Never the production state directory. A dev server that shares it discovers, replaces and
+    // shuts down the TerminalHost a running production instance owns - taking that user's terminals
+    // with it. An explicit override still wins, the way the executable override does.
+    let devStateDirectory =
+        match Environment.GetEnvironmentVariable "TREEMON_TERMINAL_HOST_STATE_DIR" with
+        | null | "" ->
+            Path.Combine(
+                Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData,
+                "Treemon",
+                "TerminalHost-Dev")
+            |> Path.GetFullPath
+        | configured -> Path.GetFullPath configured
+
+    Directory.CreateDirectory devStateDirectory |> ignore
+
     let environment =
         [ "VITE_PORT", string devVitePort
           "API_PORT", string devApiPort
-          "TREEMON_PORTS", string devApiPort ]
+          "TREEMON_PORTS", string devApiPort
+          "TREEMON_TERMINAL_HOST_STATE_DIR", devStateDirectory ]
         @ (terminalHostExecutable
            |> Option.map (fun path -> [ ("TREEMON_TERMINAL_HOST_EXECUTABLE", path) ])
            |> Option.defaultValue [])

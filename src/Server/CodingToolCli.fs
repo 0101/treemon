@@ -15,21 +15,30 @@ type CliInvocation =
 
     member this.AsShellString = $"{this.Executable} {this.Args}"
 
-// Keep the readable single-quoted form for control-free values. Control-bearing prompts are
-// decoded from inert base64 data so the emitted terminal command remains one line.
-//
-// Both forms are PowerShell: '' escapes a quote and the base64 decode is a .NET expression. That
-// holds wherever the embedded terminal runs PowerShell, which off Windows it does not - a POSIX
-// shell reads '' as ending the string. Launching an agent from a Linux terminal therefore needs
-// shell-aware quoting here, for every provider, not just this one.
-let private escape (s: string) = s.Replace("'", "''")
+// These strings are submitted to the embedded terminal, so they have to be quoted for the shell that
+// terminal is running: PowerShell on Windows, a POSIX shell elsewhere. The two disagree on the one
+// character that matters most here - PowerShell escapes a quote by doubling it, where a POSIX shell
+// reads '' as ending the string - so emitting one form everywhere corrupted every prompt containing
+// an apostrophe off Windows, and made a multi-line prompt a syntax error.
+let private forPowerShell = OperatingSystem.IsWindows()
 
-let private quoted value = $"'{escape value}'"
+let private quoted (value: string) =
+    if forPowerShell then
+        "'" + value.Replace("'", "''") + "'"
+    else
+        "'" + value.Replace("'", @"'\''") + "'"
 
+/// A control-bearing prompt is carried as inert base64 and decoded by the shell, so the command
+/// submitted to the terminal stays one line either way.
 let private promptArgument (prompt: string) =
     if prompt |> Seq.exists Char.IsControl then
         let encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes prompt)
-        $"([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded}')))"
+
+        if forPowerShell then
+            $"([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded}')))"
+        else
+            // base64 -d is POSIX-portable in a way `echo -n` flags are not.
+            $"\"$(printf %%s '{encoded}' | base64 -d)\""
     else
         quoted prompt
 
@@ -48,7 +57,9 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
           Args = "--yolo --continue" }
     | CodingToolProvider.CopilotCli, NonInteractive prompt ->
         { Executable = "copilot"
-          Args = $"-p \"{escape prompt}\" --allow-all --no-ask-user -s --autopilot" }
+          // Single-quoted like every other argument here: the double-quoted form escaped no quote at
+          // all, so a prompt containing one broke the command on either shell.
+          Args = $"-p {quoted prompt} --allow-all --no-ask-user -s --autopilot" }
     // Claude Code takes the prompt positionally when interactive and behind -p when not. Permissions
     // are bypassed to match the Copilot arms: an agent Treemon launches runs unattended, so a
     // permission prompt nobody is watching would simply hang the session.

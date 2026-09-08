@@ -9,10 +9,10 @@
   or PowerShell productization stack. The whole terminal runtime (`src/TerminalHost`,
   `src/TerminalHostLayout`, `src/Server/TerminalHost*.fs`,
   `src/Server/TerminalSessionActivity.fs`, `src/Server/EmbeddedTerminal.fs`, and any terminal-specific
-  runtime script) stays at or below 4,200 nonblank production lines. The limit was 4,000 while the
-  runtime was Windows-only; supporting Linux costs a second implementation of process ownership, the
-  ttyd artifact, the shell launched inside it, and a process start time stable enough to serve as an
-  identity. It is raised per capability, with the reason recorded here, and not by drift. Product-level launch policy
+  runtime script) stays at or below 4,200 nonblank production lines. The ceiling covers both
+  supported platforms: process ownership, the ttyd artifact, the shell launched inside it and a
+  process start time usable as an identity each exist once for Windows and once for POSIX. It moves
+  only for a named capability, never to accommodate growth in the code already here. Product-level launch policy
   (`TerminalLaunch.fs`, `SessionManager.fs`, `WorktreeApi.fs`) routes to that runtime and is outside
   both it and the budget.
 - Give every terminal an exact kernel-owned process boundary established before ttyd executes.

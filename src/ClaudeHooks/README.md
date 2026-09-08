@@ -17,6 +17,8 @@ Add the hooks to `~/.claude/settings.json` (all users of this machine) or to a p
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node /path/to/treemon/src/ClaudeHooks/report.mjs" }] }],
     "PreToolUse":       [{ "matcher": "Task", "hooks": [{ "type": "command", "command": "node /path/to/treemon/src/ClaudeHooks/report.mjs" }] }],
     "PostToolUse":      [{ "matcher": "Task", "hooks": [{ "type": "command", "command": "node /path/to/treemon/src/ClaudeHooks/report.mjs" }] }],
+    "PostToolUseFailure": [{ "matcher": "Task", "hooks": [{ "type": "command", "command": "node /path/to/treemon/src/ClaudeHooks/report.mjs" }] }],
+    "PermissionDenied": [{ "matcher": "Task", "hooks": [{ "type": "command", "command": "node /path/to/treemon/src/ClaudeHooks/report.mjs" }] }],
     "Notification":     [{ "hooks": [{ "type": "command", "command": "node /path/to/treemon/src/ClaudeHooks/report.mjs" }] }],
     "SubagentStop":     [{ "hooks": [{ "type": "command", "command": "node /path/to/treemon/src/ClaudeHooks/report.mjs" }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "node /path/to/treemon/src/ClaudeHooks/report.mjs" }] }],
@@ -55,14 +57,14 @@ otherwise 5000. Same convention as the Copilot reporter.
 
 | Hook | Reported as |
 |---|---|
-| `SessionStart` | `went_idle` — registers the session as present but not working |
+| `SessionStart` | `went_idle` — registers the session as present but not working. On `source: "compact"` a `heartbeat` instead, because compaction happens mid-turn |
 | `UserPromptSubmit` | `user_input_completed`, `user_prompt`, `turn_started` |
 | `PreToolUse` (`Task`) | `background_agent_started` |
-| `PostToolUse` (`Task`) / `SubagentStop` | `background_agent_finished` |
-| `PreToolUse` / `PostToolUse` (other tools) | `heartbeat` — keeps a long tool run from decaying to Idle |
+| `PostToolUse` / `PostToolUseFailure` / `PermissionDenied` (`Task`), `SubagentStop` | `background_agent_finished` |
 | `Notification` | `awaiting_user_input`, carrying the question |
 | `Stop` | `user_input_completed`, `turn_ended` |
 | `SessionEnd` | `user_input_completed`, `went_idle` |
+| anything else | `heartbeat` |
 
 Two of those are less obvious than they look.
 
@@ -73,7 +75,15 @@ it a session stays visibly blocked on a question that was answered long ago.
 **The delegated-agent pair matters** because Treemon folds `background_agent_started` /
 `background_agent_finished` into per-tool clocks, so a root turn cannot settle Idle while its
 sub-agents are still running. Reporting one without the other leaves a card showing work that
-finished.
+finished — which is why the failure and permission-denied hooks are registered too: a `Task` that
+errors or is refused never reaches `PostToolUse`, and its clock would stay open for the rest of the
+session. An event whose id is missing is dropped rather than sent unpaired, for the same reason.
+
+## Tests
+
+`npm run test:extension` covers the mapping (`src/Tests/Extension/claude-hooks/`). The script itself
+swallows every error by design, so a mapping regression cannot fail a hook — which is exactly why the
+mapping is a separate, tested module rather than living inside `report.mjs`.
 
 ## Behaviour under failure
 

@@ -87,8 +87,9 @@ let private readLinuxMemory () =
 
 // The previous CPU sample only exists to turn two monotonic counters into a rate, and the polling
 // loop that reads it is an impure boundary, so the sample is swapped atomically rather than threaded
-// through the call.
-let private cpuState = ref Option<CpuSample>.None
+// through the call. A `let mutable` keeps that mutation visible at its one use site; a ref cell would
+// hide the same thing behind an allocation.
+let mutable private cpuState = Option<CpuSample>.None
 
 let private computeCpuPercent (prev: CpuSample) (curr: CpuSample) =
     // These are unsigned counters that are supposed to only rise, but Linux documents that iowait
@@ -110,7 +111,7 @@ let private sampleSystemMetrics readCpuTimes readMemory : SystemMetrics option =
         match readCpuTimes () with
         | None -> None
         | Some curr ->
-            match Interlocked.Exchange(cpuState, Some curr) with
+            match Interlocked.Exchange(&cpuState, Some curr) with
             | None -> None
             | Some prev -> Some(computeCpuPercent prev curr)
 
