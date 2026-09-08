@@ -207,8 +207,9 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
 
     { Status = status
       SessionStatuses = sessionStatuses
-      // Single push provider today (Copilot CLI); a future provider threads its own value here.
-      Provider = footer |> Option.map (fun _ -> CopilotCli)
+      // The reporting session's own provider. Hardcoding it was invisible to the compiler when a
+      // second provider arrived, so every Claude session rendered as Copilot.
+      Provider = selection.Footer |> Option.map _.Provider
       CurrentSkill = footer |> Option.bind _.Skill
       AgentActivity =
         footer

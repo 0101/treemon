@@ -91,13 +91,19 @@ let private readLinuxMemory () =
 let private cpuState = ref Option<CpuSample>.None
 
 let private computeCpuPercent (prev: CpuSample) (curr: CpuSample) =
-    let totalDelta = curr.Total - prev.Total
+    // These are unsigned counters that are supposed to only rise, but Linux documents that iowait
+    // can go backwards, and idle folds iowait in. A bare subtraction would wrap to an enormous
+    // number and report a CPU percentage far above 100, so a counter that moved backwards is read
+    // as no movement, and idle can never exceed the total it is a part of.
+    let delta (before: uint64) (after: uint64) = if after > before then after - before else 0UL
+
+    let totalDelta = delta prev.Total curr.Total
+    let idleDelta = min (delta prev.Idle curr.Idle) totalDelta
 
     if totalDelta = 0UL then
         0.0
     else
-        let busy = totalDelta - (curr.Idle - prev.Idle)
-        Math.Round(float busy / float totalDelta * 100.0, 1)
+        Math.Round(float (totalDelta - idleDelta) / float totalDelta * 100.0, 1)
 
 let private sampleSystemMetrics readCpuTimes readMemory : SystemMetrics option =
     let cpuPercent =

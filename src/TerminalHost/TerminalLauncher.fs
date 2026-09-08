@@ -36,7 +36,7 @@ module TerminalLauncher =
             [ "-p"; string port; "-i"; "127.0.0.1"; "-W"; "-O"; "-o"
               "-t"; "fontSize=16"; "-t"; "disableLeaveAlert=true"
               "-w"; path
-              TerminalShell.executable shell
+              TerminalShell.launchExecutable shell
               yield! TerminalShell.arguments shell ] }
 
     let private canConnect port =

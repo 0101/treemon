@@ -9,7 +9,10 @@
   or PowerShell productization stack. The whole terminal runtime (`src/TerminalHost`,
   `src/TerminalHostLayout`, `src/Server/TerminalHost*.fs`,
   `src/Server/TerminalSessionActivity.fs`, `src/Server/EmbeddedTerminal.fs`, and any terminal-specific
-  runtime script) stays at or below 4,000 nonblank production lines. Product-level launch policy
+  runtime script) stays at or below 4,200 nonblank production lines. The limit was 4,000 while the
+  runtime was Windows-only; supporting Linux costs a second implementation of process ownership, the
+  ttyd artifact, the shell launched inside it, and a process start time stable enough to serve as an
+  identity. It is raised per capability, with the reason recorded here, and not by drift. Product-level launch policy
   (`TerminalLaunch.fs`, `SessionManager.fs`, `WorktreeApi.fs`) routes to that runtime and is outside
   both it and the budget.
 - Give every terminal an exact kernel-owned process boundary established before ttyd executes.
@@ -240,10 +243,18 @@ An attempt made during committed host replacement fails without mutating the wor
 state; the client reconciles from the authoritative worktree snapshot and leaves the action
 available to retry after replacement.
 
-If the host crashes, closing its Job Object handles kills every owned ttyd tree. Treemon keeps the
-affected tabs visible as interrupted, reports the loss, and can start fresh terminals. It does not
-claim cross-host process recovery or accept absence in a replacement registry as proof that an old
-process survived or was recovered.
+On Windows, if the host crashes, closing its Job Object handles kills every owned ttyd tree — the
+kernel enforces it, so it holds even when the host is killed outright.
+
+Linux has no equivalent. Ownership there is a process tree this host walks and signals itself, which
+only happens while it is alive to do it: a SIGKILLed host orphans its ttyd processes and the shells
+under them, and nothing reclaims them, because the manifest records only the host's own identity and
+there is no startup sweep. This is a real difference in guarantee, not an implementation detail, and
+closing it needs either a parent-death mechanism or an exact-identity sweep at startup.
+
+On both platforms Treemon keeps the affected tabs visible as interrupted, reports the loss, and can
+start fresh terminals. It does not claim cross-host process recovery or accept absence in a
+replacement registry as proof that an old process survived or was recovered.
 
 ### Production safety
 

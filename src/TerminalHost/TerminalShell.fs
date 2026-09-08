@@ -21,10 +21,15 @@ module TerminalShell =
         else
             PosixShell executable
 
-    let executable shell =
+    /// What ttyd is actually told to run. For PowerShell that is the configured shell itself, which
+    /// parses its own arguments. A POSIX shell is reached through /bin/sh instead: the configured
+    /// shell is whatever SHELL names, and fish, tcsh and nushell are all valid logins that do not
+    /// parse `cd -- … && exec`. /bin/sh does, and then execs the configured shell, which only has to
+    /// start interactively.
+    let launchExecutable shell =
         match shell with
-        | PowerShell path
-        | PosixShell path -> path
+        | PowerShell path -> path
+        | PosixShell _ -> "/bin/sh"
 
     /// A POSIX shell takes the directory change as shell source rather than as an argument, so the
     /// executable is interpolated into a command string and has to survive a path containing a quote.

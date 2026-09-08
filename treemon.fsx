@@ -11,6 +11,7 @@ open System.Net.Http
 open System.Net.NetworkInformation
 open System.Runtime.InteropServices
 open System.Security.Cryptography
+open System.Text.Json
 open System.Threading
 
 let scriptDir = __SOURCE_DIRECTORY__
@@ -263,6 +264,70 @@ module Ttyd =
             | AdoptInstalled executableName ->
                 adopt (Path.Combine(installDirectory, executableName))
 
+/// The pre-global-config file the PowerShell lifecycle used to own. The server migrates `roots.json`
+/// but not this, so an existing Windows install that switches to these commands would otherwise come
+/// up watching nothing.
+module LegacyConfig =
+    let private path = Path.Combine(scriptDir, ".treemon.config")
+
+    /// `Some roots` when the file parsed - possibly to no roots at all, which is different from a
+    /// file that could not be read and must therefore be left alone rather than deleted.
+    let read () =
+        if not (File.Exists path) then
+            Some []
+        else
+            try
+                use document = JsonDocument.Parse(File.ReadAllText path)
+                let root = document.RootElement
+
+                let stringsOf (name: string) =
+                    match root.TryGetProperty name with
+                    | true, element when element.ValueKind = JsonValueKind.Array ->
+                        element.EnumerateArray()
+                        |> Seq.choose (fun item -> item.GetString() |> Option.ofObj)
+                        |> Seq.filter (String.IsNullOrWhiteSpace >> not)
+                        |> Seq.toList
+                        |> Some
+                    | true, element when element.ValueKind = JsonValueKind.String ->
+                        element.GetString()
+                        |> Option.ofObj
+                        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+                        |> Option.map List.singleton
+                    | _ -> None
+
+                // Versions before multi-repo wrote the singular key.
+                match stringsOf "WorktreeRoots" with
+                | Some roots -> Some roots
+                | None -> stringsOf "WorktreeRoot" |> Option.orElse (Some [])
+            with
+            | :? JsonException
+            | :? IOException
+            | :? UnauthorizedAccessException -> None
+
+    /// Retired only once the server is up - it has persisted the roots by then - and only when every
+    /// root it declared was actually handed over. A file that could not be parsed, or one whose roots
+    /// this run ignored, is kept so nothing is silently lost.
+    let retireIfFullyMigrated (migrated: string list) =
+        if File.Exists path then
+            match read () with
+            | None -> Out.warn "Warning: .treemon.config could not be parsed; leaving it in place to avoid data loss."
+            | Some declared ->
+                let normalise (value: string) =
+                    value.TrimEnd('\\', '/').ToLowerInvariant()
+
+                let handedOver = migrated |> List.map normalise |> Set.ofList
+                let missed = declared |> List.filter (fun root -> not (handedOver.Contains(normalise root)))
+
+                if List.isEmpty missed then
+                    try
+                        File.Delete path
+                    with
+                    | :? IOException
+                    | :? UnauthorizedAccessException -> ()
+                else
+                    Out.warn
+                        $"""Warning: .treemon.config still declares roots this run did not migrate ({String.concat ", " missed}); leaving it in place."""
+
 module Server =
     let private aliveProcess processId =
         try
@@ -276,19 +341,6 @@ module Server =
         with
         | :? ArgumentException
         | :? InvalidOperationException -> None
-
-    let runningPid () =
-        if not (File.Exists pidFile) then
-            None
-        else
-            match Int32.TryParse((File.ReadAllText pidFile).Trim()) with
-            | true, processId ->
-                match aliveProcess processId with
-                | Some child ->
-                    child.Dispose()
-                    Some processId
-                | None -> None
-            | _ -> None
 
     let private pathComparison =
         if isWindows then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
@@ -313,6 +365,22 @@ module Server =
     /// treemon.ps1 records the server itself, and `stop` has to mean the same thing in both scripts.
     /// On Windows the launcher is a cmd wrapper whose pid is not the server's, so the server is found
     /// by its executable instead of taken from Process.Start.
+    /// The recorded pid, only when the process wearing it is still this checkout's server. The file
+    /// outlives crashes and reboots, so "alive" alone is not evidence: a reused pid would otherwise
+    /// make `start` refuse to run and `status` report a stranger as Treemon.
+    let runningPid () =
+        if not (File.Exists pidFile) then
+            None
+        else
+            match Int32.TryParse((File.ReadAllText pidFile).Trim()) with
+            | true, processId ->
+                match aliveProcess processId with
+                | Some child ->
+                    use child = child
+                    if isServerProcess child then Some processId else None
+                | None -> None
+            | _ -> None
+
     let private resolveServerProcess () =
         Process.GetProcessesByName(Path.GetFileNameWithoutExtension serverExecutable)
         |> Array.fold
@@ -326,6 +394,38 @@ module Server =
                     candidate.Dispose()
                     None)
             None
+
+    /// A production server started from inside a Treemon embedded terminal inherits that terminal's
+    /// shutdown boundary - on Windows its Job Object - so closing the tab kills production. The
+    /// PowerShell lifecycle refused these commands for that reason, and this has to as well.
+    let internal startedFromEmbeddedTerminal () =
+        Environment.GetEnvironmentVariable "TREEMON_TERMINAL_SESSION_ID"
+        |> String.IsNullOrWhiteSpace
+        |> not
+
+    let refuseFromEmbeddedTerminal (action: string) =
+        if startedFromEmbeddedTerminal () then
+            failwith
+                $"Cannot {action} production from a Treemon embedded terminal, because the server would inherit that terminal's shutdown boundary and die when the tab closes. Run this from an external terminal."
+
+    let private runLogs () =
+        if not (Directory.Exists logDir) then
+            [||]
+        else
+            Directory.GetFiles(logDir, "treemon-prod.*.log")
+            |> Array.sortByDescending File.GetLastWriteTimeUtc
+
+    /// Every run writes its own log, so without pruning `logs/` grows for as long as the server is
+    /// ever restarted. Best effort: a log still held open simply survives to the next attempt.
+    let private pruneOldRunLogs keep =
+        runLogs ()
+        |> Array.skip (min keep (runLogs ()).Length)
+        |> Array.iter (fun path ->
+            try
+                File.Delete path
+            with
+            | :? IOException
+            | :? UnauthorizedAccessException -> ())
 
     let currentLogFile () =
         if not (Directory.Exists logDir) then
@@ -428,23 +528,58 @@ module Server =
                 if port = canvasPort then
                     Out.warn $"  Set TREEMON_CANVAS_PORT to move the canvas doc server off {port}.")
 
+        // An explicit path wins; otherwise the legacy file's roots are carried over so an install
+        // that predates the global config does not come up watching nothing.
+        let effectiveRoots =
+            match roots with
+            | [] -> LegacyConfig.read () |> Option.defaultValue []
+            | given -> given
+
+        if List.isEmpty roots && not (List.isEmpty effectiveRoots) then
+            Out.plain "Migrating worktree roots from .treemon.config into the global config."
+
         let arguments =
-            (roots |> List.map trimmedRoot)
+            (effectiveRoots |> List.map trimmedRoot)
             @ [ "--port"; string defaultPort; "--canvas-port"; string canvasPort ]
 
         Out.info $"Starting production server on port {defaultPort}..."
         use launcher = launch arguments logPath
 
-        Thread.Sleep 3000
+        // Waiting a fixed moment and declaring failure left a server that was merely slow running
+        // untracked, with nothing recording its pid and `stop` unable to find it. Poll instead, and
+        // give up only once the launcher itself has died or the budget is spent.
+        let readinessBudget = TimeSpan.FromSeconds 30.0
+        let deadline = DateTimeOffset.UtcNow + readinessBudget
 
-        if Ports.isFree defaultPort then
-            Out.bad $"Server did not bind port {defaultPort}. Log: {logPath}"
+        let rec waitForBinding () =
+            if not (Ports.isFree defaultPort) then true
+            elif launcher.HasExited then false
+            elif DateTimeOffset.UtcNow >= deadline then false
+            else
+                Thread.Sleep 250
+                waitForBinding ()
+
+        if not (waitForBinding ()) then
+            // Whatever was launched must not be left behind: it could still bind after this returns,
+            // and by then nothing would know its pid.
+            (try
+                if not launcher.HasExited then
+                    launcher.Kill true
+                    launcher.WaitForExit 5_000 |> ignore
+             with
+             | :? InvalidOperationException
+             | :? System.ComponentModel.Win32Exception
+             | :? NotSupportedException -> ())
+
+            Out.bad $"Server did not bind port {defaultPort} within {int readinessBudget.TotalSeconds}s and was stopped. Log: {logPath}"
             1
         else
             match resolveServerProcess () with
             | Some server ->
                 use server = server
                 File.WriteAllText(pidFile, string server.Id)
+                pruneOldRunLogs 10
+                LegacyConfig.retireIfFullyMigrated effectiveRoots
                 Out.good $"Treemon is running on http://localhost:{defaultPort}"
                 Out.plain $"Log: {logPath}"
                 0
@@ -456,31 +591,27 @@ module Server =
                 1
 
     let stop () =
+        // runningPid is the single gate: it already refuses a pid the server no longer owns, so a
+        // reused pid arrives here as None and is cleared rather than killed.
         match runningPid () |> Option.bind aliveProcess with
         | None ->
             if File.Exists pidFile then
                 File.Delete pidFile
+                Out.plain "Treemon is not running; cleared a stale pid file."
+            else
+                Out.plain "Treemon is not running."
 
-            Out.plain "Treemon is not running."
             0
         | Some child ->
             use child = child
-
-            if not (isServerProcess child) then
-                // A pid file survives a crash and a reboot, so the number can belong to anything by
-                // now. Killing it would be killing a stranger.
-                File.Delete pidFile
-                Out.warn $"PID {child.Id} is not this checkout's server any more; left it alone and cleared the stale pid file."
-                0
-            else
-                // Only the server, matching treemon.ps1. Killing the tree would take TerminalHost and
-                // every embedded terminal with it, and the whole point of TerminalHost outliving a
-                // restart is that the user's terminals survive one.
-                child.Kill()
-                child.WaitForExit 10_000 |> ignore
-                File.Delete pidFile
-                Out.good $"Stopped Treemon (PID {child.Id})."
-                0
+            // Only the server, matching treemon.ps1. Killing the tree would take TerminalHost and
+            // every embedded terminal with it, and the whole point of TerminalHost outliving a
+            // restart is that the user's terminals survive one.
+            child.Kill()
+            child.WaitForExit 10_000 |> ignore
+            File.Delete pidFile
+            Out.good $"Stopped Treemon (PID {child.Id})."
+            0
 
 module Frontend =
     let build () =
@@ -531,6 +662,28 @@ let private invokeTm (arguments: string list) =
         ([ "run"; "--project"; Path.Combine(scriptDir, "src", "Cli", "Cli.fsproj"); "--" ]
          @ arguments
          @ [ "--port"; string defaultPort ])
+
+/// A root change only reaches the dashboard on the next start, so a running server is restarted for
+/// it - the wrapper contract the PowerShell lifecycle documents. The CLI reports a tri-state: 0 all
+/// applied, 2 partially applied, 1 nothing persisted, and only the first two are worth restarting
+/// for. Inside an embedded terminal the change is still saved but the restart is deferred, because
+/// production must not be started from a terminal it would die with.
+let private changeRoots (arguments: string list) =
+    let exitCode = invokeTm arguments
+
+    if exitCode = 0 || exitCode = 2 then
+        match Server.runningPid () with
+        | None -> ()
+        | Some _ when Server.startedFromEmbeddedTerminal () ->
+            Out.warn "Production was not restarted because this is a Treemon embedded terminal."
+            Out.plain "The change is saved; run 'restart' from an external terminal to apply it."
+        | Some _ ->
+            // Restarted with no roots: the server re-reads the persisted set at startup, and passing
+            // the just-changed paths again would pin this run to them instead.
+            Server.stop () |> ignore
+            Server.start [] |> ignore
+
+    exitCode
 
 let private showStatus () =
     match Server.runningPid () with
@@ -682,10 +835,14 @@ let exitCode =
             publish ()
             0
         | "start" :: roots ->
+            // Before ensure: building the frontend first would make an embedded terminal wait
+            // through a full build only to be told the command is refused there.
+            Server.refuseFromEmbeddedTerminal "start"
             Frontend.ensure ()
             Server.start roots
         | "stop" :: _ -> Server.stop ()
         | "restart" :: roots ->
+            Server.refuseFromEmbeddedTerminal "restart"
             Server.stop () |> ignore
             Frontend.ensure ()
             Server.start roots
@@ -693,7 +850,8 @@ let exitCode =
         | "log" :: _ -> showLog ()
         | "dev" :: roots -> startDev roots
         | "setup-ttyd" :: _ -> Ttyd.install ()
-        | ("add" | "remove" | "roots") :: _ -> invokeTm arguments
+        | "roots" :: _ -> invokeTm arguments
+        | ("add" | "remove") :: _ -> changeRoots arguments
         | [] -> usage ()
         | unknown :: _ ->
             // Printing bare usage for a typo left it indistinguishable from asking for help, and

@@ -1883,7 +1883,7 @@ type TerminalHostSecurityTests() =
             // The shell and the arguments that land it in the worktree are whatever this platform
             // uses, but they always come last so ttyd reads the rest as its own options.
             let shell = TerminalShell.forCurrentPlatform "pwsh"
-            let shellExecutable = TerminalShell.executable shell
+            let shellExecutable = TerminalShell.launchExecutable shell
 
             Assert.That(
                 specification.Arguments
@@ -1916,6 +1916,20 @@ type TerminalShellTests() =
                 [ "-c"
                   "cd -- \"$TREEMON_TERMINAL_WORKTREE\" && exec '/bin/bash' -i" ]
         )
+
+    // SHELL can name fish, tcsh or nushell, none of which parse `cd -- … && exec`. /bin/sh does,
+    // and execs the configured shell once the directory is right.
+    [<Test>]
+    member _.``a POSIX shell is reached through /bin/sh rather than run directly``() =
+        Assert.Multiple(fun () ->
+            Assert.That(TerminalShell.launchExecutable (PosixShell "/usr/bin/fish"), Is.EqualTo "/bin/sh")
+            Assert.That(TerminalShell.launchExecutable (PowerShell "pwsh"), Is.EqualTo "pwsh")
+
+            Assert.That(
+                TerminalShell.arguments (PosixShell "/usr/bin/fish"),
+                Is.EqualTo
+                    [ "-c"
+                      "cd -- \"$TREEMON_TERMINAL_WORKTREE\" && exec '/usr/bin/fish' -i" ]))
 
     [<Test>]
     member _.``a POSIX shell path containing a quote cannot escape the command``() =
