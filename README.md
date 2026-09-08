@@ -85,6 +85,25 @@ Everything else runs through `treemon.cmd`, which uses no PowerShell at all and 
 
 Roots you add are saved to the global config (`~/.treemon/config.json` → `worktreeRoots`, written by the server), so `start` and `restart` can be given no path at all — omit it to use the saved roots. A path passed on the command line is used for that run only and is **not** saved, which is why `restart` without arguments falls back to the saved ones.
 
+### Folders that aren't git repositories
+
+An agent whose work isn't commits — tickets, cloud configuration, anything driven through someone else's API — has no branch, no diff and no PR. Point Treemon at its folder anyway and let the folder describe itself in `.treemon-state.json` at its root:
+
+```json
+{
+  "label": "CEN-482 sprint triage",
+  "summary": "Closed 3 tickets, drafting the sprint note",
+  "updatedAt": "2026-09-08T12:30:00Z",
+  "busy": true
+}
+```
+
+Those four stand exactly where git's answers would: `label` where a branch goes, `summary` where the last commit subject goes, `updatedAt` where its time goes, and `busy` where a dirty worktree goes. The card is the ordinary one, and the agent's live status attaches to it like any other. Only `label` is required; a file without one describes nothing.
+
+The agent maintaining the folder writes this file — rewrite it whenever its state changes, and the next refresh picks it up. Nothing else has to know: Treemon reads a label, not a ticket system.
+
+Two rules worth knowing. **A state file inside a git repository is ignored** — git is authoritative there, so a file dropped or committed into one can't replace the branch, dirty flag and PR its card is built from. And **the contents are treated as untrusted**: `label` and `summary` are capped (120 and 500 characters) because they're agent-written text rendered on a dashboard.
+
 ### Ports
 
 | | Port | Override |

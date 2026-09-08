@@ -558,5 +558,22 @@ type CanvasShareResult =
     { Url: string
       Title: string }
 
+/// The file a monitored folder that is not a git repository uses to describe itself, so an agent
+/// whose work is not commits still gets a card. `tm state` writes it and the server reads it, in
+/// different projects; only the names live here, because Shared is compiled to JavaScript too and
+/// cannot carry the file access either side needs.
+[<RequireQualifiedAccess>]
+module DirectoryStateFile =
+    let [<Literal>] FileName = ".treemon-state.json"
+
+    /// Stands where a branch would.
+    let [<Literal>] Label = "label"
+    /// Stands where the last commit subject would.
+    let [<Literal>] Summary = "summary"
+    /// Stands where the last commit time would.
+    let [<Literal>] UpdatedAt = "updatedAt"
+    /// Stands where a dirty worktree would.
+    let [<Literal>] Busy = "busy"
+
 // IWorktreeApi (the Fable.Remoting contract) lives in WorktreeApi.fs, compiled after OverviewData.fs
 // so getOverviewHistory can use the history types defined in OverviewData.

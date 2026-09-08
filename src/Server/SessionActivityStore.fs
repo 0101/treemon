@@ -370,7 +370,7 @@ let private latestSessionIdForWorktreeSql =
     """
 SELECT session_id
 FROM session_status
-WHERE worktree_path = $wt
+WHERE worktree_path = $wt AND provider = $prov
 ORDER BY updated_at DESC, session_id DESC
 LIMIT 1;
 """
@@ -713,11 +713,17 @@ type SessionActivityStore
         |> Map.ofList
 
     /// Resume identity for a worktree, independent of the idle window and retained until pruning.
-    member _.LatestSessionIdForWorktree(worktreePath: WorktreePath) : string option =
+    ///
+    /// Scoped to the provider, because a worktree that has run more than one coding tool holds a
+    /// session row for each, and a session id only means anything to the tool that issued it.
+    member _.LatestSessionIdForWorktree
+        (worktreePath: WorktreePath, provider: CodingToolProvider)
+        : string option =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
         cmd.CommandText <- latestSessionIdForWorktreeSql
         cmd.Parameters.AddWithValue("$wt", WorktreePath.value worktreePath) |> ignore
+        cmd.Parameters.AddWithValue("$prov", providerText provider) |> ignore
         use reader = cmd.ExecuteReader()
         if reader.Read() then Some(reader.GetString 0) else None
 

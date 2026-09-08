@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CLAIM_STALE_MS,
+  claimIsLive,
+  claimPath,
   subagentId,
-  treemonEvents,
   toReport,
+  transcriptFacts,
+  treemonEvents,
 } from "../../../ClaudeHooks/claude-hooks-core.mjs";
 
 const kinds = (hook) => treemonEvents(hook).map((event) => event.kind);
@@ -18,7 +22,10 @@ const context = {
 };
 
 test("a session registers as idle so it is visible before its first prompt", () => {
-  assert.deepEqual(kinds({ hook_event_name: "SessionStart", source: "startup" }), ["went_idle"]);
+  assert.deepEqual(kinds({ hook_event_name: "SessionStart", source: "startup" }), [
+    "went_idle",
+    "title_bootstrap",
+  ]);
 });
 
 test("compaction does not report idle, because it happens mid-turn", () => {
@@ -35,7 +42,12 @@ test("submitting a prompt clears a pending question before starting the turn", (
 
 test("ending a turn or a session clears a pending question", () => {
   // Without this the durable ask_user gate holds the card at WaitingForUser indefinitely.
-  assert.deepEqual(kinds({ hook_event_name: "Stop" }), ["user_input_completed", "turn_ended"]);
+  assert.deepEqual(kinds({ hook_event_name: "Stop" }), [
+    "user_input_completed",
+    "assistant_message",
+    "title_reported",
+    "turn_ended",
+  ]);
   assert.deepEqual(kinds({ hook_event_name: "SessionEnd" }), ["user_input_completed", "went_idle"]);
 });
 
@@ -75,6 +87,108 @@ test("SubagentStop is identified by agent_id, which is what Claude sends there",
   assert.deepEqual(treemonEvents({ hook_event_name: "SubagentStop", agent_id: "agent-9" }), [
     { kind: "background_agent_finished", toolCallId: "agent-9" },
   ]);
+});
+
+test("a skill is reported by name, which is what the card renders", () => {
+  const [event] = treemonEvents({
+    hook_event_name: "PreToolUse",
+    tool_name: "Skill",
+    tool_input: { skill: "code-review" },
+  });
+
+  assert.deepEqual(event, { kind: "skill_invoked", skillName: "code-review" });
+  assert.equal(toReport(context, event).skillName, "code-review");
+});
+
+test("a skill with no name is dropped, because the server requires one", () => {
+  assert.equal(toReport(context, { kind: "skill_invoked", skillName: "  " }), null);
+  assert.equal(toReport(context, { kind: "skill_invoked" }), null);
+});
+
+test("a tool that blocks on the human reports the wait, not just liveness", () => {
+  // Neither of these raises a Notification, so without this the card shows Working while the agent
+  // is in fact waiting.
+  const [asked] = treemonEvents({
+    hook_event_name: "PreToolUse",
+    tool_name: "AskUserQuestion",
+    tool_input: { questions: [{ question: "Which database?" }] },
+  });
+
+  assert.deepEqual(asked, { kind: "awaiting_user_input", text: "Which database?" });
+
+  // A plan is a document rather than a question, so the wait is reported without one.
+  assert.deepEqual(treemonEvents({ hook_event_name: "PreToolUse", tool_name: "ExitPlanMode" }), [
+    { kind: "awaiting_user_input", text: undefined },
+  ]);
+});
+
+test("answering, refusing or failing a question all end the wait", () => {
+  for (const hook_event_name of ["PostToolUse", "PostToolUseFailure", "PermissionDenied"]) {
+    assert.deepEqual(kinds({ hook_event_name, tool_name: "AskUserQuestion" }), [
+      "user_input_completed",
+    ]);
+  }
+});
+
+test("the title and the last reply come from the transcript, which no hook payload carries", () => {
+  const facts = transcriptFacts(
+    [
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"older"}]}}',
+      '{"type":"ai-title","aiTitle":"Superseded title"}',
+      '{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"a subagent"}]}}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"Pushed as e0c12ba6f."}]}}',
+      '{"type":"ai-title","aiTitle":"Auth0 organization management"}',
+    ].join("\n"),
+  );
+
+  assert.deepEqual(facts, {
+    title: "Auth0 organization management",
+    assistantText: "Pushed as e0c12ba6f.",
+  });
+});
+
+test("a transcript tail that starts mid-line still yields its facts", () => {
+  // The caller reads the last bytes of a multi-megabyte file, so the first line is usually a fragment.
+  const facts = transcriptFacts(
+    ['ent":[{"type":"text","text":"truncated"}]}}', '{"type":"ai-title","aiTitle":"Open tickets"}'].join("\n"),
+  );
+
+  assert.equal(facts.title, "Open tickets");
+  assert.equal(facts.assistantText, undefined);
+});
+
+test("a transcript with nothing to say yields nothing rather than empty text", () => {
+  assert.deepEqual(transcriptFacts(""), { title: undefined, assistantText: undefined });
+  assert.deepEqual(transcriptFacts('{"type":"ai-title","aiTitle":"   "}'), {
+    title: undefined,
+    assistantText: undefined,
+  });
+});
+
+test("a title with no text is dropped, because the server rejects the bare event", () => {
+  assert.equal(toReport(context, { kind: "title_reported" }), null);
+  assert.equal(toReport(context, { kind: "title_bootstrap", text: "" }), null);
+  assert.equal(toReport(context, { kind: "assistant_message" }), null);
+});
+
+test("a claim is live only while an owner is still beating for it", () => {
+  const now = Date.parse("2026-03-01T10:00:00.000Z");
+  const beating = { owner: "o1", beatAt: "2026-03-01T09:59:00.000Z" };
+
+  assert.equal(claimIsLive(beating, now), true);
+  // Turn end clears the owner rather than deleting the file, so the beater cannot recreate it.
+  assert.equal(claimIsLive({ ...beating, owner: null }, now), false);
+  assert.equal(claimIsLive({ ...beating, beatAt: new Date(now - CLAIM_STALE_MS - 1).toISOString() }, now), false);
+  assert.equal(claimIsLive({ owner: "o1" }, now), false);
+  assert.equal(claimIsLive(null, now), false);
+});
+
+test("a claim path is stable per session and never pastes the session id into a filename", () => {
+  const sessionId = "27743c85-c276-44d2-a4ee-dc32dbf5fa57";
+
+  assert.equal(claimPath(sessionId), claimPath(sessionId));
+  assert.notEqual(claimPath(sessionId), claimPath("other"));
+  assert.ok(!claimPath("../../escape").includes(".."));
 });
 
 test("an ordinary tool call only says the session is alive", () => {

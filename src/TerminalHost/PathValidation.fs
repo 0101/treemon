@@ -59,6 +59,14 @@ module PathValidation =
             with _ ->
                 false
 
+    // A directory root - a folder Treemon watches that is not a repository - is marked by the state
+    // file its agent writes. TerminalHost depends on nothing of Treemon's, so it spells that name out
+    // itself; a test binds the two spellings.
+    let [<Literal>] private DirectoryStateFileName = ".treemon-state.json"
+
+    let private isDirectoryRoot path =
+        File.Exists(Path.Combine(path, DirectoryStateFileName))
+
     let validate path =
         try
             if
@@ -73,7 +81,10 @@ module PathValidation =
 
                 if not (Directory.Exists canonical) then
                     Error WorktreeValidationError.UnknownWorktree
-                elif not (exactGitTopLevel canonical) then
+                // A repository top-level or a marked directory. This check is what stops anything
+                // reaching the control port from opening a shell in an arbitrary folder, so both arms
+                // are deliberate opt-ins and an unmarked folder stays unreachable.
+                elif not (exactGitTopLevel canonical || isDirectoryRoot canonical) then
                     Error WorktreeValidationError.UnknownWorktree
                 else
                     Ok(CanonicalWorktree.create canonical)

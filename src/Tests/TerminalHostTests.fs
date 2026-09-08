@@ -390,7 +390,12 @@ type TerminalRuntimeBudgetTests() =
         // The budget covers a runtime that implements process ownership, the ttyd artifact, the shell
         // launched inside it and a stable process identity once per supported platform. It is meant
         // to be argued up for a specific capability rather than drifting upward.
-        Assert.That(total, Is.LessThanOrEqualTo(4_200), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
+        //
+        // Argued up once, by 10, for directory roots: TerminalHost validates the path itself before
+        // opening a shell, so a folder Treemon watches without it being a repository has to be
+        // recognised here too - otherwise such a card's terminal can only ever answer "Unknown
+        // worktree path".
+        Assert.That(total, Is.LessThanOrEqualTo(4_210), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -2569,3 +2574,45 @@ type TerminalHostProcessTreeTests() =
             JobProcess.close owned
 
             Assert.That(JobProcess.hasExited owned, Is.True))
+
+
+/// TerminalHost validates the path itself before opening a shell — that check is what stops anything
+/// reaching the control port from opening one in an arbitrary directory. A directory root (a folder
+/// Treemon watches that is not a repository) has to pass it too, or it gets a card whose terminal
+/// button can only ever answer "Unknown worktree path".
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DirectoryRootPathValidationTests() =
+
+    let mutable root = ""
+
+    [<SetUp>]
+    member _.Setup() =
+        root <- Path.Combine(Path.GetTempPath(), $"treemon-root-{Guid.NewGuid()}")
+        Directory.CreateDirectory root |> ignore
+
+    [<TearDown>]
+    member _.TearDown() =
+        try Directory.Delete(root, true) with _ -> ()
+
+    // The marker is the opt-in, so a folder nobody marked stays unreachable.
+    [<Test>]
+    member _.``An unmarked directory is not a worktree TerminalHost will open``() =
+        match PathValidation.validate root with
+        | Error error -> Assert.That(error, Is.EqualTo WorktreeValidationError.UnknownWorktree)
+        | Ok _ -> Assert.Fail "an unmarked directory must not be openable"
+
+    // Written under Treemon's own name for the file and read back through TerminalHost's separate
+    // spelling of it, so the two cannot drift apart unnoticed.
+    [<Test>]
+    member _.``A directory carrying the state file is opened like a repository``() =
+        File.WriteAllText(Path.Combine(root, Shared.DirectoryStateFile.FileName), "{}")
+
+        match PathValidation.validate root with
+        | Ok worktree ->
+            Assert.That(
+                CanonicalWorktree.path worktree,
+                Is.EqualTo(Path.TrimEndingDirectorySeparator(Path.GetFullPath root))
+            )
+        | Error error -> Assert.Fail($"expected the marked directory to validate, got {error}")

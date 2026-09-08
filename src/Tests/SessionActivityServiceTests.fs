@@ -757,7 +757,7 @@ type IngestTests() =
             let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             let persisted = store.StatusBySession(SessionId "s1") |> Option.get
             let latestSessionId =
-                store.LatestSessionIdForWorktree(WorktreePath(PathUtils.normalizePath wtA))
+                store.LatestSessionIdForWorktree(WorktreePath(PathUtils.normalizePath wtA), CopilotCli)
             let retained = store.RetainedByWorktree() |> Map.find (PathUtils.normalizePath wtA)
 
             Assert.Multiple(fun () ->

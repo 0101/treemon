@@ -2,6 +2,7 @@ module Cli.Program
 
 open System
 open System.IO
+open System.Text.Json
 open System.Text.RegularExpressions
 open FSharp.SystemCommandLine
 open FSharp.SystemCommandLine.Input
@@ -380,6 +381,65 @@ let rootsCmd =
         setAction handler
     }
 
+/// Writes the state file a monitored folder uses when it is not a git repository, so an agent whose
+/// work is not commits can keep its own card current. Deliberately the one offline command: an agent
+/// reports its state as it works, and having that fail because the dashboard happens to be down would
+/// leave the card stale for the wrong reason. The server picks the file up on its next refresh.
+let stateCmd =
+    let handler (path: string, label: string, summary: string option, busy: bool) =
+        try
+            let directory = Path.GetFullPath path
+
+            if not (Directory.Exists directory) then
+                eprintfn $"Directory not found: {directory}"
+                1
+            elif String.IsNullOrWhiteSpace label then
+                eprintfn "A label is required: it is what the card shows where a branch would be."
+                1
+            elif File.Exists(Path.Combine(directory, ".git")) || Directory.Exists(Path.Combine(directory, ".git")) then
+                // Writing here would be silently ignored, so say why rather than leaving the author
+                // wondering why the card never changes.
+                eprintfn $"{directory} is a git repository, so its card comes from git and this file would be ignored."
+                1
+            else
+                let file = Path.Combine(directory, DirectoryStateFile.FileName)
+
+                use stream = File.Create file
+                use writer = new Utf8JsonWriter(stream, JsonWriterOptions(Indented = true))
+                writer.WriteStartObject()
+                writer.WriteString(DirectoryStateFile.Label, label)
+                writer.WriteString(DirectoryStateFile.Summary, summary |> Option.defaultValue "")
+                writer.WriteString(DirectoryStateFile.UpdatedAt, DateTimeOffset.UtcNow.ToString "o")
+                writer.WriteBoolean(DirectoryStateFile.Busy, busy)
+                writer.WriteEndObject()
+                writer.Flush()
+
+                printfn $"Wrote {file}"
+                0
+        with
+        | :? IOException as error ->
+            eprintfn $"Could not write the state file: {error.Message}"
+            1
+        | :? UnauthorizedAccessException as error ->
+            eprintfn $"Could not write the state file: {error.Message}"
+            1
+
+    command "state" {
+        description
+            "Declare the state of a folder that is not a git repository, so it still gets a card (writes .treemon-state.json)"
+
+        inputs (
+            option<string> "--path" |> desc "The folder to describe",
+            option<string> "--label" |> desc "What the agent is on; shown where a branch would be",
+            optionMaybe<string> "--summary" |> desc "What it most recently did; shown where the last commit would be",
+            option<bool> "--busy"
+            |> defaultValue false
+            |> desc "Work in progress; shown the way a dirty worktree is"
+        )
+
+        setAction handler
+    }
+
 /// Renders a diff category report and the exit code that goes with it: 0 only for a configured
 /// repository, so the command is usable as a check and not just a printer. Category names come from
 /// the repository's `.treemon.json`, so they are sanitized before they reach the terminal.
@@ -452,4 +512,5 @@ let main argv =
         addCommand removeCmd
         addCommand rootsCmd
         addCommand categoriesCmd
+        addCommand stateCmd
     }

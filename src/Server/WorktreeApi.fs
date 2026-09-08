@@ -355,6 +355,11 @@ let private assembleReposCore
             GitWorktree.WorktreeInfo ->
             WorktreeStatus)
     : RepoWorktrees list =
+    // Computed once across every root, because a label can only be made distinct by knowing what it
+    // has to be distinct from.
+    let displayNames =
+        rootPaths |> Map.values |> List.ofSeq |> PathUtils.displayNames
+
     state.Repos
     |> Map.toList
     |> List.map (fun (repoId, repo) ->
@@ -376,7 +381,10 @@ let private assembleReposCore
         let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
         { RepoId = repoId
-          RootFolderName = Path.GetFileName(originalPath)
+          RootFolderName =
+            displayNames
+            |> Map.tryFind originalPath
+            |> Option.defaultValue (Path.GetFileName originalPath)
           Worktrees = statuses
           IsReady = repo.IsReady
           Provider = repo.Provider
@@ -1060,14 +1068,23 @@ let internal worktreeApiWithLaunch
                       // Per-provider resume policy: the Copilot CLI resumes by stored session id. A
                       // future provider that resumes differently (or can't) gets its own arm — the
                       // compiler flags this match when a new provider case is added.
+                      let resumeProvider = provider |> Option.defaultValue CodingToolProvider.Default
+
                       let sessionId =
-                          match provider |> Option.defaultValue CodingToolProvider.Default with
+                          match resumeProvider with
                           // Both resume by stored session id: `copilot --resume <id>` and
-                          // `claude --resume <id>` take the same id their status reports carry.
+                          // `claude --resume <id>` take the same id their status reports carry —
+                          // but only their own. A worktree that has run both tools holds a session
+                          // row for each, so the lookup is scoped to the provider about to be
+                          // launched; handing one tool the other's id resumes nothing.
                           | CodingToolProvider.CopilotCli
                           | CodingToolProvider.ClaudeCode ->
                               activityStore
-                              |> Option.bind _.LatestSessionIdForWorktree(PathUtils.toWorktreePath path)
+                              |> Option.bind (fun store ->
+                                  store.LatestSessionIdForWorktree(
+                                      PathUtils.toWorktreePath path,
+                                      resumeProvider
+                                  ))
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       let start () =
                           startEmbeddedCommand wtPath inv.AsShellString

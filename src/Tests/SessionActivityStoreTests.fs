@@ -485,7 +485,7 @@ type LatestSessionIdForWorktreeTests() =
 
             use reopened = new SessionActivityStore(dbPath)
             Assert.That(
-                reopened.LatestSessionIdForWorktree(WorktreePath contextWorktree),
+                reopened.LatestSessionIdForWorktree(WorktreePath contextWorktree, CopilotCli),
                 Is.EqualTo(Some "activity")
             ))
 
@@ -497,7 +497,7 @@ type LatestSessionIdForWorktreeTests() =
             store.UpsertStatus(storedOf "b1" otherWorktree emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z")
 
             Assert.That(
-                store.LatestSessionIdForWorktree(WorktreePath contextWorktree),
+                store.LatestSessionIdForWorktree(WorktreePath contextWorktree, CopilotCli),
                 Is.EqualTo(Some "a2")
             ))
 
@@ -505,7 +505,26 @@ type LatestSessionIdForWorktreeTests() =
     member _.``A worktree that never reported yields no session id``() =
         withStore (fun store ->
             let unknownWorktree = Path.Combine(Path.GetTempPath(), "treemon-unknown-worktree")
-            Assert.That(store.LatestSessionIdForWorktree(WorktreePath unknownWorktree), Is.EqualTo None))
+            Assert.That(store.LatestSessionIdForWorktree(WorktreePath unknownWorktree, CopilotCli), Is.EqualTo None))
+
+    // A worktree that has run both tools holds a session row for each, and a session id only means
+    // anything to the tool that issued it.
+    [<Test>]
+    member _.``A session belonging to another provider is not offered for resume``() =
+        withStore (fun store ->
+            store.UpsertStatus(
+                { storedOf "copilot-1" contextWorktree emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T11:00:00Z" with
+                    Provider = CopilotCli })
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    store.LatestSessionIdForWorktree(WorktreePath contextWorktree, CopilotCli),
+                    Is.EqualTo(Some "copilot-1")
+                )
+                Assert.That(
+                    store.LatestSessionIdForWorktree(WorktreePath contextWorktree, ClaudeCode),
+                    Is.EqualTo None
+                )))
 
 
 [<TestFixture>]

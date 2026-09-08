@@ -57,8 +57,12 @@ let internal reloadGitData (agent: MailboxProcessor<StateMsg>) (repoId: RepoId) 
             |> List.tryFind (fun wt -> wt.Path = path)
             |> Option.bind _.Branch
 
+        // A declared directory answers for itself; running git against it would only produce a row
+        // of empty values and a failed probe per refresh.
         let! gitData =
-            GitWorktree.collectWorktreeGitData path branch repo.UpstreamRemote repo.BaseBranch
+            match DirectoryRoot.tryReadState path with
+            | Some state -> async { return DirectoryRoot.gitData path state }
+            | None -> GitWorktree.collectWorktreeGitData path branch repo.UpstreamRemote repo.BaseBranch
 
         agent.Post(UpdateGit(repoId, path, gitData))
         return gitData
@@ -392,7 +396,17 @@ let internal executeTask
         match task with
         | RefreshWorktreeList repoId ->
             let root = rootPaths |> Map.find repoId
-            let! worktrees = GitWorktree.listWorktrees root
+            let! gitWorktrees = GitWorktree.listWorktrees root
+
+            // None is git declining the directory, not an empty repository. A root that is not a
+            // repository at all but declares its own state stands for a single worktree: itself.
+            let worktrees =
+                match gitWorktrees with
+                | Some _ -> gitWorktrees
+                | None ->
+                    DirectoryRoot.tryReadState root
+                    |> Option.map (fun state -> [ DirectoryRoot.worktreeInfo root state ])
+
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
             let baseBranch = TreemonConfig.readBaseBranch root
             let! state = agent.PostAndAsyncReply(GetState)

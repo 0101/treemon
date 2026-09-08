@@ -27,6 +27,7 @@
     <Compile Include="TreemonConfig.fs" />
     <Compile Include="DiffCategories.fs" />
     <Compile Include="GitWorktree.fs" />
+    <Compile Include="DirectoryRoot.fs" />
     <Compile Include="GitBranchSync.fs" />
     <Compile Include="WorktreeDiff.fs" />
     <Compile Include="WorktreeDiffApi.fs" />
