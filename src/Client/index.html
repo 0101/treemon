@@ -724,6 +724,144 @@
             background: #1e1e2e; padding: 10px; border-radius: 6px;
         }
 
+        .worktree-search-overlay {
+            align-items: flex-start;
+            padding: 64px 16px 16px;
+        }
+        .worktree-search-dialog {
+            width: 680px;
+            max-width: calc(100vw - 32px);
+            overflow: hidden;
+            background: #242436;
+            border-color: #585b70;
+            box-shadow: 0 24px 72px rgba(0, 0, 0, 0.62);
+        }
+        .worktree-search { width: 100%; }
+        .worktree-search-header {
+            padding: 14px 16px 10px;
+            display: flex; align-items: center; justify-content: space-between; gap: 16px;
+        }
+        .worktree-search-title {
+            color: #a6adc8; font-size: var(--fs-sm); font-weight: 700;
+            letter-spacing: 0.045em; text-transform: uppercase;
+        }
+        .worktree-search-shortcut,
+        .worktree-search-hints,
+        .worktree-search-hints > span {
+            display: flex; align-items: center; gap: 5px;
+        }
+        .worktree-search-key {
+            min-width: 22px; padding: 2px 6px;
+            display: inline-flex; align-items: center; justify-content: center;
+            border: 1px solid #585b70; border-bottom-color: #3b3d50; border-radius: 5px;
+            background: #313244; color: #9399b2; font-size: var(--fs-sm); line-height: 1.4;
+            box-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+        }
+        .worktree-search-input-wrap {
+            position: relative; margin: 0 12px 8px;
+        }
+        .worktree-search-icon {
+            position: absolute; top: 50%; left: 13px; z-index: 1;
+            width: 17px; height: 17px; color: #7f849c;
+            transform: translateY(-50%); pointer-events: none;
+        }
+        .worktree-search-input {
+            width: 100%; height: 46px; padding: 0 42px 0 40px;
+            border: 1px solid #6c8ed4; border-radius: 8px; outline: none;
+            background: #181825; color: #cdd6f4; font-family: inherit; font-size: var(--fs-lg);
+            box-shadow: 0 0 0 3px rgba(137, 180, 250, 0.1);
+        }
+        .worktree-search-input::placeholder { color: #6c7086; }
+        .worktree-search-clear {
+            position: absolute; top: 50%; right: 8px;
+            width: 28px; height: 28px; padding: 0;
+            border: 0; border-radius: 6px; background: transparent; color: #7f849c;
+            transform: translateY(-50%); cursor: pointer;
+        }
+        .worktree-search-clear:hover { background: #313244; color: #cdd6f4; }
+        .worktree-search-meta {
+            min-height: 24px; padding: 0 16px;
+            display: flex; align-items: center; justify-content: space-between;
+            color: #7f849c; font-size: var(--fs-sm);
+        }
+        .worktree-search-results {
+            max-height: min(420px, calc(100vh - 230px));
+            padding: 3px 7px 7px; overflow-y: auto;
+        }
+        .worktree-search-result {
+            width: 100%; min-height: 58px; padding: 8px 11px;
+            display: grid; grid-template-columns: 9px minmax(0, 1fr) auto;
+            align-items: center; gap: 11px;
+            border: 1px solid transparent; border-radius: 8px;
+            background: transparent; color: inherit; font-family: inherit; text-align: left;
+            cursor: pointer;
+        }
+        .worktree-search-result:hover,
+        .worktree-search-result.selected {
+            background: #303147;
+        }
+        .worktree-search-result.selected {
+            border-color: rgba(137, 180, 250, 0.45);
+        }
+        .worktree-search-status {
+            width: 7px; height: 7px; border-radius: 50%; background: #585b70;
+        }
+        .worktree-search-status.active {
+            background: #f9e2af; box-shadow: 0 0 0 3px rgba(249, 226, 175, 0.1);
+        }
+        .worktree-search-status.dirty { background: #fab387; }
+        .worktree-search-main {
+            min-width: 0; display: flex; align-items: stretch; flex-direction: column;
+        }
+        .worktree-search-repository {
+            overflow: hidden; color: #a6adc8; font-size: var(--fs-sm); font-weight: 650;
+            letter-spacing: 0.015em; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .worktree-search-detail {
+            min-width: 0; margin-top: 2px;
+            display: flex; align-items: baseline; gap: 8px;
+        }
+        .worktree-search-branch {
+            min-width: 8ch; max-width: 52%; flex: 0 1 auto;
+            overflow: hidden; color: #cdd6f4; font-size: var(--fs-lg); font-weight: 680;
+            line-height: 1.25; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .worktree-search-path {
+            min-width: 0; flex: 1 1 0; padding-left: 8px;
+            overflow: hidden; border-left: 1px solid #45475a; color: #7f849c;
+            font-family: 'Consolas', 'Cascadia Mono', monospace; font-size: var(--fs-sm);
+            line-height: 1.25; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .worktree-search-match { color: #89b4fa; font-weight: 750; }
+        .worktree-search-result-action {
+            color: #7f849c; font-size: var(--fs-lg); opacity: 0;
+            transform: translateX(-3px); transition: opacity 0.12s, transform 0.12s;
+        }
+        .worktree-search-result:hover .worktree-search-result-action,
+        .worktree-search-result.selected .worktree-search-result-action {
+            opacity: 1; transform: translateX(0);
+        }
+        .worktree-search-empty {
+            padding: 32px 20px 38px;
+            display: flex; flex-direction: column; align-items: center; gap: 4px;
+            color: #7f849c; text-align: center;
+        }
+        .worktree-search-empty strong { color: #a6adc8; }
+        .worktree-search-footer {
+            min-height: 38px; padding: 8px 14px;
+            display: flex; align-items: center; justify-content: space-between; gap: 14px;
+            border-top: 1px solid #3b3d50; color: #7f849c; font-size: var(--fs-sm);
+        }
+        .worktree-search-behavior { color: #9399b2; }
+        .worktree-search-hints { gap: 10px; }
+
+        @media (max-width: 700px) {
+            .worktree-search-overlay { padding: 44px 10px 10px; }
+            .worktree-search-dialog { max-width: calc(100vw - 20px); }
+            .worktree-search-footer { align-items: flex-start; flex-direction: column; }
+            .worktree-search-branch { max-width: 45%; }
+        }
+
         .creating-dots::after {
             content: '';
             animation: dots 1.5s steps(4, end) infinite;

@@ -2,8 +2,13 @@ module TestAgentRecorder.Program
 
 open System
 open System.IO
+open System.Runtime.InteropServices
 open System.Text
 open System.Text.Json
+open System.Threading
+
+[<DllImport("kernel32.dll", EntryPoint = "GetConsoleWindow")>]
+extern nativeint private getConsoleWindow()
 
 [<EntryPoint>]
 let main args =
@@ -11,7 +16,18 @@ let main args =
         let recorderPath =
             Environment.GetEnvironmentVariable("TM_COPILOT_RECORDER")
 
-        if String.IsNullOrWhiteSpace recorderPath then
+        let consoleHandleFile =
+            Environment.GetEnvironmentVariable("TM_CONSOLE_HANDLE_FILE")
+
+        if not (String.IsNullOrWhiteSpace consoleHandleFile) then
+            File.WriteAllText(
+                consoleHandleFile,
+                string (getConsoleWindow().ToInt64())
+            )
+
+            Thread.Sleep Timeout.Infinite
+            0
+        elif String.IsNullOrWhiteSpace recorderPath then
             eprintfn "TM_COPILOT_RECORDER is required"
             1
         else
@@ -34,5 +50,5 @@ let main args =
 
             0
     with error ->
-        eprintfn $"Recorder failed: {error.Message}"
+        eprintfn $"Test helper failed: {error.Message}"
         1

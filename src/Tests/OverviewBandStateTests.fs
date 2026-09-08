@@ -71,6 +71,7 @@ let private modelWith repos =
       OverviewHistory = None
       OverviewHistoryRequestedAt = DateTimeOffset.Now
       OverviewHistoryRequestInFlight = None
+      WorktreeSearch = WorktreeSearch.initial
       EmbeddedTerminalPollInFlight = false }
 
 let private response repos =
