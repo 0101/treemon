@@ -7,6 +7,7 @@ open Newtonsoft.Json
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 open Shared
+open TerminalHost
 open Tests.CanvasTestHelpers
 
 [<TestFixture>]
@@ -278,14 +279,21 @@ let private terminalDocument (marker: string) =
   <script>
     window.__terminalVisibleMessages = 0;
     window.__terminalInactiveMessages = 0;
+    window.__terminalInputFocuses = 0;
     window.addEventListener('message', function(event) {
       if (!event.data || event.data.action !== '__ACTION__') return;
       if (event.data.active === true) window.__terminalVisibleMessages++;
       if (event.data.active === false) window.__terminalInactiveMessages++;
     });
+    document.addEventListener('focusin', function(event) {
+      if (event.target?.classList.contains('xterm-helper-textarea')) {
+        window.__terminalInputFocuses++;
+      }
+    });
   </script>
 </head>
 <body>
+  <textarea class="xterm-helper-textarea" aria-label="Terminal input"></textarea>
   <div data-terminal-marker="__MARKER__" class="xterm-viewport"><div class="scrollback"></div></div>
 </body>
 </html>"""
@@ -295,6 +303,9 @@ let private terminalDocument (marker: string) =
             TerminalPane.TerminalVisibleAction,
             StringComparison.Ordinal
         )
+    |> TerminalProxy.customizeTerminalPage [
+        Uri(ServerFixture.viteUrl).GetLeftPart(UriPartial.Authority)
+    ]
 
 [<TestFixture>]
 [<Category("E2E")>]
@@ -358,6 +369,76 @@ type TerminalPaneDomTests() =
                 Has = page.Locator(
                     ".branch-name",
                     PageLocatorOptions(HasText = branch))))
+
+    let activeTerminalInput (page: IPage) =
+        page
+            .FrameLocator("iframe.terminal-iframe-active")
+            .Locator(".xterm-helper-textarea")
+
+    let expectActiveTerminalInputFocused (page: IPage) stage =
+        task {
+            let input = activeTerminalInput page
+
+            try
+                do! Assertions.Expect(input).ToBeFocusedAsync()
+            with ex ->
+                let! focusEvents =
+                    input.EvaluateAsync<int>(
+                        "_ => window.__terminalInputFocuses"
+                    )
+
+                Assert.Fail(
+                    $"{stage}: terminal input was not focused after {focusEvents} input focus event(s). {ex.Message}"
+                )
+        }
+
+    let waitForTerminalSignal
+        (page: IPage)
+        (frame: IFrame)
+        stage
+        expression
+        =
+        task {
+            try
+                let! _ =
+                    frame.WaitForFunctionAsync(
+                        expression,
+                        (null :> obj),
+                        FrameWaitForFunctionOptions(Timeout = 5000.0f)
+                    )
+
+                return ()
+            with :? TimeoutException as ex ->
+                let! terminal =
+                    frame.EvaluateAsync<string>(
+                        """() => JSON.stringify({
+                            visibleMessages: window.__terminalVisibleMessages ?? null,
+                            inactiveMessages: window.__terminalInactiveMessages ?? null,
+                            inputFocuses: window.__terminalInputFocuses ?? null,
+                            activeElement: document.activeElement?.className
+                                || document.activeElement?.tagName
+                                || null
+                        })"""
+                    )
+                let! dashboard =
+                    page.EvaluateAsync<string>(
+                        """() => JSON.stringify({
+                            visibility: document.visibilityState,
+                            hasFocus: document.hasFocus(),
+                            paneHidden: document.querySelector('.terminal-pane')?.hidden ?? null,
+                            activeTerminal: document.querySelector('.terminal-iframe-active')
+                                ?.getAttribute('data-terminal-id') ?? null,
+                            activeElement: document.activeElement?.className
+                                || document.activeElement?.tagName
+                                || null
+                        })"""
+                    )
+
+                return
+                    Assert.Fail(
+                        $"{stage}: terminal frame condition timed out. Frame={frame.Url}; terminal={terminal}; dashboard={dashboard}. {ex.Message}"
+                    )
+        }
 
     override this.ContextOptions() =
         let options = base.ContextOptions()
@@ -491,6 +572,17 @@ type TerminalPaneDomTests() =
                     .Locator(".terminal-pane.open")
                     .WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             do! focusCanvasCard this.Page "feature-active"
+
+            for port in [ 61234; 61235; 61237 ] do
+                do!
+                    this.Page
+                        .FrameLocator(
+                            $"iframe[src^='http://127.0.0.1:{port}/']"
+                        )
+                        .Locator(".xterm-helper-textarea")
+                        .WaitForAsync(
+                            LocatorWaitForOptions(Timeout = 5000.0f)
+                        )
         }
 
     [<Test>]
@@ -723,17 +815,19 @@ type TerminalPaneDomTests() =
             let! visibleTabsAfterCardAction =
                 this.Page.Locator(".terminal-tab").CountAsync()
             let startCallsAfterCardAction = startCalls
-            let! cardActionFocusedTerminal =
-                this.Page.EvaluateAsync<bool>(
-                    "() => document.activeElement === document.querySelector('.terminal-iframe-active')")
+            do!
+                expectActiveTerminalInputFocused
+                    this.Page
+                    "Card embedded-terminal action"
 
             do! this.Page.Locator(".terminal-new-btn").ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     "() => document.querySelectorAll('.terminal-tab').length === 2")
-            let! _ =
-                this.Page.WaitForFunctionAsync(
-                    "() => document.activeElement === document.querySelector('.terminal-iframe-active')")
+            do!
+                expectActiveTerminalInputFocused
+                    this.Page
+                    "New terminal action"
             let! selectedAfterNew =
                 (selectedTab this.Page)
                     .Locator(".terminal-tab-label")
@@ -756,7 +850,6 @@ type TerminalPaneDomTests() =
                 Assert.That(startCallsAfterCardAction, Is.Zero)
                 Assert.That(visibleTabsAfterCardAction, Is.EqualTo(1))
                 Assert.That(selectedAfterCardAction, Is.EqualTo("Terminal 1"))
-                Assert.That(cardActionFocusedTerminal, Is.True)
                 Assert.That(startCalls, Is.EqualTo(1))
                 Assert.That(visibleTabsAfterNew, Is.EqualTo(2))
                 Assert.That(selectedAfterNew, Is.EqualTo("Terminal 2"))
@@ -787,13 +880,6 @@ type TerminalPaneDomTests() =
                     StringComparison.Ordinal
                 )
 
-            let! _ =
-                firstBrowserFrame.WaitForFunctionAsync(
-                    "() => typeof window.__terminalVisibleMessages === 'number'",
-                    (null :> obj),
-                    FrameWaitForFunctionOptions(Timeout = 5000.0f)
-                )
-
             do! this.Page.BringToFrontAsync()
             do! this.Page.Locator(".dashboard").FocusAsync()
             let! _ =
@@ -807,12 +893,12 @@ type TerminalPaneDomTests() =
                     "() => window.dispatchEvent(new Event('focus'))"
                 )
 
-            let! _ =
-                firstBrowserFrame.WaitForFunctionAsync(
-                    "() => window.__terminalVisibleMessages >= 1",
-                    (null :> obj),
-                    FrameWaitForFunctionOptions(Timeout = 5000.0f)
-                )
+            do!
+                waitForTerminalSignal
+                    this.Page
+                    firstBrowserFrame
+                    "Initial active-terminal activation"
+                    "() => window.__terminalVisibleMessages >= 1"
 
             let! firstBefore =
                 firstBrowserFrame.EvaluateAsync<int>(
@@ -833,12 +919,12 @@ type TerminalPaneDomTests() =
                     |> List.filter (fun tab ->
                         tab.Id <> firstTerminalId) }
 
-            let waitForNext expected =
-                alternateBrowserFrame.WaitForFunctionAsync(
-                    $"() => window.__terminalVisibleMessages > {expected}",
-                    (null :> obj),
-                    FrameWaitForFunctionOptions(Timeout = 5000.0f)
-                )
+            let waitForNext stage expected =
+                waitForTerminalSignal
+                    this.Page
+                    alternateBrowserFrame
+                    stage
+                    $"() => window.__terminalVisibleMessages > {expected}"
 
             let! _ =
                 this.Page.WaitForFunctionAsync(
@@ -849,7 +935,11 @@ type TerminalPaneDomTests() =
                     PageWaitForFunctionOptions(Timeout = 5000.0f)
                 )
 
-            let! _ = waitForNext alternateBefore
+            do!
+                waitForNext
+                    "Registry fallback activated the alternate terminal"
+                    alternateBefore
+
             let! afterSelection =
                 alternateBrowserFrame.EvaluateAsync<int>(
                     "() => window.__terminalVisibleMessages"
@@ -860,7 +950,10 @@ type TerminalPaneDomTests() =
                     "() => document.dispatchEvent(new Event('visibilitychange'))"
                 )
 
-            let! _ = waitForNext afterSelection
+            do!
+                waitForNext
+                    "Visible-document signal reactivated the alternate terminal"
+                    afterSelection
             let! afterVisibility =
                 alternateBrowserFrame.EvaluateAsync<int>(
                     "() => window.__terminalVisibleMessages"
@@ -871,7 +964,10 @@ type TerminalPaneDomTests() =
                     "() => window.dispatchEvent(new Event('focus'))"
                 )
 
-            let! _ = waitForNext afterVisibility
+            do!
+                waitForNext
+                    "Window-focus signal reactivated the alternate terminal"
+                    afterVisibility
             let! afterFocus =
                 alternateBrowserFrame.EvaluateAsync<int>(
                     "() => window.__terminalVisibleMessages"
@@ -882,22 +978,24 @@ type TerminalPaneDomTests() =
                     ".header-controls .ctrl-btn",
                     PageLocatorOptions(HasText = "Terminal")
                 )
-
             do! terminalToggle.ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     "() => document.querySelector('.terminal-pane').hidden"
                 )
-            let! _ =
-                alternateBrowserFrame.WaitForFunctionAsync(
-                    "() => window.__terminalInactiveMessages >= 1",
-                    (null :> obj),
-                    FrameWaitForFunctionOptions(Timeout = 5000.0f)
-                )
+            do!
+                waitForTerminalSignal
+                    this.Page
+                    alternateBrowserFrame
+                    "Terminal pane hide deactivated the alternate terminal"
+                    "() => window.__terminalInactiveMessages >= 1"
 
             do! terminalToggle.ClickAsync()
 
-            let! _ = waitForNext afterFocus
+            do!
+                waitForNext
+                    "Terminal pane reopen reactivated the alternate terminal"
+                    afterFocus
             let! otherWorktreeAfter =
                 otherWorktreeFrame.EvaluateAsync<int>(
                     "() => window.__terminalVisibleMessages"
@@ -933,9 +1031,10 @@ type TerminalPaneDomTests() =
                 this.Page
                     .Locator(".terminal-pane.open")
                     .WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! _ =
-                this.Page.WaitForFunctionAsync(
-                    "() => document.activeElement === document.querySelector('.terminal-iframe-active')")
+            do!
+                expectActiveTerminalInputFocused
+                    this.Page
+                    "T shortcut for an existing terminal"
 
             let! existingTabCount =
                 this.Page.Locator(".terminal-tab").CountAsync()
@@ -956,9 +1055,10 @@ type TerminalPaneDomTests() =
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     "() => document.querySelectorAll('.terminal-tab').length === 1")
-            let! _ =
-                this.Page.WaitForFunctionAsync(
-                    "() => document.activeElement === document.querySelector('.terminal-iframe-active')")
+            do!
+                expectActiveTerminalInputFocused
+                    this.Page
+                    "T shortcut for a new terminal"
             let! startedSelected =
                 (selectedTab this.Page)
                     .Locator(".terminal-tab-label")
