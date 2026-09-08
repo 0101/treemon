@@ -10,6 +10,7 @@ open System.Text.RegularExpressions
 open System.Threading.Tasks
 open NUnit.Framework
 open Server.SessionActivity
+open Treemon.TerminalHosting
 
 /// Parse an ISO-8601 timestamp string as a DateTimeOffset using the invariant culture. Shared by the
 /// SessionActivity domain/store/service tests, which all build fixtures from literal timestamps.
@@ -22,8 +23,11 @@ let msg (text: string) (t: string) : Message = { Text = text; At = ts t }
 let uniquePath prefix =
     Path.Combine(Path.GetTempPath(), $"treemon-{prefix}-{Guid.NewGuid():N}")
 
+/// npm installs its executables as `.cmd` shims on Windows, which Process.Start cannot exec without
+/// the extension. Only Windows has that problem, and the check has to say so: a Linux session under
+/// WSL inherits the Windows PATH, so an unguarded lookup resolves `npx` to a batch file it cannot run.
 let resolveCmdShim (fileName: string) =
-    if Path.GetExtension(fileName) = "" then
+    if OperatingSystem.IsWindows() && Path.GetExtension(fileName) = "" then
         let cmdPath = $"{fileName}.cmd"
         let pathDirs =
             Environment.GetEnvironmentVariable("PATH")
@@ -260,7 +264,7 @@ let private stopTerminalHostProcess config (manifest: Server.TerminalHostManifes
         try
             use proc = Process.GetProcessById manifest.Pid
 
-            if proc.StartTime.ToUniversalTime().Ticks <> manifest.ProcessStartTimeUtcTicks then
+            if ProcessStartTime.utcTicks proc <> manifest.ProcessStartTimeUtcTicks then
                 Error
                     $"Isolated TerminalHost PID {manifest.Pid} was reused before cleanup"
             elif proc.HasExited then

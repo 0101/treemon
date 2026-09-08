@@ -3,9 +3,11 @@ namespace TerminalHost
 open System
 open System.Collections
 open System.ComponentModel
+open System.Diagnostics
 open System.Runtime.InteropServices
 open System.Text
 open Microsoft.Win32.SafeHandles
+open Treemon.TerminalHosting
 
 type JobProcessStart =
     { Executable: string
@@ -13,13 +15,23 @@ type JobProcessStart =
       WorkingDirectory: string
       Environment: (string * string) list }
 
+type internal WindowsJobHandles =
+    { JobHandle: SafeFileHandle
+      ProcessHandle: SafeFileHandle
+      ThreadHandle: SafeFileHandle
+      Pid: int
+      StartTimeUtcTicks: int64 }
+
+/// A terminal child process together with whatever the platform offers for owning its descendants.
+/// The guarantees are not equal. On Windows a Job Object with KILL_ON_JOB_CLOSE is enforced by the
+/// kernel, so the whole tree dies even if this host is killed outright. On Linux the tree is walked
+/// and signalled from here, which means it only happens while this host is alive to do it: a host
+/// that is SIGKILLed orphans its ttyd processes, and nothing reclaims them, because the manifest
+/// records only the host's own identity and there is no startup sweep.
 type OwnedJobProcess =
     private
-        { JobHandle: SafeFileHandle
-          ProcessHandle: SafeFileHandle
-          ThreadHandle: SafeFileHandle
-          Pid: int
-          StartTimeUtcTicks: int64 }
+    | WindowsJob of WindowsJobHandles
+    | PosixTree of child: Process * startTimeUtcTicks: int64
 
 [<RequireQualifiedAccess>]
 module JobProcess =
@@ -236,24 +248,7 @@ module JobProcess =
         job.Dispose()
         Error message
 
-    let start specification =
-        if not (OperatingSystem.IsWindows()) then
-            Error "Terminal process ownership requires Windows Job Objects"
-        elif
-            String.IsNullOrWhiteSpace specification.Executable
-            || String.IsNullOrWhiteSpace specification.WorkingDirectory
-        then
-            Error "Terminal process launch configuration is invalid"
-        elif
-            specification.Environment
-            |> List.exists (fun (name, value) ->
-                String.IsNullOrWhiteSpace name
-                || name.Contains('=')
-                || name.Contains('\u0000')
-                || value.Contains('\u0000'))
-        then
-            Error "Terminal process environment is invalid"
-        else
+    let private startWindowsJob specification =
             use job = CreateJobObject(0n, 0n)
 
             if job.IsInvalid then
@@ -321,32 +316,124 @@ module JobProcess =
                                               StartTimeUtcTicks = startTime }
 
                                         job.SetHandleAsInvalid()
-                                        Ok owned
+                                        Ok(WindowsJob owned)
                     finally
                         Marshal.FreeHGlobal environment
 
-    let processId owned = owned.Pid
-    let processStartTimeUtcTicks owned = owned.StartTimeUtcTicks
+
+    /// Linux has no Job Object, so ownership is the process tree .NET walks through /proc at kill
+    /// time. The start time is captured now because /proc/<pid> disappears once the child is reaped,
+    /// and the manifest still has to tell this ttyd apart from a later process that reuses its pid.
+    let private startPosixTree specification =
+        let startInfo =
+            ProcessStartInfo(
+                FileName = specification.Executable,
+                WorkingDirectory = specification.WorkingDirectory,
+                UseShellExecute = false)
+
+        specification.Arguments |> List.iter startInfo.ArgumentList.Add
+
+        specification.Environment
+        |> List.iter (fun (name, value) -> startInfo.Environment[name] <- value)
+
+        try
+            match Process.Start startInfo |> Option.ofObj with
+            | None -> Error $"Could not start '{specification.Executable}'"
+            | Some child ->
+                try
+                    Ok(PosixTree(child, ProcessStartTime.utcTicks child))
+                with error ->
+                    child.Kill true
+                    child.Dispose()
+                    Error $"Could not read the start time of '{specification.Executable}': {error.Message}"
+        with
+        | :? Win32Exception as error ->
+            Error $"Could not start '{specification.Executable}': {error.Message}"
+        | :? InvalidOperationException as error ->
+            Error $"Could not start '{specification.Executable}': {error.Message}"
+
+    let start specification =
+        if
+            String.IsNullOrWhiteSpace specification.Executable
+            || String.IsNullOrWhiteSpace specification.WorkingDirectory
+        then
+            Error "Terminal process launch configuration is invalid"
+        elif
+            specification.Environment
+            |> List.exists (fun (name, value) ->
+                String.IsNullOrWhiteSpace name
+                || name.Contains('=')
+                || name.Contains('\u0000')
+                || value.Contains('\u0000'))
+        then
+            Error "Terminal process environment is invalid"
+        elif OperatingSystem.IsWindows() then
+            startWindowsJob specification
+        else
+            startPosixTree specification
+
+    let processId owned =
+        match owned with
+        | WindowsJob job -> job.Pid
+        | PosixTree (child, _) -> child.Id
+
+    let processStartTimeUtcTicks owned =
+        match owned with
+        | WindowsJob job -> job.StartTimeUtcTicks
+        | PosixTree (_, startTimeUtcTicks) -> startTimeUtcTicks
 
     let internal exitCode owned =
-        // GetExitCodeProcess writes the result through a Win32 byref.
-        let mutable exitCode = 0u
+        match owned with
+        | WindowsJob job ->
+            // GetExitCodeProcess writes the result through a Win32 byref.
+            let mutable exitCode = 0u
 
-        if GetExitCodeProcess(owned.ProcessHandle, &exitCode) then
-            Ok exitCode
-        else
-            Error(win32Error (nameof GetExitCodeProcess))
+            if GetExitCodeProcess(job.ProcessHandle, &exitCode) then
+                Ok exitCode
+            else
+                Error(win32Error (nameof GetExitCodeProcess))
+        | PosixTree (child, _) ->
+            try
+                Ok(uint32 child.ExitCode)
+            with :? InvalidOperationException as error ->
+                Error error.Message
 
     let hasExited owned =
-        try
-            if owned.ProcessHandle.IsClosed || owned.ProcessHandle.IsInvalid then
+        match owned with
+        | WindowsJob job ->
+            try
+                if job.ProcessHandle.IsClosed || job.ProcessHandle.IsInvalid then
+                    true
+                else
+                    match WaitForSingleObject(job.ProcessHandle, 0u) with
+                    | status when status = WaitTimeout -> false
+                    | status when status = WaitObject0 -> true
+                    | _ -> true
+            with :? ObjectDisposedException ->
                 true
-            else
-                match WaitForSingleObject(owned.ProcessHandle, 0u) with
-                | status when status = WaitTimeout -> false
-                | status when status = WaitObject0 -> true
-                | _ -> true
-        with :? ObjectDisposedException ->
-            true
+        | PosixTree (child, _) ->
+            // `close` disposes the child, so a disposed handle can only mean the process this host
+            // owned is gone.
+            try
+                child.HasExited
+            with
+            | :? InvalidOperationException
+            | :? ObjectDisposedException -> true
 
-    let close owned = closeHandles owned
+    let close owned =
+        match owned with
+        | WindowsJob job -> closeHandles job
+        | PosixTree (child, _) ->
+            try
+                if not child.HasExited then
+                    // Kill walks /proc for descendants, which is what stops the shell ttyd started
+                    // from outliving the terminal that owned it.
+                    child.Kill true
+                    child.WaitForExit 5_000 |> ignore
+            with
+            | :? InvalidOperationException
+            | :? ObjectDisposedException
+            | :? NotSupportedException
+            | :? Win32Exception -> ()
+
+            child.Dispose()

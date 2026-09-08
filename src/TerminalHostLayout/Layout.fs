@@ -18,11 +18,24 @@ module TerminalHostLayout =
     let [<Literal>] StateDirectoryEnvironmentVariable = "TREEMON_TERMINAL_HOST_STATE_DIR"
     let [<Literal>] ManifestFileName = "host.json"
     let [<Literal>] StagingDirectoryName = "staged"
-    let [<Literal>] TtydExecutableName = "ttyd.exe"
     let [<Literal>] TtydLicenseFileName = "ttyd-LICENSE.txt"
     let [<Literal>] VersionDirectoryPattern = @"\A[A-Za-z0-9._-]{1,128}\z"
 
     let HostExecutableName = if OperatingSystem.IsWindows() then "TerminalHost.exe" else "TerminalHost"
+
+    let TtydExecutableName = if OperatingSystem.IsWindows() then "ttyd.exe" else "ttyd"
+
+    /// The shell an embedded terminal opens when nothing overrides it. Windows Treemon is a
+    /// PowerShell workflow end to end; elsewhere the terminal should be the login shell the user
+    /// already configured, so SHELL wins over the bash fallback.
+    let DefaultShellCommand =
+        if OperatingSystem.IsWindows() then
+            "pwsh"
+        else
+            Environment.GetEnvironmentVariable "SHELL"
+            |> Option.ofObj
+            |> Option.filter (String.IsNullOrWhiteSpace >> not)
+            |> Option.defaultValue "/bin/bash"
 
     let RequiredBundleFileNames =
         [ HostExecutableName

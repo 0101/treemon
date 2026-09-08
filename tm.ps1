@@ -1,5 +1,5 @@
 #!/usr/bin/env pwsh
-# Treemon CLI — thin wrapper around src/Cli
+# Treemon CLI - thin wrapper around src/Cli
 param(
     [Parameter(ValueFromRemainingArguments)]
     [string[]]$Arguments

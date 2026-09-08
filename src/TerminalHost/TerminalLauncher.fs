@@ -25,17 +25,19 @@ module TerminalLauncher =
 
     let internal startSpecification config sessionId worktree port =
         let path = CanonicalWorktree.path worktree
+        let shell = TerminalShell.forCurrentPlatform config.ShellCommand
 
         { Executable = config.TtydExecutable
           WorkingDirectory = path
           Environment =
             [ "TREEMON_TERMINAL_SESSION_ID", sessionId
-              "TREEMON_TERMINAL_WORKTREE", path ]
+              TerminalShell.WorktreeEnvironmentVariable, path ]
           Arguments =
             [ "-p"; string port; "-i"; "127.0.0.1"; "-W"; "-O"; "-o"
               "-t"; "fontSize=16"; "-t"; "disableLeaveAlert=true"
-              "-w"; path; config.ShellCommand; "-WorkingDirectory"; "."; "-NoExit"; "-Command"
-              "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE" ] }
+              "-w"; path
+              TerminalShell.executable shell
+              yield! TerminalShell.arguments shell ] }
 
     let private canConnect port =
         task {

@@ -1,3 +1,8 @@
+#requires -Version 7.0
+# Windows PowerShell 5.1 cannot run this: Join-Path takes only two path segments there, and Install-
+# Skill passes four. Stating it up front turns that into one clear message instead of a failure deep
+# in a deploy. Everything except `deploy` is available from treemon.cmd, which needs no PowerShell.
+
 param(
     [Parameter(Position = 0)]
     [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo", "add", "remove", "install-skill", "setup-ttyd")]
@@ -23,7 +28,7 @@ if ($env:TREEMON_PORT) {
     $parsed = 0
     if ([int]::TryParse($env:TREEMON_PORT, [ref]$parsed)) { $DefaultPort = $parsed }
 }
-# Canvas doc server port. Must match Program.fs `defaultCanvasPort` — treemon.ps1 never passes
+# Canvas doc server port. Must match Program.fs `defaultCanvasPort` - treemon.ps1 never passes
 # --canvas-port, so the server always binds this. It runs as a SEPARATE Kestrel host; a silent
 # bind failure (e.g. the port still held after a restart) leaves the dashboard up on $DefaultPort
 # while every canvas doc fails to load.
@@ -57,7 +62,7 @@ function Get-LegacyConfig {
     # plural `WorktreeRoots` array and the pre-multi-repo singular `WorktreeRoot` string (older
     # versions wrote the singular key). Returns a result object { Parsed; Roots } so callers can tell
     # a parse failure (Parsed=$false) apart from a successfully-parsed file that simply declares no
-    # roots (Parsed=$true, empty Roots) — a distinction PowerShell's empty-array collapse erases if
+    # roots (Parsed=$true, empty Roots) - a distinction PowerShell's empty-array collapse erases if
     # you signal it through the return value. The object property keeps Roots a real array.
     if (-not (Test-Path $ConfigFile)) {
         return [pscustomobject]@{ Parsed = $true; Roots = @() }
@@ -80,7 +85,7 @@ function Get-LegacyConfig {
 
 function Read-LegacyRoots {
     # One-time migration of the legacy PowerShell-managed .treemon.config. Returns its roots (or
-    # @()). Does NOT delete the file — Start-ProductionServer removes it only after the server has
+    # @()). Does NOT delete the file - Start-ProductionServer removes it only after the server has
     # started (and thus persisted the roots into ~/.treemon/config.json) AND only when every root it
     # declared was actually migrated, so a publish/start failure or an unrecognized config can't
     # silently lose roots.
@@ -135,10 +140,10 @@ function Build-Frontend([string]$Destination = $WwwRoot) {
                 # Refresh PATH so npm is available in this session
                 $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
                 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-                    throw "npm still not found after install — restart your shell and try again"
+                    throw "npm still not found after install - restart your shell and try again"
                 }
             } else {
-                throw "npm is required — install Node.js from https://nodejs.org or run: winget install OpenJS.NodeJS.LTS"
+                throw "npm is required - install Node.js from https://nodejs.org or run: winget install OpenJS.NodeJS.LTS"
             }
         }
 
@@ -525,7 +530,7 @@ function Wait-PortFree([int]$Port, [int]$TimeoutSec = 10) {
 function Get-RunLogs([string]$Channel) {
     # Returns this scheme's per-run log files for a channel ("" = stdout, "-stderr" = stderr), newest
     # first. Each run writes a fresh treemon-prod[-stderr].<timestamp>.log, so a new run never touches
-    # a previous log — which means a leftover server or a log still open in an editor/viewer can never
+    # a previous log - which means a leftover server or a log still open in an editor/viewer can never
     # block startup the way truncating one shared file could.
     $pattern = "^treemon-prod$([regex]::Escape($Channel))\.\d{8}-\d{6}\.log$"
     @(Get-ChildItem -Path $LogDir -File -ErrorAction SilentlyContinue |
@@ -534,7 +539,7 @@ function Get-RunLogs([string]$Channel) {
 }
 
 function Get-CurrentLogFile {
-    # Newest stdout run log — the file the running server is writing to. Falls back to the canonical
+    # Newest stdout run log - the file the running server is writing to. Falls back to the canonical
     # name (which may not exist yet) so callers always have a meaningful path to report.
     $logs = Get-RunLogs ""
     if ($logs.Count -eq 0) { return $LogFile }
@@ -716,8 +721,8 @@ function Start-ProductionProcess(
     if ($effectiveRoots.Count -eq 0) { $effectiveRoots = Read-LegacyRoots }
 
     # The server binds two Kestrel hosts: the dashboard on $DefaultPort and the canvas doc server on
-    # $CanvasPort. If a port is still held when we launch — e.g. the previous server hasn't released
-    # it yet after a restart — the dashboard surfaces the failure (it exits), but the canvas doc host
+    # $CanvasPort. If a port is still held when we launch - e.g. the previous server hasn't released
+    # it yet after a restart - the dashboard surfaces the failure (it exits), but the canvas doc host
     # fails SILENTLY, leaving every canvas doc unable to load. Wait for both to clear, warn if not.
     foreach ($p in @($DefaultPort, $CanvasPort)) {
         if (-not (Wait-PortFree $p 10)) {
@@ -772,7 +777,7 @@ function Start-ProductionProcess(
 
     Remove-OldRunLogs 10
 
-    # Server is up — it has resolved+persisted its effective roots into the global config. Retire
+    # Server is up - it has resolved+persisted its effective roots into the global config. Retire
     # the legacy .treemon.config only when it is SAFE: every root it declared was actually migrated
     # (handed to the server). A file we couldn't parse, or one whose roots we didn't migrate (e.g. an
     # explicit-path start that ignored it), is preserved with a warning so we never silently destroy
@@ -1204,7 +1209,7 @@ function Install-Extension {
 
 function Install-ReportingExtension {
     # Phase 1 of the push status model: the passive, reporting-only extension. Installed ALONGSIDE
-    # canvas-bridge (a separate extension dir), never replacing it — reporting registers no canvas
+    # canvas-bridge (a separate extension dir), never replacing it - reporting registers no canvas
     # and no tools, so both load per session with no canvas_take_ownership collision. It forwards
     # session-activity events to POST /api/session/activity; set TREEMON_PORTS (comma-separated) to
     # fan out to several Treemon instances (side-by-side validation), else it uses TREEMON_PORT/5000.
@@ -1325,7 +1330,7 @@ switch ($Command) {
         # Restart when at least one root actually changed. tm returns a tri-state exit
         # code: 0 = all added, 2 = partial (some paths persisted, some rejected), 1 = all
         # failed. Both 0 and 2 mean roots were persisted and need a restart to apply; exit 1
-        # (e.g. bad path, server down — nothing persisted) skips the restart so we don't
+        # (e.g. bad path, server down - nothing persisted) skips the restart so we don't
         # needlessly bounce the production server.
         if ($tmExit -eq 0 -or $tmExit -eq 2) { Restart-ServerIfRunning }
         exit $tmExit
@@ -1338,11 +1343,11 @@ switch ($Command) {
         }
 
         # Thin shim: the server removes the root from global config; applies on next
-        # (re)start, which we trigger below if prod is running. No existence check —
+        # (re)start, which we trigger below if prod is running. No existence check -
         # a root whose directory was deleted must still be removable.
         $tmExit = Invoke-Tm (@("remove") + $WorktreeRoots + @("--port", "$DefaultPort"))
 
-        # Restart on full (0) or partial (2) success — see 'add' above. Exit 1 (nothing
+        # Restart on full (0) or partial (2) success - see 'add' above. Exit 1 (nothing
         # removed) skips the restart.
         if ($tmExit -eq 0 -or $tmExit -eq 2) { Restart-ServerIfRunning }
         exit $tmExit

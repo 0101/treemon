@@ -1,6 +1,6 @@
 # Creates a worktree for reviewing someone else's contribution: fetches a remote
 # and forks a `review/<branch>` worktree that tracks `<remote>/<branch>`, then runs
-# the standard post-fork setup. This is a manual workflow — Treemon's own
+# the standard post-fork setup. This is a manual workflow - Treemon's own
 # "create worktree" feature no longer forks from arbitrary remotes.
 #
 # Usage:

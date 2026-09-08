@@ -1,8 +1,8 @@
 {
   "private": true,
   "scripts": {
-    "start": "dotnet fable src/Client --outDir src/Client/output --watch --run npx vite",
-    "build": "dotnet fable src/Client --outDir src/Client/output --noCache && npx vite build",
+    "start": "dotnet tool restore && dotnet fable src/Client --outDir src/Client/output --watch --run npx vite",
+    "build": "dotnet tool restore && dotnet fable src/Client --outDir src/Client/output --noCache && npx vite build",
     "test:auto-sync-ui": "dotnet test src/Tests/Tests.fsproj --filter \"Category=AutoSyncUiVerification\" --logger \"console;verbosity=detailed\"",
     "check:extension": "tsc --project src/Extension/tsconfig.json && tsc --project src/Extension/tsconfig.contracts.json",
     "test:extension": "npm run check:extension && node --test src/Tests/Extension/*.test.mjs src/Tests/Extension/reporting/*.test.mjs",

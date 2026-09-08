@@ -387,7 +387,10 @@ type TerminalRuntimeBudgetTests() =
             |> List.map (fun (path, lines) -> $"{path}: {lines}")
             |> String.concat Environment.NewLine
 
-        Assert.That(total, Is.LessThanOrEqualTo(4_000), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
+        // The budget covers a runtime that implements process ownership, the ttyd artifact, the shell
+        // launched inside it and a stable process identity once per supported platform. It is meant
+        // to be argued up for a specific capability rather than drifting upward.
+        Assert.That(total, Is.LessThanOrEqualTo(4_200), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1876,12 +1879,52 @@ type TerminalHostSecurityTests() =
 
             Assert.That(specification.Arguments, Does.Contain("127.0.0.1"))
             Assert.That(specification.Arguments, Does.Contain(worktreePath))
+
+            // The shell and the arguments that land it in the worktree are whatever this platform
+            // uses, but they always come last so ttyd reads the rest as its own options.
+            let shell = TerminalShell.forCurrentPlatform "pwsh"
+            let shellExecutable = TerminalShell.executable shell
+
             Assert.That(
-                specification.Arguments,
-                Does.Contain(
-                    "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE"
-                )
+                specification.Arguments
+                |> List.skipWhile (fun argument -> argument <> shellExecutable),
+                Is.EqualTo(shellExecutable :: TerminalShell.arguments shell)
             ))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<Category("TerminalHost")>]
+type TerminalShellTests() =
+    [<Test>]
+    member _.``PowerShell is sent back to the worktree through the environment variable``() =
+        Assert.That(
+            TerminalShell.arguments (PowerShell "pwsh"),
+            Is.EqualTo
+                [ "-WorkingDirectory"
+                  "."
+                  "-NoExit"
+                  "-Command"
+                  "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE" ]
+        )
+
+    [<Test>]
+    member _.``a POSIX shell execs itself in the worktree so no extra process survives``() =
+        Assert.That(
+            TerminalShell.arguments (PosixShell "/bin/bash"),
+            Is.EqualTo
+                [ "-c"
+                  "cd -- \"$TREEMON_TERMINAL_WORKTREE\" && exec '/bin/bash' -i" ]
+        )
+
+    [<Test>]
+    member _.``a POSIX shell path containing a quote cannot escape the command``() =
+        Assert.That(
+            TerminalShell.arguments (PosixShell "/opt/it's/bash"),
+            Is.EqualTo
+                [ "-c"
+                  "cd -- \"$TREEMON_TERMINAL_WORKTREE\" && exec " + @"'/opt/it'\''s/bash'" + " -i" ]
+        )
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -2396,3 +2439,119 @@ match JobProcess.start specification with
                     owner.WaitForExit()
 
                 killExactPidFromFile readyFile)
+
+/// `/proc/<pid>/stat` is `pid (comm) state ...`, and comm can itself contain spaces and brackets, so
+/// the state is read after the last ')'. A zombie has already been killed and is only waiting to be
+/// reaped, which for ownership purposes is gone.
+let private linuxProcessIsRunning pid =
+    try
+        let stat = File.ReadAllText $"/proc/{pid}/stat"
+
+        stat.Substring(stat.LastIndexOf(')') + 1).TrimStart().StartsWith "Z"
+        |> not
+    with
+    | :? IOException
+    | :? UnauthorizedAccessException -> false
+
+[<TestFixture>]
+[<Category("TerminalHost")>]
+[<Platform("Linux")>]
+type TerminalHostProcessTreeTests() =
+
+    [<Test>]
+    member _.``closing one owned process kills its exact ttyd process tree``() =
+        withTempDir "terminal-host-tree-close" (fun root ->
+            let pidFile = Path.Combine(root, "child.pid")
+            let descendantPidFile = Path.Combine(root, "descendant.pid")
+            let sessionFile = Path.Combine(root, "session.txt")
+            let sessionId = $"terminal-{Guid.NewGuid():N}"
+
+            let owned =
+                JobProcess.start
+                    { Executable = "/bin/bash"
+                      Arguments =
+                        [ "-c"
+                          "sleep 300 & printf %s \"$!\" > \"$TM_DESCENDANT_PID_FILE\"; printf %s \"$$\" > \"$TM_PID_FILE\"; printf %s \"$TREEMON_TERMINAL_SESSION_ID\" > \"$TM_SESSION_FILE\"; wait" ]
+                      WorkingDirectory = root
+                      Environment =
+                        [ "TM_PID_FILE", pidFile
+                          "TM_DESCENDANT_PID_FILE", descendantPidFile
+                          "TM_SESSION_FILE", sessionFile
+                          "TREEMON_TERMINAL_SESSION_ID", sessionId ] }
+                |> requireOk
+
+            try
+                Assert.That(
+                    waitUntil (TimeSpan.FromSeconds 10.0) (fun () ->
+                        File.Exists pidFile
+                        && File.Exists descendantPidFile
+                        && File.Exists sessionFile),
+                    Is.True,
+                    "owned child did not start"
+                )
+
+                let childPid = File.ReadAllText(pidFile).Trim() |> int
+                let descendantPid = File.ReadAllText(descendantPidFile).Trim() |> int
+
+                Assert.Multiple(fun () ->
+                    Assert.That(childPid, Is.EqualTo(JobProcess.processId owned))
+                    Assert.That(File.ReadAllText(sessionFile).Trim(), Is.EqualTo sessionId)
+                    Assert.That(JobProcess.hasExited owned, Is.False))
+
+                JobProcess.close owned
+
+                Assert.Multiple(fun () ->
+                    Assert.That(JobProcess.hasExited owned, Is.True)
+
+                    Assert.That(
+                        waitUntil (TimeSpan.FromSeconds 5.0) (fun () -> not (linuxProcessIsRunning childPid)),
+                        Is.True,
+                        "close did not kill ttyd"
+                    )
+
+                    Assert.That(
+                        waitUntil (TimeSpan.FromSeconds 5.0) (fun () -> not (linuxProcessIsRunning descendantPid)),
+                        Is.True,
+                        "close did not kill the ttyd process tree"
+                    ))
+            finally
+                JobProcess.close owned
+                killExactPidFromFile descendantPidFile)
+
+    [<Test>]
+    member _.``an owned process reports a start time that identifies it``() =
+        withTempDir "terminal-host-tree-identity" (fun root ->
+            let owned =
+                JobProcess.start
+                    { Executable = "/bin/bash"
+                      Arguments = [ "-c"; "sleep 300" ]
+                      WorkingDirectory = root
+                      Environment = [] }
+                |> requireOk
+
+            try
+                use child = Process.GetProcessById(JobProcess.processId owned)
+
+                Assert.That(
+                    JobProcess.processStartTimeUtcTicks owned,
+                    Is.EqualTo(ProcessStartTime.utcTicks child),
+                    "the recorded start time must match what the manifest later reads back"
+                )
+            finally
+                JobProcess.close owned)
+
+    [<Test>]
+    member _.``closing twice is safe``() =
+        withTempDir "terminal-host-tree-double-close" (fun root ->
+            let owned =
+                JobProcess.start
+                    { Executable = "/bin/bash"
+                      Arguments = [ "-c"; "sleep 300" ]
+                      WorkingDirectory = root
+                      Environment = [] }
+                |> requireOk
+
+            JobProcess.close owned
+            JobProcess.close owned
+
+            Assert.That(JobProcess.hasExited owned, Is.True))
