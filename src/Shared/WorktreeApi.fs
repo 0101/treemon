@@ -8,7 +8,7 @@ open System
 /// Everything else it references (requests/results, WorktreePath, etc.) is defined earlier in Types.fs.
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
-      openTerminal: WorktreePath -> Async<unit>
+      openTerminal: WorktreePath -> Async<Result<unit, string>>
       startEmbeddedTerminal: WorktreePath -> Async<Result<EmbeddedTerminalStartResult, string>>
       getEmbeddedTerminals: unit -> Async<EmbeddedTerminalSnapshot>
       closeEmbeddedTerminal: EmbeddedTerminalId -> Async<Result<EmbeddedTerminalSnapshot, string>>

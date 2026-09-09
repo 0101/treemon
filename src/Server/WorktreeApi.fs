@@ -48,7 +48,7 @@ let readOnlyApi
     : IWorktreeApi =
     { getWorktrees = getWorktrees
       getSyncStatus = getSyncStatus
-      openTerminal = fun _ -> async { return () }
+      openTerminal = fun _ -> async { return Error $"Native terminals are not available in {modeName}" }
       startEmbeddedTerminal =
         fun _ -> async { return Error $"Embedded terminal is not available in {modeName}" }
       getEmbeddedTerminals = fun () -> async { return EmbeddedTerminalSnapshot.empty }
@@ -552,6 +552,7 @@ let private openTerminal
 
         if not isValid then
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
+            return Error "This worktree is not one Treemon is monitoring."
         else
             Log.log "API" $"openTerminal: launching terminal for '{path}'"
             let! result = openNativeTerminal wtPath
@@ -559,6 +560,11 @@ let private openTerminal
             match result with
             | Ok () -> ()
             | Error msg -> Log.log "API" $"openTerminal: failed for '{path}': {msg}"
+
+            // Returned rather than only logged. Native terminal windows are a Windows Terminal
+            // feature, so off Windows this always fails - and swallowing that made the button and
+            // the Enter shortcut do nothing at all, with nowhere for a user to find out why.
+            return result
     }
 
 let internal deleteWorktreeWith

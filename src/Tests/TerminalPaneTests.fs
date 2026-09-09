@@ -1027,3 +1027,30 @@ type TerminalFocusTests() =
                     updated.EmbeddedTerminals,
                 Is.EqualTo(Some secondOne)
             ))
+
+    // Native terminal windows and window focus are Windows Terminal features, so off Windows every
+    // one of these actions fails. The result used to be discarded, which made the terminal button
+    // and the Enter shortcut do nothing at all — no window, no message, nothing to look at.
+    [<Test>]
+    member _.``a native terminal failure is shown in the pane, pointed at the worktree it failed for``() =
+        let closedPane =
+            { focusModel with
+                TerminalPaneOpen = false
+                TerminalPaneTarget = Some second }
+
+        let updated, _ =
+            App.update
+                (EmbeddedTerminalRequestFailed(
+                    first,
+                    "Native terminal windows are a Windows Terminal feature, so this server cannot open one."
+                ))
+                closedPane
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.TerminalPaneOpen, Is.True, "a message nobody can see is not a message")
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some first), "shown for the worktree it failed for")
+
+            match TerminalPane.tryStartState first updated.EmbeddedTerminalStarts with
+            | Some (TerminalPane.TerminalStartState.Failed error) ->
+                Assert.That(error, Does.Contain "Windows Terminal")
+            | other -> Assert.Fail $"expected a failure state carrying the reason, got {other}")

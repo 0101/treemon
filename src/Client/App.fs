@@ -188,6 +188,25 @@ let targetEmbeddedTerminal path model =
         TerminalPaneOpen = true
         TerminalPaneTarget = Some path }
 
+/// What a native-terminal action reports back. Success refreshes the cards; a failure is shown in
+/// the terminal pane for that worktree, beside the button that starts an embedded terminal there.
+///
+/// The failure is not a rare case. Native terminal windows and window focus are Windows Terminal
+/// features, so off Windows every one of these actions fails - and the result used to be discarded,
+/// which made the terminal button and the Enter shortcut do nothing whatsoever, with nowhere for
+/// anyone to find out why. The message says what happened and points at the thing that does work.
+let private sessionOutcome path =
+    function
+    | Ok () -> SessionCompleted
+    | Error error -> EmbeddedTerminalRequestFailed(path, error)
+
+/// The call itself failing, rather than the action it asked for. Fable.Remoting raises on any
+/// non-2xx, so a server that is down - or refusing the request, as the CSRF guard does to a
+/// non-loopback origin - arrives here. Shown the same way, because "nothing happened and nobody
+/// said why" is the outcome worth never repeating.
+let private sessionFailed path (error: exn) =
+    EmbeddedTerminalRequestFailed(path, error.Message)
+
 let private targetEmbeddedTerminalStart startState path model =
     { targetEmbeddedTerminal path model with
         EmbeddedTerminalStarts =
@@ -500,7 +519,7 @@ let update msg model =
         saveCollapsedReposCmd updatedModel.Repos
 
     | OpenTerminal path ->
-        model, Cmd.OfAsync.attempt worktreeApi.Value.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+        model, Cmd.OfAsync.either worktreeApi.Value.openTerminal path (sessionOutcome path) (sessionFailed path)
     | OpenEmbeddedTerminal path
         when model.EmbeddedTerminals
              |> TerminalPane.tabsForWorktree path
@@ -601,13 +620,18 @@ let update msg model =
                         path
                         (TerminalPane.TerminalStartState.Failed error) },
             Cmd.none
+    // Targeting the pane is part of reporting the failure: the message renders inside it, for the
+    // worktree it is pointing at, so a failure raised while the pane is closed or aimed elsewhere
+    // would otherwise be written somewhere nobody is looking.
     | EmbeddedTerminalRequestFailed (path, error) ->
-        { model with
+        { targetEmbeddedTerminal path model with
             EmbeddedTerminalStarts =
                 model.EmbeddedTerminalStarts
                 |> TerminalPane.setStartState
                     path
                     (TerminalPane.TerminalStartState.Failed error) },
+        // Opened to show the message, not persisted: the user did not choose this, a failure forced
+        // it, and their saved pane preference should survive something going wrong.
         Cmd.none
     | SelectEmbeddedTerminal terminalId ->
         { model with
@@ -821,10 +845,10 @@ let update msg model =
         model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
 
     | FocusSession path ->
-        model, Cmd.OfAsync.perform worktreeApi.Value.focusSession path SessionResult
+        model, Cmd.OfAsync.either worktreeApi.Value.focusSession path (sessionOutcome path) (sessionFailed path)
 
     | OpenNewTab path ->
-        model, Cmd.OfAsync.perform worktreeApi.Value.openNewTab path SessionResult
+        model, Cmd.OfAsync.either worktreeApi.Value.openNewTab path (sessionOutcome path) (sessionFailed path)
 
     | ResumeSession path ->
         let updated, alreadyStarting =
@@ -850,7 +874,7 @@ let update msg model =
         | None ->
             model, Cmd.none
 
-    | SessionResult _ ->
+    | SessionCompleted ->
         model, fetchWorktrees ()
 
     | LaunchAction (path, action) ->

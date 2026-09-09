@@ -227,7 +227,10 @@ let private nativeTerminalSupport =
     if OperatingSystem.IsWindows() then
         Ok()
     else
-        Error "Native terminal windows require Windows Terminal, which is Windows-only. Open an embedded terminal instead."
+        // Reaches the card, so it is written for whoever pressed the button rather than for a log:
+        // what cannot happen, why, and the thing to do instead — which the button beside it does.
+        Error
+            "Native terminal windows are a Windows Terminal feature, so this server cannot open one. Start an embedded terminal here instead."
 
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
     async {
