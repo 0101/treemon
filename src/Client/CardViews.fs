@@ -182,6 +182,7 @@ let isVisibleCardEvent (evt: CardEvent) =
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with
     | Some CopilotCli -> "Copilot"
+    | Some ClaudeCode -> "Claude Code"
     | None -> "Coding tool"
 
 /// Two arrows bent into a circle — the sync glyph. Circular rather than the straight swap arrows it

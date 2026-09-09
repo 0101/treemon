@@ -60,6 +60,9 @@
     <Compile Include="NativeSessionFocusTests.fs" />
     <Compile Include="SessionManagerSpawnTests.fs" />
     <Compile Include="CommandBuilderTests.fs" />
+    <Compile Include="TreemonScriptTests.fs" />
+    <Compile Include="DirectoryRootTests.fs" />
+    <Compile Include="RepoDisplayNameTests.fs" />
     <Compile Include="CliTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
     <Compile Include="SessionManagerBuildScriptTests.fs" />

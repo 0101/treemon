@@ -28,9 +28,19 @@ type ReadConfiguredProviderTests() =
         let result = readConfiguredProvider tempDir
         Assert.That(result, Is.EqualTo(None))
 
+    // This asserted None while Claude was unsupported, which it no longer is: it pushes status
+    // through hooks rather than the log parsing that was removed, so the value is meaningful again.
     [<Test>]
-    member _.``Returns None when codingTool is claude (no longer supported)``() =
+    member _.``Returns ClaudeCode when codingTool is claude``() =
         File.WriteAllText(Path.Combine(tempDir, ".treemon.json"), """{"codingTool": "claude"}""")
+
+        let result = readConfiguredProvider tempDir
+
+        Assert.That(result, Is.EqualTo(Some ClaudeCode))
+
+    [<Test>]
+    member _.``Returns None when codingTool names a provider that does not exist``() =
+        File.WriteAllText(Path.Combine(tempDir, ".treemon.json"), """{"codingTool": "cursor"}""")
 
         let result = readConfiguredProvider tempDir
 

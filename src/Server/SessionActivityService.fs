@@ -2,6 +2,7 @@ module Server.SessionActivityService
 
 open System
 open System.Globalization
+open System.IO
 open System.Threading
 open Giraffe
 open Microsoft.AspNetCore.Http
@@ -56,6 +57,7 @@ type SessionActivityRequest =
 let private parseProvider (s: string) : Result<CodingToolProvider, string> =
     match s with
     | "copilot_cli" -> Ok CopilotCli
+    | "claude_code" -> Ok ClaudeCode
     | other -> Error $"unknown provider '{other}'"
 
 let private parseTerminalSessionId (value: string option) : Result<TerminalSessionId option, string> =
@@ -210,6 +212,26 @@ let private withMessageTimestamp at =
     | UserInputCompleted _ -> UserInputCompleted at
     | event -> event
 
+/// The reported directory, in the absolute normalised form the scheduler's known paths use.
+///
+/// Rooted is required rather than assumed: GetFullPath resolves a relative path against *this
+/// server's* working directory, so a reporter sending "." would silently be attributed to whatever
+/// worktree the server itself is running in. GetFullPath also throws on a malformed path, and a
+/// reporter with an odd working directory should get a rejected request, not an unhandled one.
+///
+/// Note this asks nothing of the filesystem: the path need not exist, and no directory above it is
+/// read, so an unreadable or deleted parent cannot affect the outcome.
+let private parseWorktreePath (raw: string) =
+    if not (Path.IsPathFullyQualified raw) then
+        Error "worktreePath must be an absolute path"
+    else
+        try
+            Ok(WorktreePath(PathUtils.normalizePath raw))
+        with
+        | :? ArgumentException
+        | :? PathTooLongException
+        | :? NotSupportedException -> Error "worktreePath is not a valid path"
+
 /// Validate a wire request and build the domain report, or return a human-readable reason. The
 /// worktree path is normalised here so it matches the scheduler's known-path set, and `occurredAt`
 /// is clamped against `now` so a future timestamp can't poison freshness or activity ordering.
@@ -226,6 +248,8 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
     elif String.IsNullOrWhiteSpace req.occurredAt then Error "missing occurredAt"
     elif String.IsNullOrWhiteSpace req.kind then Error "missing kind"
     else
+        parseWorktreePath req.worktreePath
+        |> Result.bind (fun worktreePath ->
         parseProvider req.provider
         |> Result.bind (fun provider ->
             parseTerminalSessionId (Option.ofObj req.terminalSessionId)
@@ -237,11 +261,11 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
                     |> Result.map (fun ev ->
                         { SessionId = SessionId req.sessionId
                           TerminalSessionId = terminalSessionId
-                          WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
+                          WorktreePath = worktreePath
                           Provider = provider
                           EventId = EventId req.eventId
                           OccurredAt = occurredAt
-                          Event = withMessageTimestamp occurredAt ev }))))
+                          Event = withMessageTimestamp occurredAt ev })))))
 
 // --- Known-worktree guard (mirrors CanvasDocServer) --------------------------------------------
 
@@ -250,9 +274,79 @@ let private allKnownPaths (agent: MailboxProcessor<SchedulerState.StateMsg>) = a
     return state.Repos |> Map.values |> Seq.collect _.KnownPaths |> Set.ofSeq
 }
 
-let private isKnownWorktree agent path = async {
+/// How far above a worktree a reporter may sit and still be attributed to it. An agent that works
+/// across several repositories from one folder starts a directory or two above them, so its reports
+/// arrive from there; searching further up would start matching unrelated trees.
+let [<Literal>] internal MaxAncestorDepth = 3
+
+/// Which monitored worktree a reported path belongs to, if any. Reporters do not necessarily sit at
+/// a worktree root: an agent that has moved into a subdirectory reports from inside one, and an
+/// agent working across repositories from a parent folder reports from above them. Both are the same
+/// session as far as a dashboard is concerned, so both resolve to the worktree rather than being
+/// discarded as unmonitored.
+///
+/// A path above several monitored worktrees names none of them in particular, so it resolves to
+/// nothing rather than picking one arbitrarily or lighting up every card. That is the whole weakness
+/// of resolving by position: a folder holding one monitored repository resolves to it only by
+/// elimination, so monitoring a second repository beside it stops the agent appearing at all - with
+/// no error anywhere, because a report for an unmonitored path is a soft accept.
+///
+/// `declared` is how a folder answers instead of being guessed at: it names the repository the agent
+/// says it is working in right now. A statement beats elimination, and it keeps working when the
+/// folder holds two repositories, or ten.
+///
+/// It is asked only once position has failed to answer, and only for a directory no monitored
+/// worktree encloses. Both matter. A report from inside a worktree belongs to that worktree, and a
+/// state file in some subdirectory of one must not redirect it - "git is authoritative here" is
+/// enforced at a worktree's root, not at every directory below it. And it is a function because
+/// answering it reads a file: every event a session emits arrives here, most of them from inside a
+/// repository, and those must not pay for a question that is already settled.
+let internal resolveMonitoredWorktree (known: Set<string>) (declared: unit -> string option) (reported: string) =
+    let separator = string Path.DirectorySeparatorChar
+
+    if known.Contains reported then
+        Some reported
+    else
+        let isBelow (candidate: string) =
+            reported.StartsWith(candidate + separator, StringComparison.Ordinal)
+
+        let depthBelow (candidate: string) =
+            candidate
+                .Substring(reported.Length)
+                .Split([| Path.DirectorySeparatorChar |], StringSplitOptions.RemoveEmptyEntries)
+                .Length
+
+        // Inside a worktree: the deepest enclosing one, so a worktree nested in another still wins.
+        match known |> Seq.filter isBelow |> Seq.sortByDescending _.Length |> Seq.tryHead with
+        | Some enclosing -> Some enclosing
+        | None ->
+            // Only a declaration naming something actually monitored: an agent can write any path it
+            // likes into its state file, and this decides which card a session lights up.
+            match declared () |> Option.filter known.Contains with
+            | Some repository -> Some repository
+            | None ->
+                known
+                |> Seq.filter (fun candidate ->
+                    candidate.StartsWith(reported + separator, StringComparison.Ordinal)
+                    && depthBelow candidate <= MaxAncestorDepth)
+                |> Seq.truncate 2
+                |> Seq.toList
+                |> function
+                    | [ single ] -> Some single
+                    | _ -> None
+
+let private monitoredWorktreeFor agent path = async {
     let! paths = allKnownPaths agent
-    return paths |> Set.contains path
+
+    // Read per report rather than cached: the declaration is how an agent says it has moved between
+    // repositories, so a stale one would attribute a session to the repository it just left. The
+    // resolver decides whether to ask at all, and only asks when nothing else has answered.
+    let declared () =
+        DirectoryRoot.tryReadState path
+        |> Option.bind (DirectoryRoot.declaredRepo path)
+        |> Option.map PathUtils.normalizePath
+
+    return resolveMonitoredWorktree paths declared path
 }
 
 let private isSyntheticSystemReminder (report: SessionActivityReport) =
@@ -282,11 +376,15 @@ let tryAcceptReport (agent: MailboxProcessor<SchedulerState.StateMsg>) (req: Ses
         | Error reason -> return Rejected reason
         | Ok report ->
             let path = WorktreePath.value report.WorktreePath
-            let! known = isKnownWorktree agent path
+            let! monitored = monitoredWorktreeFor agent path
             return
-                if not known then Unmonitored path
-                elif isSyntheticSystemReminder report then IgnoredSystemReminder
-                else Accepted report
+                match monitored with
+                | None -> Unmonitored path
+                | Some _ when isSyntheticSystemReminder report -> IgnoredSystemReminder
+                | Some worktree ->
+                    // Stored against the worktree, not the directory the reporter happened to be in,
+                    // so every session for one worktree collapses onto its card.
+                    Accepted { report with WorktreePath = WorktreePath worktree }
     }
 
 // --- Retention ---------------------------------------------------------------------------------

@@ -48,7 +48,7 @@ let readOnlyApi
     : IWorktreeApi =
     { getWorktrees = getWorktrees
       getSyncStatus = getSyncStatus
-      openTerminal = fun _ -> async { return () }
+      openTerminal = fun _ -> async { return Error $"Native terminals are not available in {modeName}" }
       startEmbeddedTerminal =
         fun _ -> async { return Error $"Embedded terminal is not available in {modeName}" }
       getEmbeddedTerminals = fun () -> async { return EmbeddedTerminalSnapshot.empty }
@@ -356,6 +356,11 @@ let private assembleReposCore
             GitWorktree.WorktreeInfo ->
             WorktreeStatus)
     : RepoWorktrees list =
+    // Computed once across every root, because a label can only be made distinct by knowing what it
+    // has to be distinct from.
+    let displayNames =
+        rootPaths |> Map.values |> List.ofSeq |> PathUtils.displayNames
+
     state.Repos
     |> Map.toList
     |> List.map (fun (repoId, repo) ->
@@ -377,7 +382,10 @@ let private assembleReposCore
         let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
         { RepoId = repoId
-          RootFolderName = Path.GetFileName(originalPath)
+          RootFolderName =
+            displayNames
+            |> Map.tryFind originalPath
+            |> Option.defaultValue (Path.GetFileName originalPath)
           Worktrees = statuses
           IsReady = repo.IsReady
           Provider = repo.Provider
@@ -544,6 +552,7 @@ let private openTerminal
 
         if not isValid then
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
+            return Error "This worktree is not one Treemon is monitoring."
         else
             Log.log "API" $"openTerminal: launching terminal for '{path}'"
             let! result = openNativeTerminal wtPath
@@ -551,6 +560,11 @@ let private openTerminal
             match result with
             | Ok () -> ()
             | Error msg -> Log.log "API" $"openTerminal: failed for '{path}': {msg}"
+
+            // Returned rather than only logged. Native terminal windows are a Windows Terminal
+            // feature, so off Windows this always fails - and swallowing that made the button and
+            // the Enter shortcut do nothing at all, with nowhere for a user to find out why.
+            return result
     }
 
 let internal deleteWorktreeWith
@@ -1062,11 +1076,23 @@ let internal worktreeApiWithLaunch
                       // Per-provider resume policy: the Copilot CLI resumes by stored session id. A
                       // future provider that resumes differently (or can't) gets its own arm — the
                       // compiler flags this match when a new provider case is added.
+                      let resumeProvider = provider |> Option.defaultValue CodingToolProvider.Default
+
                       let sessionId =
-                          match provider |> Option.defaultValue CodingToolProvider.Default with
-                          | CodingToolProvider.CopilotCli ->
+                          match resumeProvider with
+                          // Both resume by stored session id: `copilot --resume <id>` and
+                          // `claude --resume <id>` take the same id their status reports carry —
+                          // but only their own. A worktree that has run both tools holds a session
+                          // row for each, so the lookup is scoped to the provider about to be
+                          // launched; handing one tool the other's id resumes nothing.
+                          | CodingToolProvider.CopilotCli
+                          | CodingToolProvider.ClaudeCode ->
                               activityStore
-                              |> Option.bind _.LatestSessionIdForWorktree(PathUtils.toWorktreePath path)
+                              |> Option.bind (fun store ->
+                                  store.LatestSessionIdForWorktree(
+                                      PathUtils.toWorktreePath path,
+                                      resumeProvider
+                                  ))
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       let start () =
                           startEmbeddedCommand wtPath inv.AsShellString

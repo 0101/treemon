@@ -24,6 +24,7 @@
     <Compile Include="RequestSecurity.fs" />
     <Compile Include="TerminalDataPlane.fs" />
     <Compile Include="TerminalProxy.fs" />
+    <Compile Include="TerminalShell.fs" />
     <Compile Include="TerminalLauncher.fs" />
     <Compile Include="TerminalRegistry.fs" />
     <Compile Include="Manifest.fs" />
@@ -39,14 +40,23 @@
     <ProjectReference Include="..\TerminalHostLayout\TerminalHostLayout.fsproj" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <TtydVersion>1.7.7</TtydVersion>
+    <TtydDirectory>$(MSBuildThisFileDirectory)../../.tools/ttyd/$(TtydVersion)/</TtydDirectory>
+    <TtydExecutableName Condition="'$(OS)' == 'Windows_NT'">ttyd.exe</TtydExecutableName>
+    <TtydExecutableName Condition="'$(OS)' != 'Windows_NT'">ttyd</TtydExecutableName>
+  </PropertyGroup>
+
   <ItemGroup>
-    <None Include="..\..\.tools\ttyd\1.7.7\ttyd.exe"
-          Condition="'$(OS)' == 'Windows_NT'"
-          Link="ttyd.exe"
+    <!-- Guarded by Exists so a missing runtime is reported by ValidateTerminalHostDependencies
+         below rather than as a bare MSB3030 copy failure. -->
+    <None Include="$(TtydDirectory)$(TtydExecutableName)"
+          Condition="Exists('$(TtydDirectory)$(TtydExecutableName)')"
+          Link="$(TtydExecutableName)"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
-    <None Include="..\..\.tools\ttyd\1.7.7\LICENSE.txt"
-          Condition="'$(OS)' == 'Windows_NT'"
+    <None Include="$(TtydDirectory)LICENSE.txt"
+          Condition="Exists('$(TtydDirectory)LICENSE.txt')"
           Link="ttyd-LICENSE.txt"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
@@ -54,8 +64,8 @@
 
   <Target Name="ValidateTerminalHostDependencies"
           BeforeTargets="Build;Publish">
-    <Error Condition="'$(OS)' == 'Windows_NT' and !Exists('..\..\.tools\ttyd\1.7.7\ttyd.exe')"
-           Text="The pinned ttyd runtime is missing. Run .\treemon.ps1 setup-ttyd before building TerminalHost." />
+    <Error Condition="!Exists('$(TtydDirectory)$(TtydExecutableName)')"
+           Text="The pinned ttyd runtime is missing from $(TtydDirectory). Run 'treemon.cmd setup-ttyd' on Windows or './treemon.sh setup-ttyd' elsewhere, then build again." />
   </Target>
 
 </Project>

@@ -335,3 +335,64 @@ type FormatDiffCategoryReportTests() =
 
         Assert.That(rendered |> Seq.filter Char.IsControl |> Seq.toList, Is.Empty)
         Assert.That(rendered, Does.Contain("Cli[2Jent"), "the name still renders, without the escape")
+
+
+/// `tm state` rewrites the whole file, and the file holds several independent statements: what the
+/// agent is on, what it last did, whether it is busy, and which repository its session belongs to.
+/// Naming one must not erase the rest — losing the repository moves a session to another card, or
+/// off every card, with nothing to see.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type StateDeclarationMergeTests() =
+
+    let nothing =
+        { Label = None; Summary = None; Busy = None; Repo = None }
+
+    let existing =
+        { Label = Some "CEN-482"
+          Summary = Some "Closed 3 tickets"
+          Busy = Some true
+          Repo = Some "git/Centro" }
+
+    [<Test>]
+    member _.``naming only the summary keeps the label, the repository and the busy flag``() =
+        let merged = mergeDeclaration (Some existing) { nothing with Summary = Some "Rotated the creds" }
+
+        Assert.Multiple(fun () ->
+            Assert.That(merged.Summary, Is.EqualTo(Some "Rotated the creds"))
+            Assert.That(merged.Label, Is.EqualTo(Some "CEN-482"))
+            Assert.That(merged.Repo, Is.EqualTo(Some "git/Centro"))
+            Assert.That(merged.Busy, Is.EqualTo(Some true)))
+
+    [<Test>]
+    member _.``a named value replaces the one that was there``() =
+        let merged = mergeDeclaration (Some existing) { nothing with Repo = Some "git/Clabe"; Busy = Some false }
+
+        Assert.Multiple(fun () ->
+            Assert.That(merged.Repo, Is.EqualTo(Some "git/Clabe"))
+            Assert.That(merged.Busy, Is.EqualTo(Some false), "false is a value, not an absence")
+            Assert.That(merged.Label, Is.EqualTo(Some "CEN-482")))
+
+    // Blank is how a shell passes "I did not really mean this", so it carries forward rather than
+    // erasing — clearing a field is not something this command offers.
+    [<Test>]
+    member _.``a blank value is the same as naming nothing``() =
+        let merged = mergeDeclaration (Some existing) { nothing with Label = Some "   " }
+
+        Assert.That(merged.Label, Is.EqualTo(Some "CEN-482"))
+
+    [<Test>]
+    member _.``surrounding whitespace is not part of what is declared``() =
+        let merged = mergeDeclaration None { nothing with Repo = Some "  git/Centro  " }
+
+        Assert.That(merged.Repo, Is.EqualTo(Some "git/Centro"))
+
+    [<Test>]
+    member _.``a folder with nothing already declared keeps only what it is given``() =
+        let merged = mergeDeclaration None { nothing with Repo = Some "git/Centro" }
+
+        Assert.Multiple(fun () ->
+            Assert.That(merged.Repo, Is.EqualTo(Some "git/Centro"))
+            Assert.That(merged.Label, Is.EqualTo None, "a folder above its repositories wants no card")
+            Assert.That(merged.Busy, Is.EqualTo None))

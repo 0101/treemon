@@ -2,6 +2,7 @@ module Cli.Program
 
 open System
 open System.IO
+open System.Text.Json
 open System.Text.RegularExpressions
 open FSharp.SystemCommandLine
 open FSharp.SystemCommandLine.Input
@@ -380,6 +381,150 @@ let rootsCmd =
         setAction handler
     }
 
+/// Writes the state file a monitored folder uses when it is not a git repository, so an agent whose
+/// work is not commits can keep its own card current. Deliberately the one offline command: an agent
+/// reports its state as it works, and having that fail because the dashboard happens to be down would
+/// leave the card stale for the wrong reason. The server picks the file up on its next refresh.
+/// What a folder declares about itself. Every field is optional because the file holds several
+/// independent statements and an agent updates them at very different rates.
+type StateDeclaration =
+    { Label: string option
+      Summary: string option
+      Busy: bool option
+      Repo: string option }
+
+/// What to write, given what this invocation named and what the file already said.
+///
+/// Naming one field must not erase the others. A summary is rewritten constantly and a repository
+/// rarely, so a `--summary` that dropped `repo` would silently move the agent's session to another
+/// card - or off every card - with nothing to see. Only a value actually given replaces what is
+/// there; a blank one is the same as not giving it.
+let mergeDeclaration (previous: StateDeclaration option) (chosen: StateDeclaration) : StateDeclaration =
+    let trimmedOrNone =
+        Option.map (fun (value: string) -> value.Trim())
+        >> Option.filter (String.IsNullOrWhiteSpace >> not)
+
+    let carried pick =
+        pick chosen
+        |> trimmedOrNone
+        |> Option.orElse (previous |> Option.bind pick |> trimmedOrNone)
+
+    { Label = carried _.Label
+      Summary = carried _.Summary
+      Repo = carried _.Repo
+      // Not text, so nothing to trim - but the same rule: omitted leaves it as it was.
+      Busy = chosen.Busy |> Option.orElse (previous |> Option.bind _.Busy) }
+
+let stateCmd =
+    let previousDeclaration (file: string) =
+        try
+            if not (File.Exists file) then
+                None
+            else
+                use document = JsonDocument.Parse(File.ReadAllText file)
+                let root = document.RootElement
+
+                let stringOf (name: string) =
+                    match root.TryGetProperty name with
+                    | true, element when element.ValueKind = JsonValueKind.String -> element.GetString() |> Option.ofObj
+                    | _ -> None
+
+                let boolOf (name: string) =
+                    match root.TryGetProperty name with
+                    | true, element when element.ValueKind = JsonValueKind.True -> Some true
+                    | true, element when element.ValueKind = JsonValueKind.False -> Some false
+                    | _ -> None
+
+                Some
+                    { Label = stringOf DirectoryStateFile.Label
+                      Summary = stringOf DirectoryStateFile.Summary
+                      Busy = boolOf DirectoryStateFile.Busy
+                      Repo = stringOf DirectoryStateFile.Repo }
+        with _ ->
+            // An unreadable file is not a reason to refuse the write; it is a reason to have nothing
+            // to carry forward.
+            None
+
+    let handler (path: string, label: string option, summary: string option, busy: bool option, repo: string option) =
+        try
+            let directory = Path.GetFullPath path
+            let file = Path.Combine(directory, DirectoryStateFile.FileName)
+            let declared =
+                mergeDeclaration
+                    (previousDeclaration file)
+                    { Label = label
+                      Summary = summary
+                      Busy = busy
+                      Repo = repo }
+
+            let declaredLabel = declared.Label
+            let declaredRepo = declared.Repo
+            let declaredSummary = declared.Summary
+            let declaredBusy = declared.Busy |> Option.defaultValue false
+
+            if not (Directory.Exists directory) then
+                eprintfn $"Directory not found: {directory}"
+                1
+            elif Option.isNone declaredLabel && Option.isNone declaredRepo then
+                eprintfn "Give --label, --repo, or both: a label is what a card shows where a branch"
+                eprintfn "would be, and a repo is which card this folder's session belongs to."
+                1
+            elif File.Exists(Path.Combine(directory, ".git")) || Directory.Exists(Path.Combine(directory, ".git")) then
+                // Writing here would be silently ignored, so say why rather than leaving the author
+                // wondering why the card never changes.
+                eprintfn $"{directory} is a git repository, so its card comes from git and this file would be ignored."
+                1
+            else
+                use stream = File.Create file
+                use writer = new Utf8JsonWriter(stream, JsonWriterOptions(Indented = true))
+                writer.WriteStartObject()
+
+                // A folder above its repositories wants no card of its own - the repository has one -
+                // so an absent label is written as an absent key rather than a blank one.
+                declaredLabel
+                |> Option.iter (fun value -> writer.WriteString(DirectoryStateFile.Label, value))
+
+                writer.WriteString(DirectoryStateFile.Summary, declaredSummary |> Option.defaultValue "")
+                writer.WriteString(DirectoryStateFile.UpdatedAt, DateTimeOffset.UtcNow.ToString "o")
+                writer.WriteBoolean(DirectoryStateFile.Busy, declaredBusy)
+
+                // Likewise: an absent key means "resolve my session by position", which is a different
+                // statement from naming a repository.
+                declaredRepo
+                |> Option.iter (fun value -> writer.WriteString(DirectoryStateFile.Repo, value))
+
+                writer.WriteEndObject()
+                writer.Flush()
+
+                printfn $"Wrote {file}"
+                0
+        with
+        | :? IOException as error ->
+            eprintfn $"Could not write the state file: {error.Message}"
+            1
+        | :? UnauthorizedAccessException as error ->
+            eprintfn $"Could not write the state file: {error.Message}"
+            1
+
+    command "state" {
+        description
+            "Declare the state of a folder that is not a git repository, so it still gets a card (writes .treemon-state.json)"
+
+        inputs (
+            option<string> "--path" |> desc "The folder to describe",
+            optionMaybe<string> "--label"
+            |> desc "What the agent is on; shown where a branch would be. Omit for a folder that wants no card of its own",
+            optionMaybe<string> "--summary" |> desc "What it most recently did; shown where the last commit would be",
+            optionMaybe<bool> "--busy"
+            |> desc "Work in progress; shown the way a dirty worktree is. Omit to leave it as it was",
+            optionMaybe<string> "--repo"
+            |> desc
+                "The repository under this folder the agent is working in now, relative to it; its session then attaches to that repository's card"
+        )
+
+        setAction handler
+    }
+
 /// Renders a diff category report and the exit code that goes with it: 0 only for a configured
 /// repository, so the command is usable as a check and not just a printer. Category names come from
 /// the repository's `.treemon.json`, so they are sanitized before they reach the terminal.
@@ -452,4 +597,5 @@ let main argv =
         addCommand removeCmd
         addCommand rootsCmd
         addCommand categoriesCmd
+        addCommand stateCmd
     }

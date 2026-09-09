@@ -54,7 +54,7 @@ module private HostConfig =
                         AppContext.BaseDirectory,
                         TerminalHostLayout.TtydExecutableName
                     )
-                  ShellCommand = "pwsh"
+                  ShellCommand = TerminalHostLayout.DefaultShellCommand
                   StartupTimeout = TimeSpan.FromSeconds 10.0 } }
 
         let rec collect config remaining =
@@ -92,11 +92,20 @@ module private HostConfig =
         try
             match collect initial (arguments |> Array.toList) with
             | Error error -> Error error
-            | Ok config when not (OperatingSystem.IsWindows()) ->
-                Error "TerminalHost requires Windows"
+            // Ownership, the shell convention and the proxy are all either Windows or POSIX, so the
+            // gate only has to exclude platforms neither branch was written for.
+            | Ok config when
+                not (
+                    OperatingSystem.IsWindows()
+                    || OperatingSystem.IsLinux()
+                    || OperatingSystem.IsMacOS()
+                )
+                ->
+                Error "TerminalHost requires Windows, Linux or macOS"
             | Ok config when not (File.Exists config.TerminalLaunch.TtydExecutable) ->
-                Error
-                    $"ttyd is not installed at '{config.TerminalLaunch.TtydExecutable}'. Run '.\\treemon.ps1 setup-ttyd'."
+                // Naming a PowerShell script is advice two of the three supported platforms cannot follow.
+                let wrapper = if OperatingSystem.IsWindows() then "treemon.cmd" else "./treemon.sh"
+                Error $"ttyd is not installed at '{config.TerminalLaunch.TtydExecutable}'. Run '{wrapper} setup-ttyd'."
             | Ok config -> Ok config
         with
         | :? ArgumentException
@@ -110,7 +119,7 @@ module private HostRuntime =
         task {
             use currentProcess = Process.GetCurrentProcess()
             let hostPid = currentProcess.Id
-            let processStartTimeUtcTicks = currentProcess.StartTime.ToUniversalTime().Ticks
+            let processStartTimeUtcTicks = ProcessStartTime.utcTicks currentProcess
             let version =
                 Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()
                 |> Option.ofObj

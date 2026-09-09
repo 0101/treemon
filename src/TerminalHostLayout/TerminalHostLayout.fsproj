@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="ProcessStartTime.fs" />
     <Compile Include="Layout.fs" />
   </ItemGroup>
 

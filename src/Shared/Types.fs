@@ -62,11 +62,13 @@ type CodingToolStatus =
     | Idle
     | NoSession
 
-/// The coding tool driving a worktree — its launcher, prompt format, and push-status source. A DU of
-/// one today: only the Copilot CLI can push its live status. Adding a provider (e.g. a future GitHub
-/// App) is a new case; the compiler then flags every provider-specific branch that must handle it.
+/// The coding tool driving a worktree — its launcher, prompt format, and push-status source. Each
+/// provider pushes its own live status: the Copilot CLI through its session extension, Claude Code
+/// through its hooks. Adding a provider is a new case; the compiler then flags every
+/// provider-specific branch that must handle it.
 type CodingToolProvider =
     | CopilotCli
+    | ClaudeCode
     static member Default = CopilotCli
 
 /// A snapshot of a session's context-window occupancy: the tokens currently in the window and the
@@ -558,6 +560,29 @@ type ShareCanvasDocRequest =
 type CanvasShareResult =
     { Url: string
       Title: string }
+
+/// The file a monitored folder that is not a git repository uses to describe itself, so an agent
+/// whose work is not commits still gets a card. `tm state` writes it and the server reads it, in
+/// different projects; only the names live here, because Shared is compiled to JavaScript too and
+/// cannot carry the file access either side needs.
+[<RequireQualifiedAccess>]
+module DirectoryStateFile =
+    let [<Literal>] FileName = ".treemon-state.json"
+
+    /// Stands where a branch would.
+    let [<Literal>] Label = "label"
+    /// Stands where the last commit subject would.
+    let [<Literal>] Summary = "summary"
+    /// Stands where the last commit time would.
+    let [<Literal>] UpdatedAt = "updatedAt"
+    /// Stands where a dirty worktree would.
+    let [<Literal>] Busy = "busy"
+
+    /// Optional: the repository, relative to the folder, that the agent is currently working in.
+    /// An agent that spans repositories cannot be identified by the one it happens to be in, so its
+    /// folder is the identity and this says where the work is. Absent means the folder speaks only
+    /// for itself.
+    let [<Literal>] Repo = "repo"
 
 // IWorktreeApi (the Fable.Remoting contract) lives in WorktreeApi.fs, compiled after OverviewData.fs
 // so getOverviewHistory can use the history types defined in OverviewData.

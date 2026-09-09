@@ -26,6 +26,10 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
+      - name: Install pinned ttyd
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/setup-ttyd.ps1
+
       - name: Restore .NET tools
         run: dotnet tool restore
 

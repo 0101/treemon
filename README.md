@@ -27,69 +27,170 @@ When orchestrating massive parallel work by agents (like Claude Code or Copilot)
 
 Point Treemon at one or more directories, and it runs a lightweight background polling loop (reading git, CLI tools, and file mtimes) to track:
 
-- **AI Agent Status:** Claude Code and Copilot session tracking (Working / Waiting / Done / Idle)
-- **Terminal Management:** Spawn, focus, and track Windows Terminal tabs per worktree
+- **AI Agent Status:** Claude Code and Copilot session tracking (Working / Waiting / Done / Idle), including delegated sub-agents. Copilot reports through its session extension; Claude Code through hooks — see [`src/ClaudeHooks`](src/ClaudeHooks/README.md). Set `{ "codingTool": "claude" }` in a worktree's `.treemon.json` to have Treemon launch and resume Claude there.
+- **Terminal Management:** Embedded terminals per worktree on every platform, plus spawning and focusing native Windows Terminal tabs on Windows
 - **Git State:** Dirty / behind-base indicators, persistent agent-driven auto-sync, and commit metrics
 - **PR Tracking:** Azure DevOps and GitHub PR badges, comment counts, and build results
 - **Task Tracking:** [Beads](https://github.com/steveyegge/beads) completion and progress bars
 
 ## Getting started
 
-Prerequisites: [.NET SDK 9+](https://dotnet.microsoft.com/download), [Node.js](https://nodejs.org) (`winget install OpenJS.NodeJS.LTS`), git. Optional: `az` CLI (for Azure DevOps PR/build data), `gh` CLI (for GitHub PR/build data), `bd` CLI (for [beads](https://github.com/steveyegge/beads) counts). Fable and other dotnet tools are restored automatically on first build.
+### Prerequisites
 
-```powershell
+- [.NET SDK 10+](https://dotnet.microsoft.com/download) — the version is pinned in `global.json`
+- [Node.js](https://nodejs.org), including **npm**. Ubuntu's `nodejs` package does not include npm; install the `npm` package too, or the build picks up something unexpected from `PATH`.
+- git
+
+Optional, each unlocking one part of the dashboard: `az` (Azure DevOps PRs and builds), `gh` (GitHub PRs and builds), `bd` ([beads](https://github.com/steveyegge/beads) task counts). Fable and the other dotnet tools restore themselves on first build.
+
+### Install and run
+
+`treemon.cmd` (Windows) and `treemon.sh` (Linux, macOS) are the same script — thin wrappers around `treemon.fsx`, which runs on `dotnet fsi`. Neither needs PowerShell.
+
+```bash
 git clone https://github.com/0101/treemon.git
 cd treemon
-npm install
-.\treemon.ps1 deploy                                                # build and start on port 5000
-.\treemon.ps1 add "C:\code\my-project" "C:\code\other-project"     # add monitored roots
+./treemon.sh setup-ttyd                    # pinned ttyd, required before the first build
+./treemon.sh publish                       # build and publish the server
+./treemon.sh start ~/code/my-project       # builds the frontend if wwwroot/ is empty
 ```
 
-Open http://localhost:5000 — install as a PWA from the browser for a native app experience.
+On Windows the same three commands are `treemon.cmd setup-ttyd`, `treemon.cmd publish`, `treemon.cmd start "C:\code\my-project"`.
 
-The roots you add are saved to the global config (`~/.treemon/config.json` → `worktreeRoots`, written by the server), so `start`, `restart`, and `dev` do not need a path — omit it to use the saved roots. Manage roots live with the `tm` CLI (`tm add`, `tm remove`, `tm roots`) or the `.\treemon.ps1 add`/`remove` shims; changes apply on the next server restart.
+`setup-ttyd` has to run before anything builds, because the pinned ttyd is a build input rather than something fetched during the build. Forget it and the build stops with a message naming the command to run.
 
-Run production `start`, `restart`, and `deploy` operations from an external PowerShell window, not a Treemon embedded terminal. Embedded `add` and `remove` commands still save root changes, but skip the automatic production restart and require an external `.\treemon.ps1 restart` before the running server uses them.
+Then open **http://localhost:5000** — install it as a PWA from the browser for a native app experience.
+
+Windows has a one-step alternative that also installs the `tm` command, the agent skill and the editor extension:
+
+```powershell
+pwsh -File .\treemon.ps1 deploy
+```
+
+`deploy` is the **only** command that needs [PowerShell 7+](https://github.com/PowerShell/PowerShell) (`winget install Microsoft.PowerShell`), and it is Windows-only. Windows PowerShell 5.1 cannot run `treemon.ps1` — `Join-Path` takes only two segments there — and says so up front rather than failing partway through a deploy.
+
+Everything else runs through `treemon.cmd`, which uses no PowerShell at all and works from cmd, Windows PowerShell 5.1 or pwsh alike.
 
 ### Managing the server
 
-```powershell
-.\treemon.ps1 stop                                                  # stop
-.\treemon.ps1 restart                                               # stop + start
-.\treemon.ps1 status                                                # show PID, port, uptime
-.\treemon.ps1 log                                                   # tail server log
-.\treemon.ps1 add "C:\code\another-project"                         # add a monitored root
-.\treemon.ps1 remove "C:\code\another-project"                      # remove a monitored root
-.\treemon.ps1 deploy                                                # rebuild + replace production with this checkout
+```bash
+./treemon.sh status                        # PID, ports, log location, configured roots
+./treemon.sh log                           # print the current server log
+./treemon.sh restart ~/code/my-project     # roots are not remembered - repeat them
+./treemon.sh stop
+./treemon.sh add ~/code/another-project    # watch a root (applies on the next restart)
+./treemon.sh remove ~/code/another-project
+./treemon.sh roots                         # list watched roots
 ```
+
+Roots you add are saved to the global config (`~/.treemon/config.json` → `worktreeRoots`, written by the server), so `start` and `restart` can be given no path at all — omit it to use the saved roots. A path passed on the command line is used for that run only and is **not** saved, which is why `restart` without arguments falls back to the saved ones.
+
+### Folders that aren't git repositories
+
+An agent whose work isn't commits — tickets, cloud configuration, anything driven through someone else's API — has no branch, no diff and no PR. Point Treemon at its folder anyway and let the folder describe itself in `.treemon-state.json` at its root:
+
+```json
+{
+  "label": "CEN-482 sprint triage",
+  "summary": "Closed 3 tickets, drafting the sprint note",
+  "updatedAt": "2026-09-08T12:30:00Z",
+  "busy": true
+}
+```
+
+Those four stand exactly where git's answers would: `label` where a branch goes, `summary` where the last commit subject goes, `updatedAt` where its time goes, and `busy` where a dirty worktree goes. The card is the ordinary one, and the agent's live status attaches to it like any other. Only `label` is required; a file without one describes nothing.
+
+The agent maintaining the folder writes this file — rewrite it whenever its state changes, and the next refresh picks it up. Nothing else has to know: Treemon reads a label, not a ticket system.
+
+Two rules worth knowing. **A state file inside a git repository is ignored** — git is authoritative there, so a file dropped or committed into one can't replace the branch, dirty flag and PR its card is built from. And **the contents are treated as untrusted**: `label` and `summary` are capped (120 and 500 characters) because they're agent-written text rendered on a dashboard.
+
+#### Agents that work across several repositories
+
+Treemon matches a session to a card by the directory the agent reports working in. An agent that sits *above* its repositories — infrastructure work spanning two of them, a developer who steps into a second checkout for an afternoon — reports a folder that is not a worktree at all.
+
+That resolves by elimination: a folder holding exactly one monitored repository resolves to it. Which means monitoring a second repository beside the first stops the agent appearing at all — the folder now names neither, and a report for an unmonitored path is accepted and dropped, so there is no error to notice.
+
+A folder can say where its work is instead of being guessed at:
+
+```json
+{
+  "label": "CEN-482 sprint triage",
+  "summary": "Rotating the staging credentials",
+  "updatedAt": "2026-09-08T12:30:00Z",
+  "busy": true,
+  "repo": "git/Centro"
+}
+```
+
+The session then attaches to that repository's card — an ordinary git card, with its real branch, diff, PR and working diff view. Rewrite `repo` when the agent moves, and the session follows to the other card. A statement beats elimination, and it keeps working whether the folder holds two repositories or ten.
+
+`repo` is resolved relative to the folder and must name a worktree git recognises inside it, and must name one Treemon already monitors. An absolute path, one that climbs out with `..`, or one that resolves nowhere monitored is treated as no declaration at all: it decides which card a session lights up, and it comes from the same agent-written file as everything else here.
+
+A folder that is itself a monitored root keeps its own card — `repo` only answers the question "which card does this session belong to" when the folder is not a card in its own right.
+
+### Ports
+
+| | Port | Override |
+|---|---|---|
+| Dashboard | 5000 | `TREEMON_PORT` |
+| Canvas documents | 5002 | `TREEMON_CANVAS_PORT` |
+| Dev server / Vite | 5001 / 5174 | — |
+
+The canvas server is a second listener in the same process, and **the server exits if it cannot bind it** — so to run two instances at once (say one on Windows and one in WSL) move both ports, not just `TREEMON_PORT`:
+
+```bash
+TREEMON_PORT=5061 TREEMON_CANVAS_PORT=5072 ./treemon.sh start ~/code/my-project
+```
+
+One checkout tracks one server, because the PID it records lives in the checkout. A second instance needs a second checkout.
 
 ### Development
 
-```powershell
-.\treemon.ps1 dev "C:\code\my-project" "C:\code\other-project"      # server :5001 + Vite :5174
+```bash
+./treemon.sh dev ~/code/my-project         # server on 5001 plus Vite on 5174
 ```
 
-Open http://localhost:5174 (Vite proxies API calls to the server).
+Open http://localhost:5174 — Vite proxies API calls to the server.
 
 ## CLI
 
-The `tm` command is automatically added to your PATH when you run `.\treemon.ps1 deploy`. Restart your shell to pick it up.
+`tm` drives a running server from the command line. On Windows `.\treemon.ps1 deploy` puts it on your PATH (restart your shell to pick it up); elsewhere, and before any deploy, reach the same commands through `./treemon.sh add|remove|roots` or run `dotnet run --project src/Cli -- <args>`.
 
-```powershell
-tm launch --path C:\code\my-project --prompt-file task.md   # launch agent with prompt file
-tm launch --path C:\code\my-project --fix-pr <url>         # fix PR comments
-tm launch --path C:\code\my-project --fix-build <url>      # fix failed build
-tm launch --path C:\code\my-project --create-pr             # create a pull request
-tm new --repo C:\code\my-project --branch feature/foo      # create worktree
-tm worktrees                                                 # list all worktrees
-tm terminals                                                 # list open embedded terminals and session activity
-tm add C:\code\my-project                                   # watch a root (applies on next server restart)
-tm remove C:\code\my-project                                # stop watching a root
-tm roots                                                     # list watched roots
-tm categories                                                # report what the repo's diff categories match
+```bash
+tm launch --path ~/code/my-project --prompt-file task.md   # launch an agent with a prompt file
+tm launch --path ~/code/my-project --fix-pr <url>          # fix PR comments
+tm launch --path ~/code/my-project --fix-build <url>       # fix a failed build
+tm launch --path ~/code/my-project --create-pr             # create a pull request
+tm new --repo ~/code/my-project --branch feature/foo       # create a worktree
+tm worktrees                                               # list all worktrees
+tm terminals                                               # list embedded terminals and session activity
+tm add ~/code/my-project                                   # watch a root
+tm remove ~/code/my-project                                # stop watching a root
+tm roots                                                   # list watched roots
+tm categories                                              # report what the repo's diff categories match
 ```
 
-All commands accept `--port` (default: 5000, env: `TREEMON_PORT`). You can also run `.\tm.ps1` directly from the repo root without installing.
+All commands accept `--port` (default 5000, env `TREEMON_PORT`).
+
+## Platform notes
+
+### Windows
+
+Everything is supported. Run production `start`, `restart` and `deploy` from an ordinary terminal rather than a Treemon embedded terminal — `add` and `remove` still save root changes there, but skip the automatic restart, so an external `restart` is needed before the running server sees them.
+
+### Linux
+
+x64 and arm64. The dashboard, the git/PR/beads polling and the embedded terminals all work; an embedded terminal opens `$SHELL`, falling back to `/bin/bash`. CPU and memory come from `/proc`.
+
+Spawning and focusing **native** Windows Terminal windows is the one feature with no counterpart — asking for one answers with a platform message. Use an embedded terminal instead.
+
+`deploy` is Windows-only, so use `publish` plus `start`; that skips installing `tm`, the skill and the editor extension.
+
+### macOS
+
+**Unverified.** The code paths exist and nothing in them is knowingly Windows- or Linux-specific, but no part of Treemon has been run on a Mac. Treat it as "should work, untested".
+
+Two known differences. `setup-ttyd` cannot download a pinned build, because upstream publishes none for macOS — it adopts whatever `ttyd` is on your `PATH` (`brew install ttyd`) and only reports the version it finds. Treemon proxies ttyd's protocol, so a build far from the pinned 1.7.7 is the first thing to suspect if embedded terminals misbehave. And CPU/memory readings are Windows and Linux only; the dashboard omits them elsewhere.
 
 ## Stack
 

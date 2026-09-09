@@ -66,8 +66,10 @@ let listTopLevelWindows () =
     GC.KeepAlive(callback)
     windows |> Seq.toList
 
+/// Session state persisted on Windows can be carried to a Linux checkout of the same worktree roots,
+/// and every stored handle is meaningless there, so validity is answered without touching user32.
 let isWindowValid (hwnd: nativeint) =
-    IsWindowNative(hwnd)
+    OperatingSystem.IsWindows() && IsWindowNative(hwnd)
 
 let getWindowClassName (hwnd: nativeint) =
     let sb = StringBuilder(256)

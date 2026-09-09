@@ -104,7 +104,10 @@ type Msg =
     | DeleteCompleted of Result<unit, string>
     | FocusSession of path: WorktreePath
     | OpenNewTab of path: WorktreePath
-    | SessionResult of Result<unit, string>
+    /// A session action ran. It carries no result: a failure is reported where it can be read,
+    /// through EmbeddedTerminalRequestFailed, so a Result here would only be somewhere to discard
+    /// one again - which is precisely what left the terminal button doing nothing at all.
+    | SessionCompleted
     | WorktreeSearchMsg of WorktreeSearch.Msg
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option

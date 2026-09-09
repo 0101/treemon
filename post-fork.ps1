@@ -20,7 +20,7 @@ $ErrorActionPreference = "Stop"
 Set-Location $WorktreePath
 
 # Directory junctions (not symbolic links) so this works without elevation or
-# Developer Mode — important because Treemon spawns this hook from the server
+# Developer Mode - important because Treemon spawns this hook from the server
 # process, where no one is present to approve a UAC prompt.
 function New-RepoJunction {
     param([string]$Name)

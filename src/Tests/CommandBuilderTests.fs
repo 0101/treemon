@@ -23,14 +23,49 @@ type BuildInteractiveCommandTests() =
         Assert.That(result, Is.EqualTo("copilot --yolo -i 'create a pull request'"))
 
     [<Test>]
-    member _.``single quotes in prompt are escaped``() =
-        let result = (build (Some CodingToolProvider.CopilotCli) (Interactive "it's broken")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --yolo -i 'it''s broken'"))
-
-    [<Test>]
     member _.``prompt with special characters is preserved``() =
         let result = (build None (Interactive "/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs")).AsShellString
         Assert.That(result, Is.EqualTo("copilot --yolo -i '/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs'"))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ClaudeCodeCommandTests() =
+
+    [<Test>]
+    member _.``an interactive prompt is positional``() =
+        let result = (build (Some CodingToolProvider.ClaudeCode) (Interactive "/pr https://github.com/org/repo/pull/7")).AsShellString
+        Assert.That(result, Is.EqualTo("claude --permission-mode bypassPermissions '/pr https://github.com/org/repo/pull/7'"))
+
+    [<Test>]
+    member _.``a non-interactive prompt goes behind -p``() =
+        let result = (build (Some CodingToolProvider.ClaudeCode) (NonInteractive "summarise the diff")).AsShellString
+        Assert.That(result, Is.EqualTo("claude --permission-mode bypassPermissions -p 'summarise the diff'"))
+
+    [<Test>]
+    member _.``resume by id, and by --continue without one``() =
+        Assert.Multiple(fun () ->
+            Assert.That(
+                (build (Some CodingToolProvider.ClaudeCode) (Resume(Some "abc-123"))).AsShellString,
+                Is.EqualTo("claude --permission-mode bypassPermissions --resume 'abc-123'"))
+
+            Assert.That(
+                (build (Some CodingToolProvider.ClaudeCode) (Resume None)).AsShellString,
+                Is.EqualTo("claude --permission-mode bypassPermissions --continue")))
+
+    // A session id reaches this from stored activity, which arrives over HTTP, so it stays inside
+    // the quoted argument rather than becoming a second command.
+    [<Test>]
+    member _.``a hostile resume id stays inside the quoted argument``() =
+        let inv = build (Some CodingToolProvider.ClaudeCode) (Resume(Some "$(calc); '"))
+
+        let expected =
+            if OperatingSystem.IsWindows() then
+                "claude --permission-mode bypassPermissions --resume '$(calc); '''"
+            else
+                @"claude --permission-mode bypassPermissions --resume '$(calc); '\'''"
+
+        Assert.That(inv.AsShellString, Is.EqualTo expected)
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -47,7 +82,14 @@ type ResumeCommandTests() =
     [<Test>]
     member _.``Resume single-quotes and escapes the id (no command injection)``() =
         let inv = build (Some CodingToolProvider.CopilotCli) (Resume (Some "$(calc); '"))
-        Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --resume '$(calc); '''"))
+
+        let expected =
+            if OperatingSystem.IsWindows() then
+                "copilot --yolo --resume '$(calc); '''"
+            else
+                @"copilot --yolo --resume '$(calc); '\'''"
+
+        Assert.That(inv.AsShellString, Is.EqualTo expected)
 
     [<Test>]
     member _.``Resume without id uses --continue with yolo flag``() =
@@ -63,7 +105,21 @@ type NonInteractiveCommandTests() =
     member _.``NonInteractive produces conflict command``() =
         let inv = build (Some CodingToolProvider.CopilotCli) (NonInteractive "use conflict skill to resolve conflicts")
         Assert.That(inv.Executable, Is.EqualTo("copilot"))
-        Assert.That(inv.Args, Is.EqualTo("""-p "use conflict skill to resolve conflicts" --allow-all --no-ask-user -s --autopilot"""))
+        Assert.That(inv.Args, Is.EqualTo("""-p 'use conflict skill to resolve conflicts' --allow-all --no-ask-user -s --autopilot"""))
+
+    // The prompt is submitted to whichever shell the embedded terminal runs, and the two disagree on
+    // how a quote is escaped, so the emitted form has to follow the platform rather than be fixed.
+    [<Test>]
+    member _.``an apostrophe is escaped for the terminal's own shell``() =
+        let inv = build (Some CodingToolProvider.CopilotCli) (Interactive "it's broken")
+
+        let expected =
+            if OperatingSystem.IsWindows() then
+                "copilot --yolo -i 'it''s broken'"
+            else
+                @"copilot --yolo -i 'it'\''s broken'"
+
+        Assert.That(inv.AsShellString, Is.EqualTo expected)
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -131,6 +187,11 @@ type SkillInvocationTests() =
         let result = skillInvocation (Some CodingToolProvider.CopilotCli) "investigate" arg
         Assert.That(result, Is.EqualTo("use investigate skill with first line\nsecond line"))
 
+    [<Test>]
+    member _.``Claude Code invokes a skill as a slash command``() =
+        let result = skillInvocation (Some CodingToolProvider.ClaudeCode) "investigate" "why is the build slow"
+        Assert.That(result, Is.EqualTo("/investigate why is the build slow"))
+
     // Locks the refactor's byte-identical guarantee: actionPrompt's FixPr/FixBuild
     // cases must delegate to skillInvocation with the "pr"/"fix-build" skill names.
     [<Test>]
@@ -167,25 +228,31 @@ type InvestigateLaunchCommandTests() =
         let prompt = "line a\r\nline b\nline c"
         let wrapped = skillInvocation (Some CodingToolProvider.CopilotCli) "investigate" prompt
         let cmd = (build (Some CodingToolProvider.CopilotCli) (Interactive wrapped)).AsShellString
-        let prefix =
-            "copilot --yolo -i ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('"
-        let suffix = "')))"
 
-        Assert.That(cmd, Does.StartWith prefix)
-        Assert.That(cmd, Does.EndWith suffix)
+        // The two shells reassemble the payload differently. PowerShell decodes base64; a POSIX
+        // shell uses its own printf, because `base64` is not a POSIX utility and its decode flag
+        // differs between GNU (-d) and macOS (-D) — which broke this exact command on a Mac.
+        let roundTripped =
+            if OperatingSystem.IsWindows() then
+                let prefix =
+                    "copilot --yolo -i ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('"
 
-        let payload =
-            cmd.Substring(
-                prefix.Length,
-                cmd.Length - prefix.Length - suffix.Length
-            )
-        let decoded =
-            payload
-            |> Convert.FromBase64String
-            |> Encoding.UTF8.GetString
+                let suffix = "')))"
+                Assert.That(cmd, Does.StartWith prefix)
+                Assert.That(cmd, Does.EndWith suffix)
+
+                cmd.Substring(prefix.Length, cmd.Length - prefix.Length - suffix.Length)
+                |> Convert.FromBase64String
+                |> Encoding.UTF8.GetString
+            else
+                let escaped = wrapped.Replace("\r", @"\015").Replace("\n", @"\012")
+                Assert.That(cmd, Is.EqualTo($"copilot --yolo -i \"$(printf %%b '{escaped}')\""))
+
+                // Reversing the escapes is what the shell's printf does with them.
+                escaped.Replace(@"\015", "\r").Replace(@"\012", "\n")
 
         Assert.Multiple(fun () ->
-            Assert.That(decoded, Is.EqualTo wrapped)
+            Assert.That(roundTripped, Is.EqualTo wrapped)
             Assert.That(cmd |> Seq.exists Char.IsControl, Is.False)
             Assert.That(
                 Server.TerminalHostClient.validateTerminalCommand cmd,

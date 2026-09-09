@@ -28,6 +28,8 @@
 - Roots are managed live through the `tm` CLI — `tm add <path>...` (validates the path exists, normalizes it, no-op if already watched), `tm remove <path>...` (errors on an unknown path; removing the last root is allowed), and `tm roots` (list). All three are online-only (require the running server). The server is the single, serialized writer of `config.json`; changes persist immediately and take effect on the next server (re)start. The `treemon.ps1 add`/`remove` shims restart running production outside embedded terminals; inside one, the change stays persisted and requires an external PowerShell restart (see `docs/spec/embedded-terminal.md`).
 - Roots are a per-machine singleton: dev and prod instances on the same machine share one global list. Legacy stores migrate then delete losslessly — `treemon.ps1` migrates a legacy `.treemon.config` (PowerShell-written, plural `WorktreeRoots` or the older singular `WorktreeRoot`) and the server migrates the orphan `roots.json`, each removed only after its roots are safely persisted (a parse failure or unmigrated content is preserved with a warning, never silently dropped).
 - Each root is an independent section — cards never mix across repos
+- A root that is **not** a git repository still produces one card when it declares its own state in `.treemon-state.json` at its root (`label`, and optionally `summary`, `updatedAt`, `busy`). Those fill the same record a git-backed card reads — label where a branch goes, summary and updatedAt where the last commit and its time go, busy where a dirty worktree goes — so the API, the client and the overview band need no notion of a second kind of card. The genuinely git-shaped fields report nothing rather than a plausible zero: no upstream, nothing behind a base, no work metrics. This is what lets an agent whose work is not commits (tickets, cloud configuration) carry live session status, which otherwise has no worktree to attach to.
+- Git stays authoritative inside a repository: a state file in a git worktree is ignored, so one dropped or committed into a repo cannot replace the branch, dirty flag and PR its card is built from. The file is agent-written text rendered on a dashboard, so its label and summary are capped when read, and a malformed or half-written file declares nothing rather than failing the refresh.
 - Scheduler picks most-overdue task globally across all repos
 - Branch events scoped by `{repoId}/{branch}` to prevent cross-repo collisions
 
@@ -108,11 +110,13 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 ### Coding Tool Detection
 
-Coding-tool status is **pushed** by the Copilot CLI extension, not parsed from session log files —
-the per-provider log-parsing detectors (`ClaudeDetector`, `CopilotDetector`, `VsCodeCopilotDetector`,
-`getStatusFromFiles`) have been **removed**. The extension observes the SDK session event stream and
-POSTs lifecycle events to the server, which folds them into live per-session state and collapses each
-worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). Explicit background-agent
+Coding-tool status is **pushed** by each provider, not parsed from session log files — the
+per-provider log-parsing detectors (`ClaudeDetector`, `CopilotDetector`, `VsCodeCopilotDetector`,
+`getStatusFromFiles`) have been **removed**. The Copilot CLI extension observes the SDK session event
+stream; Claude Code has no extension host to observe from the inside, so it reports through hooks
+(`src/ClaudeHooks/`). Both POST the same lifecycle events to the server, which folds them into live
+per-session state and collapses each worktree's sessions in `CodingToolStatus.fs`
+(`fromPushSessions`). Explicit background-agent
 lifecycle events are folded into process-local per-tool clocks so a root turn cannot settle Idle
 while delegated agents are still running. The clocks are intentionally forgotten on a Treemon
 restart in exchange for a much simpler persistence model. See

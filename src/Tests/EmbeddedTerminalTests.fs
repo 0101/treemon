@@ -84,7 +84,7 @@ type private FakeControlHost
 
     let currentPid, currentStartTicks =
         use current = Process.GetCurrentProcess()
-        current.Id, current.StartTime.ToUniversalTime().Ticks
+        current.Id, ProcessStartTime.utcTicks current
 
     // Kestrel may dispatch concurrent requests; mutation is confined to this stateful fake boundary.
     let mutable terminals: FakeTerminal list = []
@@ -623,6 +623,36 @@ let private populateAgent
 [<Category("Unit")>]
 [<Category("Fast")>]
 type TerminalHostProcessConfigurationTests() =
+    [<Test>]
+    member _.``a running process still matches the start time it recorded for itself``() =
+        // This is the pairing the manifest depends on: the host records its own start time and the
+        // server reads it back through a different Process instance. Reading it the way .NET does on
+        // Linux made the two disagree by microseconds, so the server discarded every host it started.
+        use current = Process.GetCurrentProcess()
+        let recorded = ProcessStartTime.utcTicks current
+
+        let matched: Result<bool, string> = Ok true
+
+        Assert.That(
+            TerminalHostProcess.processIdentityMatchesDefault current.Id recorded,
+            Is.EqualTo matched
+        )
+
+    [<Test>]
+    member _.``a process that started well before the recorded time is a different process``() =
+        use current = Process.GetCurrentProcess()
+
+        let recorded =
+            ProcessStartTime.utcTicks current
+            + TimeSpan.FromMinutes(1.0).Ticks
+
+        let mismatched: Result<bool, string> = Ok false
+
+        Assert.That(
+            TerminalHostProcess.processIdentityMatchesDefault current.Id recorded,
+            Is.EqualTo mismatched
+        )
+
     [<TestCase("Debug")>]
     [<TestCase("Release")>]
     member _.``source-tree host binaries are selected only when explicitly configured``

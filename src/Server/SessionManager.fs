@@ -220,14 +220,33 @@ let internal focusTrackedSession focusWindow path (sessions: Map<string, nativei
         result, sessions
     | None -> Error "No active session for this worktree", sessions
 
+/// Native sessions are Windows Terminal windows tracked by window handle, and neither the terminal
+/// nor the handle exists off Windows. Reporting that up front keeps a click on the dashboard from
+/// surfacing as a bare "wt.exe not found" from the spawn attempt.
+let private nativeTerminalSupport =
+    if OperatingSystem.IsWindows() then
+        Ok()
+    else
+        // Reaches the card, so it is written for whoever pressed the button rather than for a log:
+        // what cannot happen, why, and the thing to do instead — which the button beside it does.
+        Error
+            "Native terminal windows are a Windows Terminal feature, so this server cannot open one. Start an embedded terminal here instead."
+
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
     async {
-        match msg with
-        | SpawnTerminal(wtPath, reply) ->
+        match msg, nativeTerminalSupport with
+        | SpawnTerminal(_, reply), Error unsupported
+        | OpenNewTab(_, reply), Error unsupported
+        | Focus(_, reply), Error unsupported
+        | Kill(_, reply), Error unsupported ->
+            reply.Reply(Error unsupported)
+            return sessions
+
+        | SpawnTerminal(wtPath, reply), Ok() ->
             let path = pathOf wtPath
             return! spawnAndTrack (validateSessions sessions) path (fun () -> spawnTerminalAndResolve path) reply
 
-        | OpenNewTab(wtPath, reply) ->
+        | OpenNewTab(wtPath, reply), Ok() ->
             let path = pathOf wtPath
             let validated = validateSessions sessions
 
@@ -240,14 +259,14 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
                 reply.Reply(Error "No active session for this worktree")
                 return validated
 
-        | Focus(wtPath, reply) ->
+        | Focus(wtPath, reply), Ok() ->
             let path = pathOf wtPath
             let validated = validateSessions sessions
             let result, unchanged = focusTrackedSession Win32.focusWindow path validated
             reply.Reply(result)
             return unchanged
 
-        | Kill(wtPath, reply) ->
+        | Kill(wtPath, reply), Ok() ->
             let path = pathOf wtPath
             let validated = validateSessions sessions
 
@@ -264,7 +283,7 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
                 reply.Reply(Error "No active session for this worktree")
                 return validated
 
-        | GetActiveSessions reply ->
+        | GetActiveSessions reply, _ ->
             let validated = validateSessions sessions
             reply.Reply(validated)
             return validated

@@ -273,7 +273,7 @@ let private readIdentity (proc: Process) : ProcessIdentity =
     proc.Refresh()
 
     { Pid = proc.Id
-      StartTimeUtcTicks = proc.StartTime.ToUniversalTime().Ticks
+      StartTimeUtcTicks = ProcessStartTime.utcTicks proc
       Name = proc.ProcessName }
 
 let private identityIsAlive (identity: ProcessIdentity) =
@@ -282,7 +282,7 @@ let private identityIsAlive (identity: ProcessIdentity) =
         proc.Refresh()
 
         not proc.HasExited
-        && proc.StartTime.ToUniversalTime().Ticks = identity.StartTimeUtcTicks
+        && ProcessStartTime.utcTicks proc = identity.StartTimeUtcTicks
     with
     | :? ArgumentException
     | :? InvalidOperationException
@@ -425,7 +425,7 @@ let private killExactIdentity (identity: ProcessIdentity) : Result<unit, string>
         else
             use proc = Process.GetProcessById(identity.Pid)
 
-            if proc.StartTime.ToUniversalTime().Ticks <> identity.StartTimeUtcTicks then
+            if ProcessStartTime.utcTicks proc <> identity.StartTimeUtcTicks then
                 Error $"PID {identity.Pid} was reused before exact cleanup"
             else
                 proc.Kill(entireProcessTree = true)

@@ -97,7 +97,7 @@ type TerminalHostStateCleanupTests() =
             Path.Combine(stateDirectory, TerminalHostLayout.ManifestFileName)
         use currentProcess = Process.GetCurrentProcess()
         let mismatchedStartTime =
-            currentProcess.StartTime.ToUniversalTime().Ticks + 1L
+            ProcessStartTime.utcTicks currentProcess + 1L
         let bearerToken = String('a', 32)
 
         File.WriteAllText(

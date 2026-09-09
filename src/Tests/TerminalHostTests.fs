@@ -387,7 +387,15 @@ type TerminalRuntimeBudgetTests() =
             |> List.map (fun (path, lines) -> $"{path}: {lines}")
             |> String.concat Environment.NewLine
 
-        Assert.That(total, Is.LessThanOrEqualTo(4_000), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
+        // The budget covers a runtime that implements process ownership, the ttyd artifact, the shell
+        // launched inside it and a stable process identity once per supported platform. It is meant
+        // to be argued up for a specific capability rather than drifting upward.
+        //
+        // Argued up once, by 10, for directory roots: TerminalHost validates the path itself before
+        // opening a shell, so a folder Treemon watches without it being a repository has to be
+        // recognised here too - otherwise such a card's terminal can only ever answer "Unknown
+        // worktree path".
+        Assert.That(total, Is.LessThanOrEqualTo(4_210), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1883,12 +1891,66 @@ type TerminalHostSecurityTests() =
 
             Assert.That(specification.Arguments, Does.Contain("127.0.0.1"))
             Assert.That(specification.Arguments, Does.Contain(worktreePath))
+
+            // The shell and the arguments that land it in the worktree are whatever this platform
+            // uses, but they always come last so ttyd reads the rest as its own options.
+            let shell = TerminalShell.forCurrentPlatform "pwsh"
+            let shellExecutable = TerminalShell.launchExecutable shell
+
             Assert.That(
-                specification.Arguments,
-                Does.Contain(
-                    "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE"
-                )
+                specification.Arguments
+                |> List.skipWhile (fun argument -> argument <> shellExecutable),
+                Is.EqualTo(shellExecutable :: TerminalShell.arguments shell)
             ))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<Category("TerminalHost")>]
+type TerminalShellTests() =
+    [<Test>]
+    member _.``PowerShell is sent back to the worktree through the environment variable``() =
+        Assert.That(
+            TerminalShell.arguments (PowerShell "pwsh"),
+            Is.EqualTo
+                [ "-WorkingDirectory"
+                  "."
+                  "-NoExit"
+                  "-Command"
+                  "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE" ]
+        )
+
+    [<Test>]
+    member _.``a POSIX shell execs itself in the worktree so no extra process survives``() =
+        Assert.That(
+            TerminalShell.arguments (PosixShell "/bin/bash"),
+            Is.EqualTo
+                [ "-c"
+                  "cd -- \"$TREEMON_TERMINAL_WORKTREE\" && exec '/bin/bash' -i" ]
+        )
+
+    // SHELL can name fish, tcsh or nushell, none of which parse `cd -- … && exec`. /bin/sh does,
+    // and execs the configured shell once the directory is right.
+    [<Test>]
+    member _.``a POSIX shell is reached through /bin/sh rather than run directly``() =
+        Assert.Multiple(fun () ->
+            Assert.That(TerminalShell.launchExecutable (PosixShell "/usr/bin/fish"), Is.EqualTo "/bin/sh")
+            Assert.That(TerminalShell.launchExecutable (PowerShell "pwsh"), Is.EqualTo "pwsh")
+
+            Assert.That(
+                TerminalShell.arguments (PosixShell "/usr/bin/fish"),
+                Is.EqualTo
+                    [ "-c"
+                      "cd -- \"$TREEMON_TERMINAL_WORKTREE\" && exec '/usr/bin/fish' -i" ]))
+
+    [<Test>]
+    member _.``a POSIX shell path containing a quote cannot escape the command``() =
+        Assert.That(
+            TerminalShell.arguments (PosixShell "/opt/it's/bash"),
+            Is.EqualTo
+                [ "-c"
+                  "cd -- \"$TREEMON_TERMINAL_WORKTREE\" && exec " + @"'/opt/it'\''s/bash'" + " -i" ]
+        )
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -2408,3 +2470,161 @@ match JobProcess.start specification with
                     owner.WaitForExit()
 
                 killExactPidFromFile readyFile)
+
+/// `/proc/<pid>/stat` is `pid (comm) state ...`, and comm can itself contain spaces and brackets, so
+/// the state is read after the last ')'. A zombie has already been killed and is only waiting to be
+/// reaped, which for ownership purposes is gone.
+let private linuxProcessIsRunning pid =
+    try
+        let stat = File.ReadAllText $"/proc/{pid}/stat"
+
+        stat.Substring(stat.LastIndexOf(')') + 1).TrimStart().StartsWith "Z"
+        |> not
+    with
+    | :? IOException
+    | :? UnauthorizedAccessException -> false
+
+[<TestFixture>]
+[<Category("TerminalHost")>]
+[<Platform("Linux")>]
+type TerminalHostProcessTreeTests() =
+
+    [<Test>]
+    member _.``closing one owned process kills its exact ttyd process tree``() =
+        withTempDir "terminal-host-tree-close" (fun root ->
+            let pidFile = Path.Combine(root, "child.pid")
+            let descendantPidFile = Path.Combine(root, "descendant.pid")
+            let sessionFile = Path.Combine(root, "session.txt")
+            let sessionId = $"terminal-{Guid.NewGuid():N}"
+
+            let owned =
+                JobProcess.start
+                    { Executable = "/bin/bash"
+                      Arguments =
+                        [ "-c"
+                          "sleep 300 & printf %s \"$!\" > \"$TM_DESCENDANT_PID_FILE\"; printf %s \"$$\" > \"$TM_PID_FILE\"; printf %s \"$TREEMON_TERMINAL_SESSION_ID\" > \"$TM_SESSION_FILE\"; wait" ]
+                      WorkingDirectory = root
+                      Environment =
+                        [ "TM_PID_FILE", pidFile
+                          "TM_DESCENDANT_PID_FILE", descendantPidFile
+                          "TM_SESSION_FILE", sessionFile
+                          "TREEMON_TERMINAL_SESSION_ID", sessionId ] }
+                |> requireOk
+
+            try
+                Assert.That(
+                    waitUntil (TimeSpan.FromSeconds 10.0) (fun () ->
+                        File.Exists pidFile
+                        && File.Exists descendantPidFile
+                        && File.Exists sessionFile),
+                    Is.True,
+                    "owned child did not start"
+                )
+
+                let childPid = File.ReadAllText(pidFile).Trim() |> int
+                let descendantPid = File.ReadAllText(descendantPidFile).Trim() |> int
+
+                Assert.Multiple(fun () ->
+                    Assert.That(childPid, Is.EqualTo(JobProcess.processId owned))
+                    Assert.That(File.ReadAllText(sessionFile).Trim(), Is.EqualTo sessionId)
+                    Assert.That(JobProcess.hasExited owned, Is.False))
+
+                JobProcess.close owned
+
+                Assert.Multiple(fun () ->
+                    Assert.That(JobProcess.hasExited owned, Is.True)
+
+                    Assert.That(
+                        waitUntil (TimeSpan.FromSeconds 5.0) (fun () -> not (linuxProcessIsRunning childPid)),
+                        Is.True,
+                        "close did not kill ttyd"
+                    )
+
+                    Assert.That(
+                        waitUntil (TimeSpan.FromSeconds 5.0) (fun () -> not (linuxProcessIsRunning descendantPid)),
+                        Is.True,
+                        "close did not kill the ttyd process tree"
+                    ))
+            finally
+                JobProcess.close owned
+                killExactPidFromFile descendantPidFile)
+
+    [<Test>]
+    member _.``an owned process reports a start time that identifies it``() =
+        withTempDir "terminal-host-tree-identity" (fun root ->
+            let owned =
+                JobProcess.start
+                    { Executable = "/bin/bash"
+                      Arguments = [ "-c"; "sleep 300" ]
+                      WorkingDirectory = root
+                      Environment = [] }
+                |> requireOk
+
+            try
+                use child = Process.GetProcessById(JobProcess.processId owned)
+
+                Assert.That(
+                    JobProcess.processStartTimeUtcTicks owned,
+                    Is.EqualTo(ProcessStartTime.utcTicks child),
+                    "the recorded start time must match what the manifest later reads back"
+                )
+            finally
+                JobProcess.close owned)
+
+    [<Test>]
+    member _.``closing twice is safe``() =
+        withTempDir "terminal-host-tree-double-close" (fun root ->
+            let owned =
+                JobProcess.start
+                    { Executable = "/bin/bash"
+                      Arguments = [ "-c"; "sleep 300" ]
+                      WorkingDirectory = root
+                      Environment = [] }
+                |> requireOk
+
+            JobProcess.close owned
+            JobProcess.close owned
+
+            Assert.That(JobProcess.hasExited owned, Is.True))
+
+
+/// TerminalHost validates the path itself before opening a shell — that check is what stops anything
+/// reaching the control port from opening one in an arbitrary directory. A directory root (a folder
+/// Treemon watches that is not a repository) has to pass it too, or it gets a card whose terminal
+/// button can only ever answer "Unknown worktree path".
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DirectoryRootPathValidationTests() =
+
+    let mutable root = ""
+
+    [<SetUp>]
+    member _.Setup() =
+        root <- Path.Combine(Path.GetTempPath(), $"treemon-root-{Guid.NewGuid()}")
+        Directory.CreateDirectory root |> ignore
+
+    [<TearDown>]
+    member _.TearDown() =
+        try Directory.Delete(root, true) with _ -> ()
+
+    // The marker is the opt-in, so a folder nobody marked stays unreachable.
+    [<Test>]
+    member _.``An unmarked directory is not a worktree TerminalHost will open``() =
+        match PathValidation.validate root with
+        | Error error -> Assert.That(error, Is.EqualTo WorktreeValidationError.UnknownWorktree)
+        | Ok _ -> Assert.Fail "an unmarked directory must not be openable"
+
+    // Written under Treemon's own name for the file and read back through TerminalHost's separate
+    // spelling of it, so the two cannot drift apart unnoticed.
+    [<Test>]
+    member _.``A directory carrying the state file is opened like a repository``() =
+        File.WriteAllText(Path.Combine(root, Shared.DirectoryStateFile.FileName), "{}")
+
+        match PathValidation.validate root with
+        | Ok worktree ->
+            Assert.That(
+                CanonicalWorktree.path worktree,
+                Is.EqualTo(Path.TrimEndingDirectorySeparator(Path.GetFullPath root))
+            )
+        | Error error -> Assert.Fail($"expected the marked directory to validate, got {error}")

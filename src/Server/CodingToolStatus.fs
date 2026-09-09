@@ -22,6 +22,7 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
             | true, elem ->
                 match elem.GetString().ToLowerInvariant() with
                 | "copilot" -> Some CopilotCli
+                | "claude" -> Some ClaudeCode
                 | other ->
                     Log.log "CodingTool" $"Unknown/unsupported codingTool value '{other}' in {configPath} — using the default"
                     None
@@ -46,12 +47,13 @@ type CodingToolResult =
       SessionActivityAt: DateTimeOffset option }
 
 /// Wraps an arbitrary argument in a provider-aware skill invocation. The Copilot CLI uses the
-/// natural-language "use {skill} skill with {arg}" form. Shared by actionPrompt (FixPr/FixBuild) and
-/// the worktree-create auto-launch flow so both stay byte-identical. Provider-matched so a future
-/// provider must supply its own form.
+/// natural-language "use {skill} skill with {arg}" form; Claude Code invokes a skill as a slash
+/// command. Shared by actionPrompt (FixPr/FixBuild) and the worktree-create auto-launch flow so both
+/// stay byte-identical. Provider-matched so a future provider must supply its own form.
 let skillInvocation (provider: CodingToolProvider option) (skill: string) (arg: string) =
     match provider |> Option.defaultValue CodingToolProvider.Default with
     | CopilotCli -> $"use {skill} skill with {arg}"
+    | ClaudeCode -> $"/{skill} {arg}"
 
 let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     match action with
@@ -210,8 +212,9 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
 
     { Status = status
       SessionStatuses = sessionStatuses
-      // Single push provider today (Copilot CLI); a future provider threads its own value here.
-      Provider = footer |> Option.map (fun _ -> CopilotCli)
+      // The reporting session's own provider. Hardcoding it was invisible to the compiler when a
+      // second provider arrived, so every Claude session rendered as Copilot.
+      Provider = selection.Footer |> Option.map _.Provider
       CurrentSkill = footer |> Option.bind _.Skill
       AgentActivity =
         footer

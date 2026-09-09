@@ -19,6 +19,12 @@ type internal Config =
       ResolveProcessExecutable: int -> int64 -> Result<string, string>
       SendTerminalCommand: string -> string -> Async<Result<unit, string>> }
 
+/// Exact equality is the point: a start time that differs at all belongs to a different process, and
+/// this answer gates killing one. ProcessStartTime is what makes exactness available on Linux, where
+/// .NET's own reading of a single live process is not stable between calls.
+let internal identifiesSameProcess (child: Process) recordedStartTimeUtcTicks =
+    ProcessStartTime.utcTicks child = recordedStartTimeUtcTicks
+
 let internal processIdentityMatchesDefault pid processStartTimeUtcTicks =
     try
         use child = Process.GetProcessById pid
@@ -26,10 +32,7 @@ let internal processIdentityMatchesDefault pid processStartTimeUtcTicks =
         if child.HasExited then
             Ok false
         else
-            let startTicks =
-                child.StartTime.ToUniversalTime().Ticks
-
-            Ok(startTicks = processStartTimeUtcTicks)
+            Ok(identifiesSameProcess child processStartTimeUtcTicks)
     with
     | :? ArgumentException
     | :? InvalidOperationException -> Ok false
@@ -42,7 +45,7 @@ let internal resolveProcessExecutableDefault pid processStartTimeUtcTicks =
 
         if child.HasExited then
             Error "The recorded TerminalHost process has exited"
-        elif child.StartTime.ToUniversalTime().Ticks <> processStartTimeUtcTicks then
+        elif not (identifiesSameProcess child processStartTimeUtcTicks) then
             Error "The recorded TerminalHost process identity no longer matches"
         else
             match child.MainModule |> Option.ofObj with
@@ -147,7 +150,7 @@ let internal defaultConfig allowedOrigins sendTerminalCommand =
       HostStateDirectory = layout.StateDirectory
       TtydExecutablePath =
         TerminalHostLayout.adjacentTtydExecutablePath hostExecutable
-      ShellCommand = "pwsh"
+      ShellCommand = TerminalHostLayout.DefaultShellCommand
       AllowedOrigins = allowedOrigins
       StartupTimeout = TimeSpan.FromSeconds 30.0
       ControlRequestTimeout = TimeSpan.FromSeconds 10.0
