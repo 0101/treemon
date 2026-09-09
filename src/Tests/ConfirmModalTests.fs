@@ -21,6 +21,7 @@ let private makeWorktree branch hasSession : WorktreeStatus =
       CodingTool = CodingToolStatus.Idle
       CodingToolProvider = None
       CodingToolSince = None
+      SessionActivityAt = None
       CurrentSkill = None
       AgentActivity = None
       Sessions = []
@@ -82,6 +83,7 @@ let private defaultModel : Model =
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
       OverviewHistoryRequestInFlight = None
+      WorktreeSearch = WorktreeSearch.initial
       EmbeddedTerminalPollInFlight = false }
 let private updateModel msg model = update msg model |> fst
 
@@ -95,6 +97,68 @@ type DeleteWithSessionSequencingTests() =
 
     let modelWithConfirmDelete =
         { defaultModel with ConfirmModal = ConfirmModal.ConfirmDelete ("feature-branch", testPath, true) }
+
+    [<Test>]
+    member _.``Worktree search does not stack over confirmation modal``() =
+        let model =
+            updateModel
+                (WorktreeSearchMsg WorktreeSearch.Msg.Open)
+                modelWithConfirmDelete
+
+        Assert.Multiple(fun () ->
+            Assert.That(model.WorktreeSearch, Is.EqualTo(WorktreeSearch.State.Closed))
+            Assert.That(model.ConfirmModal, Is.EqualTo(modelWithConfirmDelete.ConfirmModal)))
+
+    [<Test>]
+    member _.``Create modal does not stack over confirmation modal``() =
+        let model =
+            updateModel
+                (ModalMsg (
+                    CreateWorktreeModal.OpenCreateWorktree(
+                        RepoId "repo",
+                        []
+                    )
+                ))
+                modelWithConfirmDelete
+
+        Assert.Multiple(fun () ->
+            Assert.That(model.CreateModal, Is.EqualTo(CreateWorktreeModal.Closed))
+            Assert.That(model.ConfirmModal, Is.EqualTo(modelWithConfirmDelete.ConfirmModal)))
+
+    [<Test>]
+    member _.``Confirmation modal does not stack over worktree search``() =
+        let searchOpen =
+            updateModel
+                (WorktreeSearchMsg WorktreeSearch.Msg.Open)
+                defaultModel
+        let model =
+            updateModel
+                (ConfirmDeleteWorktree (WorktreePath.value testPath))
+                searchOpen
+
+        Assert.Multiple(fun () ->
+            Assert.That(WorktreeSearch.isOpen model.WorktreeSearch, Is.True)
+            Assert.That(model.ConfirmModal, Is.EqualTo(ConfirmModal.NoConfirm)))
+
+    [<Test>]
+    member _.``Confirmation modal does not stack over create modal``() =
+        let openForm =
+            CreateWorktreeModal.Open
+                { RepoId = RepoId "repo"
+                  Branches = [ "main" ]
+                  Name = ""
+                  BaseBranch = "main"
+                  Prompt = ""
+                  AvailableSkills = []
+                  Skill = None }
+        let model =
+            updateModel
+                (ConfirmDeleteWorktree (WorktreePath.value testPath))
+                { defaultModel with CreateModal = openForm }
+
+        Assert.Multiple(fun () ->
+            Assert.That(model.CreateModal, Is.EqualTo(openForm))
+            Assert.That(model.ConfirmModal, Is.EqualTo(ConfirmModal.NoConfirm)))
 
     [<Test>]
     member _.``ConfirmMsg Delete immediately removes worktree from model``() =

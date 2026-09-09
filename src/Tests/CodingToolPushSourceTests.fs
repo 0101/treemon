@@ -64,6 +64,24 @@ type FromPushSessionsTests() =
         Assert.That(fromPushSessions now [], Is.EqualTo noSessionPushResult)
 
     [<Test>]
+    member _.``A session without lifecycle activity has no recency timestamp``() =
+        let hydratedOnly =
+            storedWithClocks
+                "hydrated"
+                "wt"
+                SessionLevelStatus.Idle
+                None
+                None
+                None
+                (DateTimeOffset.MinValue.ToString("O"))
+                "2026-03-01T11:59:00Z"
+
+        Assert.That(
+            (fromPushSessions now [ hydratedOnly ]).SessionActivityAt,
+            Is.EqualTo(None)
+        )
+
+    [<Test>]
     member _.``Stale idle sessions past the open window collapse to grey NoSession``() =
         // Both were last seen well over openWindow (~3 min) ago, so neither is an OPEN session — the
         // worktree has no live CLI and reads as NoSession (grey). They carry no footer data, so the
@@ -164,7 +182,10 @@ type FromPushSessionsTests() =
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "new-skill"))
         Assert.That(result.LastUserMessage, Is.EqualTo(Some(footerMessage "new prompt" "2026-03-01T11:58:30Z")))
         Assert.That(result.LastAssistantMessage, Is.EqualTo(Some("new reply", ts "2026-03-01T11:59:00Z")))
-        Assert.That(result.LastActivity, Is.EqualTo(Some(ts "2026-03-01T11:59:00Z")))
+        Assert.That(
+            result.SessionActivityAt,
+            Is.EqualTo(Some(ts "2026-03-01T11:59:00Z"))
+        )
 
     [<Test>]
     member _.``A heartbeat cannot replace the most-recent idle footer``() =
@@ -203,6 +224,10 @@ type FromPushSessionsTests() =
 
         Assert.That(result.Status, Is.EqualTo Working)
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "bd-execute"))
+        Assert.That(
+            result.SessionActivityAt,
+            Is.EqualTo(Some(ts "2026-03-01T11:59:00Z"))
+        )
 
     [<Test>]
     member _.``A stale (crashed) active session is not open, so the worktree is grey NoSession``() =

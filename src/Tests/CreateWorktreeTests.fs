@@ -48,6 +48,7 @@ let private defaultModel : Model =
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
       OverviewHistoryRequestInFlight = None
+      WorktreeSearch = WorktreeSearch.initial
       EmbeddedTerminalPollInFlight = false }
 
 let private updateModel msg model = update msg model |> fst
@@ -772,6 +773,32 @@ type EnterKeySuppressedWhileModalOpenTests() =
 
         Assert.That(model.CreateModal, Is.EqualTo(openForm),
             "Plus key should be suppressed while modal is already open")
+
+    [<Test>]
+    member _.``Worktree search does not stack over create modal``() =
+        let model =
+            updateModel
+                (WorktreeSearchMsg WorktreeSearch.Msg.Open)
+                modelWithRepoAndModal
+
+        Assert.Multiple(fun () ->
+            Assert.That(model.WorktreeSearch, Is.EqualTo(WorktreeSearch.State.Closed))
+            Assert.That(model.CreateModal, Is.EqualTo(openForm)))
+
+    [<Test>]
+    member _.``Create modal does not stack over worktree search``() =
+        let searchOpen =
+            updateModel
+                (WorktreeSearchMsg WorktreeSearch.Msg.Open)
+                defaultModel
+        let model =
+            updateModel
+                (ModalMsg (Modal.OpenCreateWorktree (repoId, [])))
+                searchOpen
+
+        Assert.Multiple(fun () ->
+            Assert.That(WorktreeSearch.isOpen model.WorktreeSearch, Is.True)
+            Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed)))
 
     [<Test>]
     member _.``Home key while modal is open is suppressed``() =
