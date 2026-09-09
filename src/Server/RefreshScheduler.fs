@@ -60,7 +60,7 @@ let internal reloadGitData (agent: MailboxProcessor<StateMsg>) (repoId: RepoId) 
         // A declared directory answers for itself; running git against it would only produce a row
         // of empty values and a failed probe per refresh.
         let! gitData =
-            match DirectoryRoot.tryReadState path with
+            match DirectoryRoot.tryReadState path |> Option.filter DirectoryRoot.describesCard with
             | Some state -> async { return DirectoryRoot.gitData path state }
             | None -> GitWorktree.collectWorktreeGitData path branch repo.UpstreamRemote repo.BaseBranch
 
@@ -405,6 +405,7 @@ let internal executeTask
                 | Some _ -> gitWorktrees
                 | None ->
                     DirectoryRoot.tryReadState root
+                    |> Option.filter DirectoryRoot.describesCard
                     |> Option.map (fun state -> [ DirectoryRoot.worktreeInfo root state ])
 
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root

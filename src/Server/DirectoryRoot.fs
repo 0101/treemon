@@ -20,6 +20,7 @@ let StateFileName = DirectoryStateFile.FileName
 
 let [<Literal>] private MaxLabelChars = 120
 let [<Literal>] private MaxSummaryChars = 500
+let [<Literal>] private MaxRepoChars = 200
 
 type DirectoryState =
     { /// Stands where a branch would: whatever names what the agent is currently on.
@@ -29,7 +30,10 @@ type DirectoryState =
       /// Stands where the last commit time would.
       UpdatedAt: DateTimeOffset
       /// Stands where a dirty worktree would: work in progress rather than settled.
-      Busy: bool }
+      Busy: bool
+      /// The repository the agent says it is currently working in, relative to this folder, when it
+      /// works in one at all.
+      Repo: string option }
 
 let private capped maximum (value: string) =
     let trimmed = value.Trim()
@@ -72,9 +76,19 @@ let tryReadState (root: string) : DirectoryState option =
 
             let label = stringOf DirectoryStateFile.Label |> Option.defaultValue "" |> capped MaxLabelChars
 
-            // A label is the one thing a card cannot be drawn without, so a file that supplies none
-            // declares nothing usable.
-            if String.IsNullOrWhiteSpace label then
+            // Capping is right for text a card renders; a path is not text. Truncating one yields a
+            // different path, which could name a different repository, so an over-long value
+            // declares nothing instead.
+            let repo =
+                stringOf DirectoryStateFile.Repo
+                |> Option.map _.Trim()
+                |> Option.filter (fun value -> value <> "" && value.Length <= MaxRepoChars)
+
+            // The file answers two questions and a folder may answer either. A label is what a card
+            // is drawn from; a repo is which card a session belongs to. A folder that sits above its
+            // repositories wants only the second, and requiring a label there would make it name a
+            // card that is never drawn.
+            if String.IsNullOrWhiteSpace label && Option.isNone repo then
                 None
             else
                 let updatedAt =
@@ -94,11 +108,55 @@ let tryReadState (root: string) : DirectoryState option =
                     { Label = label
                       Summary = stringOf DirectoryStateFile.Summary |> Option.defaultValue "" |> capped MaxSummaryChars
                       UpdatedAt = updatedAt
-                      Busy = busy }
+                      Busy = busy
+                      Repo = repo }
         with
         | :? JsonException
         | :? IOException
         | :? UnauthorizedAccessException -> None
+
+/// The repository a declared directory says it is currently working in, resolved against the folder.
+///
+/// This is how an agent that sits above its repositories says which one its session belongs to.
+/// Otherwise that is answered by elimination - a folder holding exactly one monitored repository
+/// resolves to it - and elimination stops working the moment a second one is monitored beside it,
+/// silently, because a report for an unmonitored path is accepted and dropped.
+///
+/// Untrusted like everything else in the file, and it decides which card a session lights up, so:
+/// relative only, resolved inside the folder, and a worktree git actually recognises. Anything else
+/// declares nothing, which is the same as declaring none.
+///
+/// Including a value the path APIs refuse outright - an embedded NUL makes GetFullPath throw. This
+/// runs on every report from a folder no worktree encloses, so a value that threw would not fail one
+/// request but every request that agent makes, for as long as the file said so.
+let declaredRepo (root: string) (state: DirectoryState) : string option =
+    state.Repo
+    |> Option.bind (fun declared ->
+        try
+            if Path.IsPathRooted declared then
+                None
+            else
+                let resolved = Path.GetFullPath(Path.Combine(root, declared))
+                let normalizedRoot = PathUtils.normalizePath root
+                let prefix = normalizedRoot + string Path.DirectorySeparatorChar
+
+                if not ((PathUtils.normalizePath resolved).StartsWith(prefix, StringComparison.Ordinal)) then
+                    None
+                elif not (isGitWorktree resolved) then
+                    None
+                else
+                    Some resolved
+        with
+        | :? ArgumentException
+        | :? NotSupportedException
+        | :? PathTooLongException
+        | :? IOException
+        | :? UnauthorizedAccessException -> None)
+
+/// Whether this folder is asking for a card of its own, rather than only redirecting its session to
+/// a repository's. A card is drawn from the label, so a folder that supplies none is not one.
+let describesCard (state: DirectoryState) =
+    not (String.IsNullOrWhiteSpace state.Label)
 
 /// The single worktree a declared directory stands for. It is its own root, the way a repository's
 /// main worktree is.

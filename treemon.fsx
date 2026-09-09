@@ -345,6 +345,22 @@ module Server =
     let private pathComparison =
         if isWindows then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
 
+    /// Linux reports a running process whose executable has been replaced as "<path> (deleted)", and
+    /// that is what MainModule.FileName hands back. `publish` replaces the binary under the running
+    /// server every single time, so without trimming this the deploy path defeats itself: publishing
+    /// is precisely what stops `stop`, `restart` and `status` from recognising the server they are
+    /// about to act on. They then report it as not running, and `start` launches into a port the old
+    /// server still holds - where it dies, while the bound port reads as a successful startup.
+    let private deletedMarker = " (deleted)"
+
+    let private executableOf (mainModule: ProcessModule) =
+        let name = mainModule.FileName
+
+        if name.EndsWith(deletedMarker, StringComparison.Ordinal) then
+            name.Substring(0, name.Length - deletedMarker.Length)
+        else
+            name
+
     /// Whether a process is this checkout's server rather than whatever inherited its pid. The pid
     /// file outlives crashes and reboots, and `stop` kills what it names, so the number alone is not
     /// enough to act on.
@@ -354,7 +370,7 @@ module Server =
             |> Option.ofObj
             |> Option.exists (fun mainModule ->
                 String.Equals(
-                    Path.GetFullPath mainModule.FileName,
+                    Path.GetFullPath(executableOf mainModule),
                     Path.GetFullPath serverExecutable,
                     pathComparison))
         with
@@ -394,6 +410,28 @@ module Server =
                     candidate.Dispose()
                     None)
             None
+
+    /// The recorded pid is the fast path, not the truth. The file is written by `start`, so it does
+    /// not survive a machine restart, a crash, or a server launched some other way - and next to a
+    /// stale file there can still be a perfectly live server of this checkout holding the port.
+    ///
+    /// Both callers were wrong without this, in the same incident. `start` refuses when a server is
+    /// already running but consulted only the file, so against a stale one it launched a second
+    /// server that died on the bound port - while `waitForBinding` saw the *old* server's port and
+    /// reported "Treemon is running". `stop` cleared the file and said nothing was running, so
+    /// `restart` silently left the old build serving.
+    ///
+    /// resolveServerProcess matches on this checkout's executable path, so the fallback stays as
+    /// per-checkout as the pid file it backs up.
+    let livePid () =
+        match runningPid () with
+        | Some existing -> Some existing
+        | None ->
+            match resolveServerProcess () with
+            | Some server ->
+                use server = server
+                Some server.Id
+            | None -> None
 
     /// A production server started from inside a Treemon embedded terminal inherits that terminal's
     /// shutdown boundary - on Windows its Job Object - so closing the tab kills production. The
@@ -506,13 +544,16 @@ module Server =
         let stamp = DateTime.Now.ToString "yyyyMMdd-HHmmss"
         let logPath = Path.Combine(logDir, $"treemon-prod.{stamp}.log")
 
-        [ defaultPort; canvasPort ]
-        |> List.iter (fun port ->
-            if not (Ports.waitUntilFree port (TimeSpan.FromSeconds 10.0)) then
-                Out.warn $"Warning: port {port} is still in use after 10s, and the server exits if it cannot bind it."
+        if not (Ports.waitUntilFree canvasPort (TimeSpan.FromSeconds 10.0)) then
+            Out.warn $"Warning: port {canvasPort} is still in use after 10s, and the server exits if it cannot bind it."
+            Out.warn $"  Set TREEMON_CANVAS_PORT to move the canvas doc server off {canvasPort}."
 
-                if port = canvasPort then
-                    Out.warn $"  Set TREEMON_CANVAS_PORT to move the canvas doc server off {port}.")
+        // Launching into an occupied port is what produced a "Treemon is running" for a server that
+        // had already died: the new one exits on the bind, and waitForBinding cannot tell its port
+        // from the one whatever else holds it is serving. Refusing says so instead of guessing.
+        if not (Ports.waitUntilFree defaultPort (TimeSpan.FromSeconds 10.0)) then
+            failwith
+                $"Port {defaultPort} is still in use after 10s, so nothing was started: a server that cannot bind its port exits at once, and the port staying bound would make that look like success. Stop whatever holds it first."
 
         // An explicit path wins; otherwise the legacy file's roots are carried over so an install
         // that predates the global config does not come up watching nothing.
@@ -580,7 +621,7 @@ module Server =
         if not (File.Exists serverExecutable) then
             failwith $"No published server at '{serverExecutable}'. Run 'publish' first."
 
-        match runningPid () with
+        match livePid () with
         | Some existing ->
             // Without this the launch still "succeeds": the old server keeps the port bound, so the
             // post-start check passes while the process just started has already died on the port.
@@ -594,9 +635,10 @@ module Server =
             startFresh roots
 
     let stop () =
-        // runningPid is the single gate: it already refuses a pid the server no longer owns, so a
-        // reused pid arrives here as None and is cleared rather than killed.
-        match runningPid () |> Option.bind aliveProcess with
+        // livePid is the single gate: it refuses a pid the server no longer owns, so a reused pid
+        // arrives here as None and is cleared rather than killed - and it still finds a server this
+        // checkout owns when the file naming it has gone stale.
+        match livePid () |> Option.bind aliveProcess with
         | None ->
             if File.Exists pidFile then
                 File.Delete pidFile
@@ -680,7 +722,7 @@ let private changeRoots (arguments: string list) =
     let exitCode = invokeTm arguments
 
     if exitCode = 0 || exitCode = 2 then
-        match Server.runningPid () with
+        match Server.livePid () with
         | None -> ()
         | Some _ when Server.startedFromEmbeddedTerminal () ->
             Out.warn "Production was not restarted because this is a Treemon embedded terminal."
@@ -694,7 +736,7 @@ let private changeRoots (arguments: string list) =
     exitCode
 
 let private showStatus () =
-    match Server.runningPid () with
+    match Server.livePid () with
     | None ->
         Out.plain "Treemon is not running."
         0
@@ -719,7 +761,7 @@ let private showLog () =
         Out.plain "No server log yet."
         0
     | Some path ->
-        if (Server.runningPid ()).IsNone then
+        if (Server.livePid ()).IsNone then
             // currentLogFile picks the newest file, which after a stop belongs to a run that is over.
             Out.warn "Treemon is not running; this is the log of the last run."
 

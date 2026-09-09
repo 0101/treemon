@@ -286,8 +286,22 @@ let [<Literal>] internal MaxAncestorDepth = 3
 /// discarded as unmonitored.
 ///
 /// A path above several monitored worktrees names none of them in particular, so it resolves to
-/// nothing rather than picking one arbitrarily or lighting up every card.
-let internal resolveMonitoredWorktree (known: Set<string>) (reported: string) =
+/// nothing rather than picking one arbitrarily or lighting up every card. That is the whole weakness
+/// of resolving by position: a folder holding one monitored repository resolves to it only by
+/// elimination, so monitoring a second repository beside it stops the agent appearing at all - with
+/// no error anywhere, because a report for an unmonitored path is a soft accept.
+///
+/// `declared` is how a folder answers instead of being guessed at: it names the repository the agent
+/// says it is working in right now. A statement beats elimination, and it keeps working when the
+/// folder holds two repositories, or ten.
+///
+/// It is asked only once position has failed to answer, and only for a directory no monitored
+/// worktree encloses. Both matter. A report from inside a worktree belongs to that worktree, and a
+/// state file in some subdirectory of one must not redirect it - "git is authoritative here" is
+/// enforced at a worktree's root, not at every directory below it. And it is a function because
+/// answering it reads a file: every event a session emits arrives here, most of them from inside a
+/// repository, and those must not pay for a question that is already settled.
+let internal resolveMonitoredWorktree (known: Set<string>) (declared: unit -> string option) (reported: string) =
     let separator = string Path.DirectorySeparatorChar
 
     if known.Contains reported then
@@ -306,19 +320,33 @@ let internal resolveMonitoredWorktree (known: Set<string>) (reported: string) =
         match known |> Seq.filter isBelow |> Seq.sortByDescending _.Length |> Seq.tryHead with
         | Some enclosing -> Some enclosing
         | None ->
-            known
-            |> Seq.filter (fun candidate ->
-                candidate.StartsWith(reported + separator, StringComparison.Ordinal)
-                && depthBelow candidate <= MaxAncestorDepth)
-            |> Seq.truncate 2
-            |> Seq.toList
-            |> function
-                | [ single ] -> Some single
-                | _ -> None
+            // Only a declaration naming something actually monitored: an agent can write any path it
+            // likes into its state file, and this decides which card a session lights up.
+            match declared () |> Option.filter known.Contains with
+            | Some repository -> Some repository
+            | None ->
+                known
+                |> Seq.filter (fun candidate ->
+                    candidate.StartsWith(reported + separator, StringComparison.Ordinal)
+                    && depthBelow candidate <= MaxAncestorDepth)
+                |> Seq.truncate 2
+                |> Seq.toList
+                |> function
+                    | [ single ] -> Some single
+                    | _ -> None
 
 let private monitoredWorktreeFor agent path = async {
     let! paths = allKnownPaths agent
-    return resolveMonitoredWorktree paths path
+
+    // Read per report rather than cached: the declaration is how an agent says it has moved between
+    // repositories, so a stale one would attribute a session to the repository it just left. The
+    // resolver decides whether to ask at all, and only asks when nothing else has answered.
+    let declared () =
+        DirectoryRoot.tryReadState path
+        |> Option.bind (DirectoryRoot.declaredRepo path)
+        |> Option.map PathUtils.normalizePath
+
+    return resolveMonitoredWorktree paths declared path
 }
 
 let private isSyntheticSystemReminder (report: SessionActivityReport) =

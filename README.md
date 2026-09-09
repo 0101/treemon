@@ -104,6 +104,30 @@ The agent maintaining the folder writes this file — rewrite it whenever its st
 
 Two rules worth knowing. **A state file inside a git repository is ignored** — git is authoritative there, so a file dropped or committed into one can't replace the branch, dirty flag and PR its card is built from. And **the contents are treated as untrusted**: `label` and `summary` are capped (120 and 500 characters) because they're agent-written text rendered on a dashboard.
 
+#### Agents that work across several repositories
+
+Treemon matches a session to a card by the directory the agent reports working in. An agent that sits *above* its repositories — infrastructure work spanning two of them, a developer who steps into a second checkout for an afternoon — reports a folder that is not a worktree at all.
+
+That resolves by elimination: a folder holding exactly one monitored repository resolves to it. Which means monitoring a second repository beside the first stops the agent appearing at all — the folder now names neither, and a report for an unmonitored path is accepted and dropped, so there is no error to notice.
+
+A folder can say where its work is instead of being guessed at:
+
+```json
+{
+  "label": "CEN-482 sprint triage",
+  "summary": "Rotating the staging credentials",
+  "updatedAt": "2026-09-08T12:30:00Z",
+  "busy": true,
+  "repo": "git/Centro"
+}
+```
+
+The session then attaches to that repository's card — an ordinary git card, with its real branch, diff, PR and working diff view. Rewrite `repo` when the agent moves, and the session follows to the other card. A statement beats elimination, and it keeps working whether the folder holds two repositories or ten.
+
+`repo` is resolved relative to the folder and must name a worktree git recognises inside it, and must name one Treemon already monitors. An absolute path, one that climbs out with `..`, or one that resolves nowhere monitored is treated as no declaration at all: it decides which card a session lights up, and it comes from the same agent-written file as everything else here.
+
+A folder that is itself a monitored root keeps its own card — `repo` only answers the question "which card does this session belong to" when the folder is not a card in its own right.
+
 ### Ports
 
 | | Port | Override |

@@ -575,5 +575,11 @@ module DirectoryStateFile =
     /// Stands where a dirty worktree would.
     let [<Literal>] Busy = "busy"
 
+    /// Optional: the repository, relative to the folder, that the agent is currently working in.
+    /// An agent that spans repositories cannot be identified by the one it happens to be in, so its
+    /// folder is the identity and this says where the work is. Absent means the folder speaks only
+    /// for itself.
+    let [<Literal>] Repo = "repo"
+
 // IWorktreeApi (the Fable.Remoting contract) lives in WorktreeApi.fs, compiled after OverviewData.fs
 // so getOverviewHistory can use the history types defined in OverviewData.

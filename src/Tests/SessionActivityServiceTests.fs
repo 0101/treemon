@@ -2388,38 +2388,96 @@ type MonitoredWorktreeResolutionTests() =
 
     [<Test>]
     member _.``a worktree root resolves to itself``() =
-        Assert.That(resolveMonitoredWorktree known centro, Is.EqualTo(Some centro))
+        Assert.That(resolveMonitoredWorktree known (fun () -> None) centro, Is.EqualTo(Some centro))
 
     [<Test>]
     member _.``a directory inside a worktree resolves to that worktree``() =
         let inside = Path.Combine(centro, "src", "Centro.ManagementApi")
-        Assert.That(resolveMonitoredWorktree known inside, Is.EqualTo(Some centro))
+        Assert.That(resolveMonitoredWorktree known (fun () -> None) inside, Is.EqualTo(Some centro))
 
     [<Test>]
     member _.``a folder above a single worktree resolves to it``() =
         // The agent's working folder sits a couple of directories above the repository it edits.
         let workingFolder = path [ "git"; "CentroSpectrum"; "blue" ]
-        Assert.That(resolveMonitoredWorktree known workingFolder, Is.EqualTo(Some centro))
+        Assert.That(resolveMonitoredWorktree known (fun () -> None) workingFolder, Is.EqualTo(Some centro))
 
     [<Test>]
     member _.``a folder above several worktrees names none of them``() =
         let both = Set.ofList [ centro; clabe ]
         let above = path [ "git"; "CentroSpectrum" ]
-        Assert.That(resolveMonitoredWorktree both above, Is.EqualTo None)
+        Assert.That(resolveMonitoredWorktree both (fun () -> None) above, Is.EqualTo None)
 
     [<Test>]
     member _.``the deepest enclosing worktree wins when one is nested in another``() =
         let nested = Path.Combine(centro, "vendor", "library")
         let deeper = Set.ofList [ centro; nested ]
-        Assert.That(resolveMonitoredWorktree deeper (Path.Combine(nested, "src")), Is.EqualTo(Some nested))
+        Assert.That(resolveMonitoredWorktree deeper (fun () -> None) (Path.Combine(nested, "src")), Is.EqualTo(Some nested))
 
     [<Test>]
     member _.``an unrelated path stays unmonitored``() =
-        Assert.That(resolveMonitoredWorktree known (path [ "somewhere"; "else" ]), Is.EqualTo None)
+        Assert.That(resolveMonitoredWorktree known (fun () -> None) (path [ "somewhere"; "else" ]), Is.EqualTo None)
 
     [<Test>]
     member _.``a sibling whose name merely starts the same is not a match``() =
-        Assert.That(resolveMonitoredWorktree known (centro + "-backup"), Is.EqualTo None)
+        Assert.That(resolveMonitoredWorktree known (fun () -> None) (centro + "-backup"), Is.EqualTo None)
+
+    // The case resolution by position cannot serve: two monitored repositories under the agent's
+    // folder. Without a declaration this is the "names none of them" answer above, and the agent
+    // silently stops appearing the day the second repository is monitored.
+    [<Test>]
+    member _.``a folder that declares which repository it is working in resolves there``() =
+        let both = Set.ofList [ centro; clabe ]
+        let workingFolder = path [ "git"; "CentroSpectrum"; "blue" ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(resolveMonitoredWorktree both (fun () -> Some clabe) workingFolder, Is.EqualTo(Some clabe))
+            // ... and moving to the other repository moves the session with it.
+            Assert.That(resolveMonitoredWorktree both (fun () -> Some centro) workingFolder, Is.EqualTo(Some centro)))
+
+    // An agent can write any path it likes into its state file, and this decides which card lights up.
+    [<Test>]
+    member _.``a declaration naming something unmonitored is not believed``() =
+        let workingFolder = path [ "git"; "CentroSpectrum"; "blue" ]
+        let elsewhere = path [ "somewhere"; "else" ]
+
+        // Falls through to resolution by position, which still finds the single known descendant.
+        Assert.That(resolveMonitoredWorktree known (fun () -> Some elsewhere) workingFolder, Is.EqualTo(Some centro))
+
+    // "git is authoritative here" is enforced at a worktree's root, not at every directory below
+    // it, so a state file dropped into a subdirectory must not redirect the session out of the
+    // worktree that encloses it.
+    [<Test>]
+    member _.``a declaration inside a worktree does not redirect out of it``() =
+        let both = Set.ofList [ centro; clabe ]
+        let inside = Path.Combine(centro, "src", "Centro.ManagementApi")
+
+        Assert.That(resolveMonitoredWorktree both (fun () -> Some clabe) inside, Is.EqualTo(Some centro))
+
+    // Asking costs a file read, and every event a session emits arrives here.
+    [<Test>]
+    member _.``the declaration is not asked for when position already answers``() =
+        let mutable asked = 0
+
+        let declared () =
+            asked <- asked + 1
+            None
+
+        let inside = Path.Combine(centro, "src")
+
+        Assert.Multiple(fun () ->
+            resolveMonitoredWorktree known declared centro |> ignore
+            resolveMonitoredWorktree known declared inside |> ignore
+            Assert.That(asked, Is.EqualTo 0, "a report naming or inside a worktree needs no declaration")
+
+            // Above them, where position cannot answer alone, it is asked exactly once.
+            resolveMonitoredWorktree known declared (path [ "git"; "CentroSpectrum"; "blue" ]) |> ignore
+            Assert.That(asked, Is.EqualTo 1))
+
+    // A worktree root is what it is; a state file cannot make a session belong somewhere else.
+    [<Test>]
+    member _.``a declaration does not override the worktree the report came from``() =
+        let both = Set.ofList [ centro; clabe ]
+        Assert.That(resolveMonitoredWorktree both (fun () -> Some clabe) centro, Is.EqualTo(Some centro))
 
 /// The reported directory arrives over HTTP from whatever working directory an agent happens to have,
 /// so it is validated rather than trusted. None of it touches the filesystem: a directory that does
