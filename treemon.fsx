@@ -456,8 +456,13 @@ module Server =
     /// Every run writes its own log, so without pruning `logs/` grows for as long as the server is
     /// ever restarted. Best effort: a log still held open simply survives to the next attempt.
     let private pruneOldRunLogs keep =
-        runLogs ()
-        |> Array.skip (min keep (runLogs ()).Length)
+        // One scan. Two would let a log appear between them, and skipping a count taken from the
+        // second scan can exceed the first array's length - which throws, from inside a start that
+        // has already left a server running.
+        let logs = runLogs ()
+
+        logs
+        |> Array.skip (min keep logs.Length)
         |> Array.iter (fun path ->
             try
                 File.Delete path

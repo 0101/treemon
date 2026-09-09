@@ -28,17 +28,35 @@ let private quoted (value: string) =
     else
         "'" + value.Replace("'", @"'\''") + "'"
 
-/// A control-bearing prompt is carried as inert base64 and decoded by the shell, so the command
+/// Every control character as printf's own octal escape, so the payload is inert text the shell
+/// reassembles itself. Backslashes are doubled first, or one already in the prompt would be read as
+/// the start of an escape.
+let private forPrintf (value: string) =
+    value
+    |> Seq.map (fun character ->
+        if character = '\\' then @"\\"
+        elif Char.IsControl character then
+            // \0ddd, the octal form %b is specified to take.
+            @"\0" + Convert.ToString(int character, 8).PadLeft(3, '0')
+        else
+            string character)
+    |> String.concat ""
+
+/// A control-bearing prompt is carried as inert text and reassembled by the shell, so the command
 /// submitted to the terminal stays one line either way.
+///
+/// Off Windows that is `printf %b` rather than base64. `base64` is not a POSIX utility at all, and
+/// where it exists the decode flag is not agreed: GNU coreutils takes -d, BSD and macOS take -D. So
+/// the command carrying a multi-line prompt worked on Linux and failed on a Mac - on the one input
+/// that needed the encoding in the first place. `printf` is a shell builtin everywhere, and %b with
+/// its \0ddd escapes is specified.
 let private promptArgument (prompt: string) =
     if prompt |> Seq.exists Char.IsControl then
-        let encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes prompt)
-
         if forPowerShell then
+            let encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes prompt)
             $"([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded}')))"
         else
-            // base64 -d is POSIX-portable in a way `echo -n` flags are not.
-            $"\"$(printf %%s '{encoded}' | base64 -d)\""
+            $"\"$(printf %%b {quoted (forPrintf prompt)})\""
     else
         quoted prompt
 

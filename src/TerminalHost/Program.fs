@@ -103,8 +103,15 @@ module private HostConfig =
                 ->
                 Error "TerminalHost requires Windows, Linux or macOS"
             | Ok config when not (File.Exists config.TerminalLaunch.TtydExecutable) ->
-                Error
-                    $"ttyd is not installed at '{config.TerminalLaunch.TtydExecutable}'. Run 'treemon.ps1 setup-ttyd'."
+                // TerminalHost runs on all three platforms, and naming a PowerShell script is advice
+                // two of them cannot follow.
+                let setup =
+                    if OperatingSystem.IsWindows() then
+                        "treemon.cmd setup-ttyd"
+                    else
+                        "./treemon.sh setup-ttyd"
+
+                Error $"ttyd is not installed at '{config.TerminalLaunch.TtydExecutable}'. Run '{setup}'."
             | Ok config -> Ok config
         with
         | :? ArgumentException

@@ -228,29 +228,31 @@ type InvestigateLaunchCommandTests() =
         let prompt = "line a\r\nline b\nline c"
         let wrapped = skillInvocation (Some CodingToolProvider.CopilotCli) "investigate" prompt
         let cmd = (build (Some CodingToolProvider.CopilotCli) (Interactive wrapped)).AsShellString
-        // The payload is carried as base64 either way; only the shell that decodes it differs.
-        let prefix, suffix =
+
+        // The two shells reassemble the payload differently. PowerShell decodes base64; a POSIX
+        // shell uses its own printf, because `base64` is not a POSIX utility and its decode flag
+        // differs between GNU (-d) and macOS (-D) — which broke this exact command on a Mac.
+        let roundTripped =
             if OperatingSystem.IsWindows() then
-                "copilot --yolo -i ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('",
-                "')))"
+                let prefix =
+                    "copilot --yolo -i ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('"
+
+                let suffix = "')))"
+                Assert.That(cmd, Does.StartWith prefix)
+                Assert.That(cmd, Does.EndWith suffix)
+
+                cmd.Substring(prefix.Length, cmd.Length - prefix.Length - suffix.Length)
+                |> Convert.FromBase64String
+                |> Encoding.UTF8.GetString
             else
-                "copilot --yolo -i \"$(printf %s '", "' | base64 -d)\""
+                let escaped = wrapped.Replace("\r", @"\015").Replace("\n", @"\012")
+                Assert.That(cmd, Is.EqualTo($"copilot --yolo -i \"$(printf %%b '{escaped}')\""))
 
-        Assert.That(cmd, Does.StartWith prefix)
-        Assert.That(cmd, Does.EndWith suffix)
-
-        let payload =
-            cmd.Substring(
-                prefix.Length,
-                cmd.Length - prefix.Length - suffix.Length
-            )
-        let decoded =
-            payload
-            |> Convert.FromBase64String
-            |> Encoding.UTF8.GetString
+                // Reversing the escapes is what the shell's printf does with them.
+                escaped.Replace(@"\015", "\r").Replace(@"\012", "\n")
 
         Assert.Multiple(fun () ->
-            Assert.That(decoded, Is.EqualTo wrapped)
+            Assert.That(roundTripped, Is.EqualTo wrapped)
             Assert.That(cmd |> Seq.exists Char.IsControl, Is.False)
             Assert.That(
                 Server.TerminalHostClient.validateTerminalCommand cmd,
