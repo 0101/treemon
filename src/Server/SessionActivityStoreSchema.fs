@@ -9,16 +9,13 @@ let private activityEventsTableSql createClause tableName =
     process_id          INTEGER NOT NULL CHECK (process_id > 0),
     process_start_ticks INTEGER NOT NULL CHECK (process_start_ticks > 0),
     event_id            TEXT NOT NULL,
-    session_id          TEXT NOT NULL,
-    worktree_path       TEXT NOT NULL,
-    provider            TEXT NOT NULL,
-    kind                TEXT NOT NULL,
-    status              TEXT NOT NULL,
-    skill               TEXT,
     ts                  TEXT NOT NULL,
     PRIMARY KEY (process_id, process_start_ticks, event_id)
 );
 """
+
+let private minimalEventColumns =
+    Set.ofList [ "process_id"; "process_start_ticks"; "event_id"; "ts" ]
 
 let private schemaSql =
     $"""
@@ -52,69 +49,14 @@ CREATE TABLE IF NOT EXISTS session_instances (
     PRIMARY KEY (process_id, process_start_ticks)
 );
 
-CREATE TABLE IF NOT EXISTS retained_sessions (
+CREATE TABLE IF NOT EXISTS resume_sessions (
     session_id                 TEXT PRIMARY KEY,
     worktree_path              TEXT NOT NULL,
-    provider                   TEXT NOT NULL,
-    status                     TEXT NOT NULL,
-    current_skill              TEXT,
-    last_user_msg              TEXT,
-    last_user_ts               TEXT,
-    last_asst_msg              TEXT,
-    last_asst_ts               TEXT,
-    intent_text                TEXT,
-    intent_ts                  TEXT,
-    title_text                 TEXT,
-    title_ts                   TEXT,
-    updated_at                 TEXT NOT NULL,
-    context_current_tokens     INTEGER,
-    context_token_limit        INTEGER,
-    context_usage_at           TEXT,
-    awaiting_user_since        TEXT,
-    user_input_completed_at    TEXT
-);
-
-CREATE TABLE IF NOT EXISTS worktree_representatives (
-    worktree_path              TEXT PRIMARY KEY,
-    session_id                 TEXT NOT NULL,
-    provider                   TEXT NOT NULL,
-    status                     TEXT NOT NULL,
-    current_skill              TEXT,
-    last_user_msg              TEXT,
-    last_user_ts               TEXT,
-    last_asst_msg              TEXT,
-    last_asst_ts               TEXT,
-    intent_text                TEXT,
-    intent_ts                  TEXT,
-    title_text                 TEXT,
-    title_ts                   TEXT,
-    updated_at                 TEXT NOT NULL,
-    context_current_tokens     INTEGER,
-    context_token_limit        INTEGER,
-    context_usage_at           TEXT,
-    awaiting_user_since        TEXT,
-    user_input_completed_at    TEXT,
-    process_id                 INTEGER NOT NULL,
-    process_start_ticks        INTEGER NOT NULL
+    updated_at                 TEXT NOT NULL
 );
 
 {activityEventsTableSql "CREATE TABLE IF NOT EXISTS" "activity_events"}
 """
-
-let private legacyAdditiveColumns =
-    [ "intent_text", "TEXT"
-      "intent_ts", "TEXT"
-      "title_text", "TEXT"
-      "title_ts", "TEXT"
-      "context_current_tokens", "INTEGER"
-      "context_token_limit", "INTEGER"
-      "context_usage_at", "TEXT"
-      "awaiting_user_since", "TEXT"
-      "user_input_completed_at", "TEXT"
-      "terminal_session_id", "TEXT" ]
-
-let private exactAdditiveColumns =
-    [ "lifecycle_at", "TEXT" ]
 
 let private indexSql =
     """
@@ -127,13 +69,24 @@ ON session_instances(terminal_session_id, updated_at DESC, session_id DESC);
 CREATE INDEX IF NOT EXISTS ix_instances_last_seen
 ON session_instances(last_seen);
 
-CREATE INDEX IF NOT EXISTS ix_retained_worktree_activity
-ON retained_sessions(worktree_path, updated_at DESC, session_id DESC);
+CREATE INDEX IF NOT EXISTS ix_resume_worktree_activity
+ON resume_sessions(worktree_path, updated_at DESC, session_id DESC);
 
 CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
-CREATE INDEX IF NOT EXISTS ix_events_session_ts ON activity_events(session_id, ts);
-CREATE INDEX IF NOT EXISTS ix_events_instance_ts
-ON activity_events(process_id, process_start_ticks, ts);
+"""
+
+/// Copies the durable identity of a pre-upgrade session row into `resume_sessions`, keeping the
+/// greatest `updated_at` per session so repeated startup and several sources converge.
+let private retainResumeIdentitySql sourceTable =
+    $"""
+INSERT INTO resume_sessions (session_id, worktree_path, updated_at)
+SELECT session_id, worktree_path, MAX(updated_at)
+FROM {sourceTable}
+GROUP BY session_id
+ON CONFLICT(session_id) DO UPDATE SET
+    worktree_path = excluded.worktree_path,
+    updated_at = excluded.updated_at
+WHERE excluded.updated_at >= resume_sessions.updated_at;
 """
 
 let private tableExists
@@ -154,29 +107,16 @@ let rec private readColumnNames (reader: SqliteDataReader) names =
     else
         names
 
-let private ensureColumns
+let private columnNames
     (connection: SqliteConnection)
     (transaction: SqliteTransaction)
     (tableName: string)
-    (columns: (string * string) list)
     =
     use command = connection.CreateCommand()
     command.Transaction <- transaction
     command.CommandText <- $"PRAGMA table_info({tableName});"
     use reader = command.ExecuteReader()
-    let existing = readColumnNames reader Set.empty
-
-    columns
-    |> List.filter (fst >> existing.Contains >> not)
-    |> List.map (fun (name, declaration) ->
-        $"ALTER TABLE {tableName} ADD COLUMN {name} {declaration};")
-    |> String.concat Environment.NewLine
-    |> fun migration ->
-        if migration <> "" then
-            use alter = connection.CreateCommand()
-            alter.Transaction <- transaction
-            alter.CommandText <- migration
-            alter.ExecuteNonQuery() |> ignore
+    readColumnNames reader Set.empty
 
 let rec private readPrimaryKeyColumns (reader: SqliteDataReader) columns =
     if reader.Read() then
@@ -211,108 +151,81 @@ let private executeMigrationSql
     command.CommandText <- sql
     command.ExecuteNonQuery() |> ignore
 
+/// Branch databases created before per-instance lifecycle ordering lack `lifecycle_at`; adding it
+/// keeps those exact rows readable instead of failing startup.
+let private ensureLifecycleColumn
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction)
+    =
+    if
+        columnNames connection transaction "session_instances"
+        |> Set.contains "lifecycle_at"
+        |> not
+    then
+        executeMigrationSql
+            connection
+            transaction
+            "ALTER TABLE session_instances ADD COLUMN lifecycle_at TEXT;"
+
+/// Rebuilds `activity_events` down to its dedupe key. Rows already keyed by exact process identity
+/// keep their key and timestamp; rows keyed by event ID alone cannot prove which process produced
+/// them, so they are discarded rather than folded under a foreign identity.
 let private rebuildActivityEventsIfNeeded
     (connection: SqliteConnection)
     (transaction: SqliteTransaction)
     =
     let migrationTable = "activity_events_migration"
 
-    if activityEventsUsesProcessKey connection transaction then
-        executeMigrationSql
-            connection
-            transaction
-            $"DROP TABLE IF EXISTS {migrationTable};"
-    else
+    executeMigrationSql
+        connection
+        transaction
+        $"DROP TABLE IF EXISTS {migrationTable};"
+
+    if columnNames connection transaction "activity_events" <> minimalEventColumns then
+        let copyKeys =
+            if activityEventsUsesProcessKey connection transaction then
+                $"""
+INSERT INTO {migrationTable} (process_id, process_start_ticks, event_id, ts)
+SELECT process_id, process_start_ticks, event_id, ts FROM activity_events;
+"""
+            else
+                ""
+
         executeMigrationSql
             connection
             transaction
             $"""
-DROP TABLE IF EXISTS {migrationTable};
 {activityEventsTableSql "CREATE TABLE" migrationTable}
+{copyKeys}
 DROP TABLE activity_events;
 ALTER TABLE {migrationTable} RENAME TO activity_events;
 """
 
-let private normalizeCurrentTables
+let private retainResumeIdentity
     (connection: SqliteConnection)
     (transaction: SqliteTransaction)
+    sourceTable
     =
-    executeMigrationSql
-        connection
-        transaction
-        """
-UPDATE session_instances SET status = 'idle' WHERE status = 'done';
-UPDATE retained_sessions SET status = 'idle' WHERE status = 'done';
-UPDATE activity_events SET status = 'idle' WHERE status = 'done';
-"""
-
-let private migrateLegacySessionStatus
-    (connection: SqliteConnection)
-    (transaction: SqliteTransaction)
-    =
-    if tableExists connection transaction "session_status" then
-        ensureColumns
-            connection
-            transaction
-            "session_status"
-            legacyAdditiveColumns
-
+    if tableExists connection transaction sourceTable then
         executeMigrationSql
             connection
             transaction
-            """
-UPDATE session_status SET status = 'idle' WHERE status = 'done';
-UPDATE session_status
-SET status = 'idle', awaiting_user_since = updated_at
-WHERE status = 'waiting_for_user' AND awaiting_user_since IS NULL;
-
-INSERT INTO retained_sessions
-    (session_id, worktree_path, provider, status, current_skill,
-     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-     intent_text, intent_ts, title_text, title_ts, updated_at,
-     context_current_tokens, context_token_limit, context_usage_at,
-     awaiting_user_since, user_input_completed_at)
-SELECT
-    session_id, worktree_path, provider, status, current_skill,
-    last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-    intent_text, intent_ts, title_text, title_ts, updated_at,
-    context_current_tokens, context_token_limit, context_usage_at,
-    awaiting_user_since, user_input_completed_at
-FROM session_status
-WHERE true
-ON CONFLICT(session_id) DO UPDATE SET
-    worktree_path = excluded.worktree_path,
-    provider = excluded.provider,
-    status = excluded.status,
-    current_skill = excluded.current_skill,
-    last_user_msg = excluded.last_user_msg,
-    last_user_ts = excluded.last_user_ts,
-    last_asst_msg = excluded.last_asst_msg,
-    last_asst_ts = excluded.last_asst_ts,
-    intent_text = excluded.intent_text,
-    intent_ts = excluded.intent_ts,
-    title_text = excluded.title_text,
-    title_ts = excluded.title_ts,
-    updated_at = excluded.updated_at,
-    context_current_tokens = excluded.context_current_tokens,
-    context_token_limit = excluded.context_token_limit,
-    context_usage_at = excluded.context_usage_at,
-    awaiting_user_since = excluded.awaiting_user_since,
-    user_input_completed_at = excluded.user_input_completed_at
-WHERE excluded.updated_at >= retained_sessions.updated_at;
-"""
+            (retainResumeIdentitySql sourceTable)
 
 let internal initializeSchema (connection: SqliteConnection) =
     use transaction = connection.BeginTransaction()
     executeMigrationSql connection transaction schemaSql
-    ensureColumns
+    ensureLifecycleColumn connection transaction
+    retainResumeIdentity connection transaction "session_status"
+    retainResumeIdentity connection transaction "retained_sessions"
+    rebuildActivityEventsIfNeeded connection transaction
+    executeMigrationSql
         connection
         transaction
-        "session_instances"
-        exactAdditiveColumns
-    normalizeCurrentTables connection transaction
-    migrateLegacySessionStatus connection transaction
-    rebuildActivityEventsIfNeeded connection transaction
-    executeMigrationSql connection transaction "DROP TABLE IF EXISTS session_status;"
+        """
+DROP TABLE IF EXISTS session_status;
+DROP TABLE IF EXISTS retained_sessions;
+DROP TABLE IF EXISTS worktree_representatives;
+"""
     executeMigrationSql connection transaction indexSql
     transaction.Commit()

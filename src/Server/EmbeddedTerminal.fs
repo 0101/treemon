@@ -6,7 +6,6 @@ open Server.TerminalHostClient
 open Server.TerminalHostManifest
 open Server.TerminalHostProcess
 open Server.TerminalHostReplacement
-open Server.TerminalHostRecovery
 
 [<RequireQualifiedAccess>]
 type private ManagerPhase = Steady | Replacing
@@ -31,27 +30,20 @@ type internal CleanupLease =
       CachedTerminalIds: Set<EmbeddedTerminalId>
       LastHost: DiscoveryManifest option }
 
-type internal CleanupPreparation = NoCleanupNeeded of EmbeddedTerminalSnapshot | CleanupReserved of CleanupLease
-
-type internal CleanupLeaseAcquirer =
-    CloseTarget
-        -> WorktreePath option
-        -> Async<Result<CleanupPreparation, string>>
-
-type internal CleanupRemoval = KeepCleanupTargets | RemoveCleanupTarget of CloseTarget | RemoveClosedTerminals of Set<EmbeddedTerminalId>
-
-type internal CleanupUpdate =
-    | ReconcileCleanup of DiscoveryManifest * RegistrySnapshot * CleanupRemoval
-    | UnverifiedCleanup of DiscoveryManifest * RegistrySnapshot option * Set<EmbeddedTerminalId> * string
-    | UnavailableCleanup of string * CloseTarget
-    | FailedCleanup of string
+/// The single state change a finished teardown applies: the authoritative registry it reached (when
+/// it reached one), the terminals that registry proved closed, and the message to stamp on whatever
+/// the manager still believes is running.
+type internal CleanupCompletion =
+    { Registry: (DiscoveryManifest * RegistrySnapshot) option
+      ClosedTerminalIds: Set<EmbeddedTerminalId>
+      Interruption: string option }
 
 type private Message =
     | Start of WorktreePath * command: string option * AsyncReplyChannel<Result<EmbeddedTerminalStartResult, string>>
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | GetCached of AsyncReplyChannel<EmbeddedTerminalSnapshot>
-    | ReserveCleanup of CloseTarget * WorktreePath option * Guid * AsyncReplyChannel<Result<CleanupPreparation, string>>
-    | ApplyCleanup of CleanupUpdate * AsyncReplyChannel<EmbeddedTerminalSnapshot>
+    | ReserveCleanup of CloseTarget * WorktreePath option * Guid * AsyncReplyChannel<Result<CleanupLease option, string>>
+    | ApplyCleanup of CleanupCompletion * AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | ReleaseCleanup of Guid
     | BeginReplacement of
         ReplacementPlan *
@@ -157,26 +149,22 @@ let private mutationResult prepare (state: ManagerState) connection = function
         let next = applyRegistry (prepare state) connection registry
         next, Ok next.LastSnapshot
 
-let private withoutTarget target snapshot =
-    let keep tab =
-        match target with
-        | OneTerminal terminalId -> tab.Id <> terminalId
-        | WorktreeTerminals path ->
-            not (samePath (WorktreePath.value tab.Worktree) (WorktreePath.value path))
-
-    { Tabs = snapshot.Tabs |> List.filter keep }
+let private matchesTarget target tab =
+    match target with
+    | OneTerminal terminalId -> tab.Id = terminalId
+    | WorktreeTerminals path ->
+        samePath (WorktreePath.value tab.Worktree) (WorktreePath.value path)
 
 let private removeTarget target (state: ManagerState) =
-    { state with LastSnapshot = withoutTarget target state.LastSnapshot }
+    { state with
+        LastSnapshot.Tabs =
+            state.LastSnapshot.Tabs |> List.filter (matchesTarget target >> not) }
 
 let private targetTerminalIds target fallback (snapshot: EmbeddedTerminalSnapshot) =
     let cached =
         snapshot.Tabs
-        |> List.choose (fun tab ->
-            match target with
-            | OneTerminal terminalId when tab.Id = terminalId -> Some tab.Id
-            | WorktreeTerminals path when samePath (WorktreePath.value tab.Worktree) (WorktreePath.value path) -> Some tab.Id
-            | _ -> None)
+        |> List.filter (matchesTarget target)
+        |> List.map _.Id
         |> Set.ofList
 
     match target, fallback with
@@ -196,26 +184,22 @@ let private removeTerminalIds (terminalIds: Set<EmbeddedTerminalId>) (state: Man
             state.LastSnapshot.Tabs
             |> List.filter (fun tab -> not (terminalIds.Contains tab.Id)) }
 
-let private applyCleanupRemoval removal (state: ManagerState) =
-    match removal with
-    | KeepCleanupTargets -> state
-    | RemoveCleanupTarget target -> removeTarget target state
-    | RemoveClosedTerminals terminalIds -> removeTerminalIds terminalIds state
+let private applyCleanupCompletion (state: ManagerState) completion =
+    let remaining = removeTerminalIds completion.ClosedTerminalIds state
 
-let private applyCleanupUpdate (state: ManagerState) = function
-    | ReconcileCleanup(connection, registry, removal) ->
-        applyRegistryWith
-            ReconciliationMode.PreserveDuringCleanup
-            (applyCleanupRemoval removal state)
-            connection
-            registry
-    | UnverifiedCleanup(connection, registry, closedTerminalIds, error) ->
-        MutationUnverified(registry, error)
-        |> mutationFailure (removeTerminalIds closedTerminalIds state) connection
-        |> fst
-    | UnavailableCleanup(reason, target) ->
-        { state with LastSnapshot = state.LastSnapshot |> interruptSnapshot reason |> withoutTarget target }
-    | FailedCleanup error -> withHostFailure error state
+    let reconciled =
+        match completion.Registry with
+        | Some(manifest, registry) ->
+            applyRegistryWith
+                ReconciliationMode.PreserveDuringCleanup
+                remaining
+                manifest
+                registry
+        | None -> remaining
+
+    match completion.Interruption with
+    | Some error -> withHostFailure error reconciled
+    | None -> reconciled
 
 let private deliverCommand config attachmentEndpoint command =
     async {
@@ -299,12 +283,6 @@ let private applyReplacementResolution (state: ManagerState) = function
             manifest
             registry,
         outcome
-    | ReplacementResolution.ApplyRecoveredRegistry(
-        manifest,
-        registry,
-        outcome
-      ) ->
-        applyRegistry state manifest registry, outcome
     | ReplacementResolution.InterruptWithHost(
         manifest,
         message,
@@ -366,11 +344,7 @@ let internal createWithConfig config =
                         return! loop (respond reply (Error "Invalid embedded terminal ID") state)
                     | ReserveCleanup(target, fallback, token, reply) ->
                         match targetWorktree state target fallback with
-                        | None ->
-                            return!
-                                loop (
-                                    respond reply (Ok(NoCleanupNeeded state.LastSnapshot)) state
-                                )
+                        | None -> return! loop (respond reply (Ok None) state)
                         | Some worktreePath ->
                             let key = cleanupPathKey worktreePath
 
@@ -391,9 +365,9 @@ let internal createWithConfig config =
                                             state.CleanupReservations
                                             |> Map.add key token }
 
-                                return! loop (respond reply (Ok(CleanupReserved lease)) next)
-                    | ApplyCleanup(update, reply) ->
-                        let next = applyCleanupUpdate state update
+                                return! loop (respond reply (Ok(Some lease)) next)
+                    | ApplyCleanup(completion, reply) ->
+                        let next = applyCleanupCompletion state completion
                         return! loop (respond reply next.LastSnapshot next)
                     | ReleaseCleanup token ->
                         let reservations =
@@ -407,18 +381,12 @@ let internal createWithConfig config =
                         return! loop (respond reply ReplacementOutcome.RaceLost state)
                     | BeginReplacement(plan, query, operations, reply) ->
                         async {
-                            let! commit =
+                            let! resolution =
                                 commitReplacementWith
                                     operations
                                     config
                                     plan
                                     query
-
-                            let! resolution =
-                                TerminalHostRecovery.resolveWith
-                                    operations
-                                    config
-                                    commit
 
                             inbox.Post(
                                 FinishReplacement(
@@ -538,9 +506,9 @@ let internal getCached (Manager(_, agent)) = ask agent GetCached
 
 let internal clientConfig (Manager(config, _)) = config
 
-let internal applyCleanup (Manager(_, agent)) update = ask agent (fun reply -> ApplyCleanup(update, reply))
+let internal applyCleanup (Manager(_, agent)) completion = ask agent (fun reply -> ApplyCleanup(completion, reply))
 
-let private reserveCleanup (Manager(_, agent)) target fallback =
+let internal reserveCleanup (Manager(_, agent)) target fallback =
     async {
         let token = Guid.NewGuid()
 
@@ -551,38 +519,5 @@ let private reserveCleanup (Manager(_, agent)) target fallback =
             return Error "Terminal cleanup could not start within 60 seconds; try again."
     }
 
-let internal withCleanupLease
-    ((Manager(_, agent)) as manager)
-    (
-        acquire:
-            CleanupLeaseAcquirer
-                -> Async<Result<CleanupPreparation, string>>
-    )
-    (
-        operation:
-            Result<CleanupPreparation, string>
-                -> Threading.Tasks.Task<'value>
-    )
-    : Async<'value>
-    =
-    async {
-        let reservation =
-            Async.StartAsTask(
-                acquire (reserveCleanup manager),
-                cancellationToken = Threading.CancellationToken.None
-            )
-
-        return!
-            task {
-                let! acquired = reservation
-
-                match acquired with
-                | Ok(CleanupReserved lease) ->
-                    try
-                        return! operation acquired
-                    finally
-                        agent.Post(ReleaseCleanup lease.Token)
-                | _ -> return! operation acquired
-            }
-            |> Async.AwaitTask
-    }
+let internal releaseCleanup (Manager(_, agent)) (lease: CleanupLease) =
+    agent.Post(ReleaseCleanup lease.Token)

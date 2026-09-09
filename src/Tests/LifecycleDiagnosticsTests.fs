@@ -50,42 +50,35 @@ type LifecycleDiagnosticFormattingTests() =
             Assert.That(formatted.Length, Is.LessThan(2048)))
 
     [<Test>]
-    member _.``Recovery diagnostics discard raw failure text and retain typed outcomes``() =
-        let terminalId = terminalSessionId 21
-
-        let recovery:
-            TerminalHostRecovery.ReplacementRecoveryResult =
-            { HostState =
-                TerminalHostRecovery.RecoveryHostState.Stopped
-              TerminalRegistry =
-                TerminalHostRecovery.RecoveryTerminalRegistry.Unavailable
-                    "shutdownCapability=secret-token"
-              SelectedSessions =
-                [ { OriginalTerminalSessionId = terminalId
-                    CurrentTerminalSessionId = None
-                    CopilotSessionId =
-                        SessionId.create "selected-session"
-                        |> Result.defaultWith invalidOp
-                    Outcome =
-                        TerminalHostRecovery.RecoverySelectedSessionOutcome.ResumeDeliveryUnconfirmed
-                            "prompt=private command" } ]
-              UnresolvedProcesses =
-                [ TerminalHostRecovery.RecoveryUnresolvedProcess.StartedWithoutIdentity
-                      TerminalHostRecovery.RecoveryHostGeneration.Staged ]
-              Status =
-                TerminalHostRecovery.RecoveryStatus.Rejected
-                    "shutdownUrl=http://127.0.0.1/private" }
-
+    member _.``Forward-failure diagnostics retain typed outcomes without failure text``() =
         let formatted =
-            recovery
-            |> TerminalHostRecovery.diagnosticSummary
-            |> LifecycleDiagnostics.Diagnostic.RecoveryCompleted
+            LifecycleDiagnostics.ReplacementStage.Failed(
+                LifecycleDiagnostics.ReplacementFailureKind.CommandDelivery,
+                LifecycleDiagnostics.ReplacementHostOutcome.StagedHostRetained,
+                Some(processIdentity 7)
+            )
+            |> LifecycleDiagnostics.Diagnostic.ReplacementTransition
             |> LifecycleDiagnostics.format
 
         Assert.Multiple(fun () ->
-            Assert.That(formatted, Does.Contain("event=recovery status=rejected"))
-            Assert.That(formatted, Does.Contain("resume_delivery_unconfirmed"))
-            Assert.That(formatted, Does.Contain("unidentified_host_generations_count=1"))
-            Assert.That(formatted, Does.Not.Contain("secret-token"))
-            Assert.That(formatted, Does.Not.Contain("private command"))
-            Assert.That(formatted, Does.Not.Contain("shutdownUrl")))
+            Assert.That(formatted, Does.Contain("event=replacement stage=failed"))
+            Assert.That(formatted, Does.Contain("failure=command_delivery"))
+            Assert.That(formatted, Does.Contain("host_state=staged_host_retained"))
+            Assert.That(formatted, Does.Contain("host_process=10007@1000007"))
+            Assert.That(formatted.Length, Is.LessThan(2048)))
+
+    [<Test>]
+    member _.``Post-stop failure diagnostics report no current host without an identity``() =
+        let formatted =
+            LifecycleDiagnostics.ReplacementStage.Failed(
+                LifecycleDiagnostics.ReplacementFailureKind.StagedHostLaunch,
+                LifecycleDiagnostics.ReplacementHostOutcome.NoHostRunning,
+                None
+            )
+            |> LifecycleDiagnostics.Diagnostic.ReplacementTransition
+            |> LifecycleDiagnostics.format
+
+        Assert.Multiple(fun () ->
+            Assert.That(formatted, Does.Contain("failure=staged_host_launch"))
+            Assert.That(formatted, Does.Contain("host_state=no_host_running"))
+            Assert.That(formatted, Does.Contain("host_process=none")))

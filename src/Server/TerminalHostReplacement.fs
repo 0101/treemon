@@ -72,24 +72,6 @@ type internal ReplacementShutdownAttempt =
          > }
 
 [<RequireQualifiedAccess>]
-type internal ReplacementHostState =
-    | OldHostHealthy
-    | OldHostStopUnconfirmed
-    | NoConfirmedHost
-    | StagedHostRunning of DiscoveryManifest
-
-type internal RecreatedTerminal =
-    { OriginalTerminalSessionId: TerminalSessionId
-      NewTerminalSessionId: TerminalSessionId
-      WorktreePath: string }
-
-type internal ReplacementProgress =
-    { ShutdownAttempts: ReplacementShutdownAttempt list
-      HostState: ReplacementHostState
-      RecreatedTerminals: RecreatedTerminal list
-      DeliveredCommandTerminalIds: Set<TerminalSessionId> }
-
-[<RequireQualifiedAccess>]
 type internal ReplacementFailure =
     | GracefulShutdownFailed of ReplacementShutdownAttempt list
     | OldHostStopFailed of string
@@ -99,11 +81,6 @@ type internal ReplacementFailure =
     | StagedRegistryNotEmpty of terminalCount: int
     | TerminalRecreationFailed of ReplacementTerminal * TerminalMutationFailure
     | CommandDeliveryFailed of ReplacementTerminal * string
-
-type internal ReplacementRecovery =
-    { Capture: ReplacementPlan
-      Progress: ReplacementProgress
-      Failure: ReplacementFailure }
 
 type internal ReplacementOperations =
     { ShutdownSessions:
@@ -133,11 +110,13 @@ type private ReplacementRecheck =
     | RecheckChanged
     | RecheckFailed of string
 
+/// Final transition the lifecycle mailbox applies when a replacement attempt ends.
 [<RequireQualifiedAccess>]
-type internal ReplacementCommit =
+type internal ReplacementResolution =
     | KeepState of ReplacementOutcome
-    | RecoveryRequired of ReplacementRecovery
     | ApplyRegistry of DiscoveryManifest * RegistrySnapshot * ReplacementOutcome
+    | InterruptWithHost of DiscoveryManifest * string * ReplacementOutcome
+    | InterruptWithoutHost of string * ReplacementOutcome
 
 let private terminalPresentation (terminal: TerminalRecord) =
     terminal.SessionId
@@ -159,7 +138,7 @@ let private queryReplacementPolicy
     with error ->
         Error $"Could not query the terminal replacement policy: {error.Message}"
 
-let internal configForExecutable config executablePath =
+let private configForExecutable config executablePath =
     { config with
         HostExecutablePath = executablePath
         TtydExecutablePath =
@@ -278,7 +257,7 @@ let private validateReplacementPolicy
     else
         Ok()
 
-let internal mutationFailureReason = function
+let private mutationFailureReason = function
     | MutationRejected(_, reason)
     | MutationUnverified(_, reason) -> reason
 
@@ -346,23 +325,25 @@ let internal replacementFailureMessage = function
     | ReplacementFailure.CommandDeliveryFailed(terminal, error) ->
         $"Could not deliver the replacement command for terminal {TerminalSessionId.value terminal.TerminalSessionId}: {error}"
 
-let internal replacementRecoveryOutcome recovery =
-    ReplacementOutcome.Failed(
-        recovery.Capture.StagedVersion,
-        replacementFailureMessage recovery.Failure
-    )
+let private externalRestartRequired =
+    "Treemon will not start another TerminalHost generation; restart Treemon from an external PowerShell window and Resume terminals explicitly."
 
-let internal replacementCommitOutcome = function
-    | ReplacementCommit.KeepState outcome
-    | ReplacementCommit.ApplyRegistry(_, _, outcome) -> outcome
-    | ReplacementCommit.RecoveryRequired recovery ->
-        replacementRecoveryOutcome recovery
+/// Text for a failure that happened after the old host was confirmed stopped, so replacement can
+/// no longer be undone.
+let private irreversibleFailureMessage error =
+    $"TerminalHost replacement stopped after the previous TerminalHost exited: {error}. {externalRestartRequired}"
 
-let private recoveryRequired capture progress failure =
-    ReplacementCommit.RecoveryRequired
-        { Capture = capture
-          Progress = progress
-          Failure = failure }
+let private retainedStagedHostMessage error stopError =
+    $"TerminalHost replacement stopped after the previous TerminalHost exited: {error}. The replacement TerminalHost could not be confirmed stopped ({stopError}) and is retained as the only known host. {externalRestartRequired}"
+
+let private unresolvedOldHostMessage error =
+    $"TerminalHost replacement stopped before a replacement TerminalHost was started: {error}. The previous TerminalHost could not be confirmed stopped or alive and is retained as the only known host. {externalRestartRequired}"
+
+let internal replacementResolutionOutcome = function
+    | ReplacementResolution.KeepState outcome
+    | ReplacementResolution.ApplyRegistry(_, _, outcome)
+    | ReplacementResolution.InterruptWithHost(_, _, outcome)
+    | ReplacementResolution.InterruptWithoutHost(_, outcome) -> outcome
 
 let private diagnosticFailureKind =
     function
@@ -382,21 +363,86 @@ let private diagnosticFailureKind =
     | ReplacementFailure.CommandDeliveryFailed _ ->
         LifecycleDiagnostics.ReplacementFailureKind.CommandDelivery
 
-let private recoveryRequiredWithDiagnostics
+let private recordFailure
     (diagnostics: LifecycleDiagnostics.Sink)
-    capture
-    progress
     failure
+    hostOutcome
+    retainedHost
     =
     diagnostics (
         LifecycleDiagnostics.Diagnostic.ReplacementTransition(
-            LifecycleDiagnostics.ReplacementStage.RecoveryRequired(
-                diagnosticFailureKind failure
+            LifecycleDiagnostics.ReplacementStage.Failed(
+                diagnosticFailureKind failure,
+                hostOutcome,
+                retainedHost |> Option.bind tryProcessIdentity
             )
         )
     )
 
-    recoveryRequired capture progress failure
+/// A failure before the old host is confirmed stopped aborts replacement and leaves the original
+/// host in place; the user retries or resumes explicitly.
+let private keepOldHost diagnostics (plan: ReplacementPlan) oldHost failure =
+    recordFailure
+        diagnostics
+        failure
+        LifecycleDiagnostics.ReplacementHostOutcome.OldHostRunning
+        (Some oldHost)
+
+    ReplacementResolution.KeepState(
+        ReplacementOutcome.Failed(
+            plan.StagedVersion,
+            replacementFailureMessage failure
+        )
+    )
+
+/// Replacement is irreversible once the old host has exited: fail closed by stopping the exact
+/// staged host when one is known, and never start another host generation.
+let private failClosed
+    diagnostics
+    (operations: ReplacementOperations)
+    stagedConfig
+    (plan: ReplacementPlan)
+    stagedHost
+    failure
+    =
+    async {
+        let error = replacementFailureMessage failure
+
+        let noCurrentHost () =
+            let message = irreversibleFailureMessage error
+
+            recordFailure
+                diagnostics
+                failure
+                LifecycleDiagnostics.ReplacementHostOutcome.NoHostRunning
+                None
+
+            ReplacementResolution.InterruptWithoutHost(
+                message,
+                ReplacementOutcome.Failed(plan.StagedVersion, message)
+            )
+
+        match stagedHost with
+        | None -> return noCurrentHost ()
+        | Some staged ->
+            match! operations.StopHost stagedConfig staged with
+            | Ok() -> return noCurrentHost ()
+            | Error stopError ->
+                let message = retainedStagedHostMessage error stopError
+
+                recordFailure
+                    diagnostics
+                    failure
+                    LifecycleDiagnostics.ReplacementHostOutcome.StagedHostRetained
+                    (Some staged)
+
+                return
+                    ReplacementResolution.InterruptWithHost(
+                        staged,
+                        message,
+                        ReplacementOutcome.Failed(plan.StagedVersion, message)
+                    )
+    }
 
 let private recordReplacementCapture
     (diagnostics: LifecycleDiagnostics.Sink)
@@ -477,113 +523,55 @@ let private recreateTerminals
     (config: Config)
     (connection: DiscoveryManifest)
     (plan: ReplacementPlan)
-    progress
     =
-    let rec recreate registry currentProgress = function
-        | [] -> async.Return(Ok(registry, currentProgress))
+    let rec recreate registry = function
+        | [] -> async.Return(Ok registry)
         | terminal :: remaining ->
             async {
-                match!
-                    operations.RecreateTerminal
-                        config
-                        connection
-                        terminal
-                with
+                match! operations.RecreateTerminal config connection terminal with
                 | Error failure ->
                     return
                         Error(
-                            currentProgress,
                             ReplacementFailure.TerminalRecreationFailed(
                                 terminal,
                                 failure
                             )
                         )
                 | Ok(nextRegistry, recreated) ->
-                    match TerminalSessionId.create recreated.SessionId with
-                    | Error _ ->
-                        return
-                            Error(
-                                currentProgress,
-                                ReplacementFailure.TerminalRecreationFailed(
-                                    terminal,
-                                    MutationUnverified(
-                                        Some nextRegistry,
-                                        "TerminalHost returned an invalid terminal session identity"
+                    match
+                        plan.ResumeCommands
+                        |> Map.tryFind terminal.TerminalSessionId
+                    with
+                    | None -> return! recreate nextRegistry remaining
+                    | Some resume ->
+                        match!
+                            operations.DeliverCommand
+                                config
+                                recreated
+                                resume.Command
+                        with
+                        | Error error ->
+                            return
+                                Error(
+                                    ReplacementFailure.CommandDeliveryFailed(
+                                        terminal,
+                                        error
                                     )
                                 )
-                            )
-                    | Ok newTerminalSessionId ->
-                        let recreatedTerminal =
-                            { OriginalTerminalSessionId =
-                                terminal.TerminalSessionId
-                              NewTerminalSessionId =
-                                newTerminalSessionId
-                              WorktreePath = terminal.WorktreePath }
-
-                        let afterRecreation =
-                            { currentProgress with
-                                RecreatedTerminals =
-                                    currentProgress.RecreatedTerminals
-                                    @ [ recreatedTerminal ] }
-
-                        match
-                            plan.ResumeCommands
-                            |> Map.tryFind terminal.TerminalSessionId
-                        with
-                        | None ->
-                            return!
-                                recreate
-                                    nextRegistry
-                                    afterRecreation
-                                    remaining
-                        | Some resume ->
-                            match!
-                                operations.DeliverCommand
-                                    config
-                                    recreated
-                                    resume.Command
-                            with
-                            | Error error ->
-                                return
-                                    Error(
-                                        afterRecreation,
-                                        ReplacementFailure.CommandDeliveryFailed(
-                                            terminal,
-                                            error
-                                        )
-                                    )
-                            | Ok() ->
-                                let afterDelivery =
-                                    { afterRecreation with
-                                        DeliveredCommandTerminalIds =
-                                            afterRecreation.DeliveredCommandTerminalIds
-                                            |> Set.add
-                                                terminal.TerminalSessionId }
-
-                                return!
-                                    recreate
-                                        nextRegistry
-                                        afterDelivery
-                                        remaining
+                        | Ok() -> return! recreate nextRegistry remaining
             }
 
     async {
         match! listTerminals config connection with
         | Error error ->
-            return
-                Error(
-                    progress,
-                    ReplacementFailure.StagedRegistryReadFailed error
-                )
+            return Error(ReplacementFailure.StagedRegistryReadFailed error)
         | Ok registry when not registry.Terminals.IsEmpty ->
             return
                 Error(
-                    progress,
                     ReplacementFailure.StagedRegistryNotEmpty
                         registry.Terminals.Length
                 )
-        | Ok registry ->
-            return! recreate registry progress plan.Terminals
+        | Ok registry -> return! recreate registry plan.Terminals
     }
 
 let private recheckReplacement
@@ -636,6 +624,190 @@ let private recheckReplacement
             return RecheckFailed $"Could not recheck the exact TerminalHost: {error}"
     }
 
+let private tryVerifiedLiveStagedHost config expectedExecutable =
+    match readManifest config with
+    | Ok(Some manifest) ->
+        match
+            processIdentityMatches config manifest,
+            resolveProcessExecutable config manifest
+        with
+        | Ok true, Ok executable when samePath executable expectedExecutable ->
+            Some manifest
+        | _ ->
+            None
+    | _ ->
+        None
+
+let private replaceAfterOldHostStopped
+    (diagnostics: LifecycleDiagnostics.Sink)
+    (operations: ReplacementOperations)
+    (config: Config)
+    (plan: ReplacementPlan)
+    =
+    async {
+        let stagedConfig =
+            configForExecutable config plan.StagedExecutablePath
+
+        let failAfterStop =
+            failClosed diagnostics operations stagedConfig plan
+
+        diagnostics (
+            LifecycleDiagnostics.Diagnostic.ReplacementTransition
+                LifecycleDiagnostics.ReplacementStage.StagedHostLaunchStarted
+        )
+
+        match! operations.LaunchHost stagedConfig with
+        | HostLaunchFailed failure ->
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                    match failure with
+                    | LaunchRejected _ ->
+                        LifecycleDiagnostics.ReplacementStage.StagedHostLaunchRejected
+                    | LaunchStartedButUnhealthy _ ->
+                        LifecycleDiagnostics.ReplacementStage.StagedHostStartedUnhealthy
+                )
+            )
+
+            let stagedHost =
+                match failure with
+                | LaunchRejected _ -> None
+                | LaunchStartedButUnhealthy _ ->
+                    tryVerifiedLiveStagedHost
+                        stagedConfig
+                        plan.StagedExecutablePath
+
+            return!
+                failAfterStop
+                    stagedHost
+                    (ReplacementFailure.StagedHostLaunchFailed failure)
+        | HostLaunched staged ->
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                    LifecycleDiagnostics.ReplacementStage.StagedHostRunning(
+                        tryProcessIdentity staged
+                    )
+                )
+            )
+
+            match resolveProcessExecutable stagedConfig staged with
+            | Error error ->
+                return!
+                    failAfterStop
+                        (Some staged)
+                        (ReplacementFailure.StagedHostVerificationFailed error)
+            | Ok executable
+                when not (samePath executable plan.StagedExecutablePath) ->
+                return!
+                    failAfterStop
+                        (Some staged)
+                        (ReplacementFailure.StagedHostVerificationFailed
+                            "the launch published an unexpected TerminalHost executable")
+            | Ok _ ->
+                diagnostics (
+                    LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                        LifecycleDiagnostics.ReplacementStage.TerminalRecreationStarted(
+                            plan.Terminals.Length,
+                            plan.ResumeCommands.Count
+                        )
+                    )
+                )
+
+                match!
+                    recreateTerminals operations stagedConfig staged plan
+                with
+                | Error failure -> return! failAfterStop (Some staged) failure
+                | Ok registry ->
+                    diagnostics (
+                        LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                            LifecycleDiagnostics.ReplacementStage.TerminalRecreationCompleted(
+                                plan.Terminals.Length,
+                                plan.ResumeCommands.Count
+                            )
+                        )
+                    )
+
+                    diagnostics (
+                        LifecycleDiagnostics.Diagnostic.ReplacementTransition
+                            LifecycleDiagnostics.ReplacementStage.Completed
+                    )
+
+                    return
+                        ReplacementResolution.ApplyRegistry(
+                            staged,
+                            registry,
+                            ReplacementOutcome.Replaced plan.StagedVersion
+                        )
+    }
+
+let private stopOldHost
+    (diagnostics: LifecycleDiagnostics.Sink)
+    (operations: ReplacementOperations)
+    (config: Config)
+    (plan: ReplacementPlan)
+    (connection: DiscoveryManifest)
+    =
+    async {
+        let oldHostIdentity = tryProcessIdentity connection
+
+        diagnostics (
+            LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                LifecycleDiagnostics.ReplacementStage.OldHostCloseStarted
+                    oldHostIdentity
+            )
+        )
+
+        match! operations.StopHost config connection with
+        | Ok() ->
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                    LifecycleDiagnostics.ReplacementStage.OldHostCloseConfirmed
+                        oldHostIdentity
+                )
+            )
+
+            return!
+                replaceAfterOldHostStopped diagnostics operations config plan
+        | Error error ->
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                    LifecycleDiagnostics.ReplacementStage.OldHostCloseUnconfirmed
+                        oldHostIdentity
+                )
+            )
+
+            let failure = ReplacementFailure.OldHostStopFailed error
+
+            match processIdentityMatches config connection with
+            | Ok true ->
+                return keepOldHost diagnostics plan connection failure
+            | Ok false ->
+                return!
+                    failClosed
+                        diagnostics
+                        operations
+                        config
+                        plan
+                        None
+                        failure
+            | Error livenessError ->
+                let message =
+                    unresolvedOldHostMessage
+                        $"{replacementFailureMessage failure}; {livenessError}"
+
+                recordFailure
+                    diagnostics
+                    failure
+                    LifecycleDiagnostics.ReplacementHostOutcome.OldHostUnresolved
+                    (Some connection)
+
+                return
+                    ReplacementResolution.InterruptWithHost(
+                        connection,
+                        message,
+                        ReplacementOutcome.Failed(plan.StagedVersion, message)
+                    )
+    }
+
 let internal commitReplacementWithDiagnostics
     (diagnostics: LifecycleDiagnostics.Sink)
     (operations: ReplacementOperations)
@@ -651,10 +823,6 @@ let internal commitReplacementWithDiagnostics
                 LifecycleDiagnostics.ReplacementStage.RecheckStarted
         )
 
-        let failed error =
-            ReplacementOutcome.Failed(plan.StagedVersion, error)
-            |> ReplacementCommit.KeepState
-
         match! recheckReplacement config plan query with
         | RecheckChanged ->
             diagnostics (
@@ -663,15 +831,17 @@ let internal commitReplacementWithDiagnostics
             )
 
             return
-                ReplacementCommit.KeepState
-                    ReplacementOutcome.RaceLost
+                ReplacementResolution.KeepState ReplacementOutcome.RaceLost
         | RecheckFailed error ->
             diagnostics (
                 LifecycleDiagnostics.Diagnostic.ReplacementTransition
                     LifecycleDiagnostics.ReplacementStage.RecheckFailed
             )
 
-            return failed error
+            return
+                ReplacementResolution.KeepState(
+                    ReplacementOutcome.Failed(plan.StagedVersion, error)
+                )
         | ReadyToCommit connection ->
             diagnostics (
                 LifecycleDiagnostics.Diagnostic.ReplacementTransition(
@@ -698,183 +868,22 @@ let internal commitReplacementWithDiagnostics
                 )
             )
 
-            let afterShutdown =
-                { ShutdownAttempts = shutdownAttempts
-                  HostState = ReplacementHostState.OldHostHealthy
-                  RecreatedTerminals = []
-                  DeliveredCommandTerminalIds = Set.empty }
-
-            if
-                shutdownAttempts
-                |> List.exists (_.Outcome >> Result.isError)
-            then
+            if failedShutdowns > 0 then
                 return
-                    recoveryRequiredWithDiagnostics
+                    keepOldHost
                         diagnostics
                         plan
-                        afterShutdown
+                        connection
                         (ReplacementFailure.GracefulShutdownFailed
                             shutdownAttempts)
             else
-                let oldHostIdentity =
-                    tryProcessIdentity connection
-
-                diagnostics (
-                    LifecycleDiagnostics.Diagnostic.ReplacementTransition(
-                        LifecycleDiagnostics.ReplacementStage.OldHostCloseStarted
-                            oldHostIdentity
-                    )
-                )
-
-                match! operations.StopHost config connection with
-                | Error error ->
-                    diagnostics (
-                        LifecycleDiagnostics.Diagnostic.ReplacementTransition(
-                            LifecycleDiagnostics.ReplacementStage.OldHostCloseUnconfirmed
-                                oldHostIdentity
-                        )
-                    )
-
-                    return
-                        recoveryRequiredWithDiagnostics
-                            diagnostics
-                            plan
-                            { afterShutdown with
-                                HostState =
-                                    ReplacementHostState.OldHostStopUnconfirmed }
-                            (ReplacementFailure.OldHostStopFailed error)
-                | Ok() ->
-                    diagnostics (
-                        LifecycleDiagnostics.Diagnostic.ReplacementTransition(
-                            LifecycleDiagnostics.ReplacementStage.OldHostCloseConfirmed
-                                oldHostIdentity
-                        )
-                    )
-
-                    let withoutHost =
-                        { afterShutdown with
-                            HostState =
-                                ReplacementHostState.NoConfirmedHost }
-
-                    let stagedConfig =
-                        configForExecutable
-                            config
-                            plan.StagedExecutablePath
-
-                    diagnostics (
-                        LifecycleDiagnostics.Diagnostic.ReplacementTransition
-                            LifecycleDiagnostics.ReplacementStage.StagedHostLaunchStarted
-                    )
-
-                    match!
-                        operations.LaunchHost stagedConfig
-                    with
-                    | HostLaunchFailed failure ->
-                        diagnostics (
-                            LifecycleDiagnostics.Diagnostic.ReplacementTransition(
-                                match failure with
-                                | LaunchRejected _ ->
-                                    LifecycleDiagnostics.ReplacementStage.StagedHostLaunchRejected
-                                | LaunchStartedButUnhealthy _ ->
-                                    LifecycleDiagnostics.ReplacementStage.StagedHostStartedUnhealthy
-                            )
-                        )
-
-                        return
-                            recoveryRequiredWithDiagnostics
-                                diagnostics
-                                plan
-                                withoutHost
-                                (ReplacementFailure.StagedHostLaunchFailed
-                                    failure)
-                    | HostLaunched replacement ->
-                        diagnostics (
-                            LifecycleDiagnostics.Diagnostic.ReplacementTransition(
-                                LifecycleDiagnostics.ReplacementStage.StagedHostRunning(
-                                    tryProcessIdentity replacement
-                                )
-                            )
-                        )
-
-                        let withStagedHost =
-                            { withoutHost with
-                                HostState =
-                                    ReplacementHostState.StagedHostRunning
-                                        replacement }
-
-                        match
-                            resolveProcessExecutable
-                                stagedConfig
-                                replacement
-                        with
-                        | Error error ->
-                            return
-                                recoveryRequiredWithDiagnostics
-                                    diagnostics
-                                    plan
-                                    withStagedHost
-                                    (ReplacementFailure.StagedHostVerificationFailed
-                                        error)
-                        | Ok executable
-                            when not (
-                                samePath
-                                    executable
-                                    plan.StagedExecutablePath
-                            ) ->
-                            return
-                                recoveryRequiredWithDiagnostics
-                                    diagnostics
-                                    plan
-                                    withStagedHost
-                                    (ReplacementFailure.StagedHostVerificationFailed
-                                        "the launch published an unexpected TerminalHost executable")
-                        | Ok _ ->
-                            diagnostics (
-                                LifecycleDiagnostics.Diagnostic.ReplacementTransition(
-                                    LifecycleDiagnostics.ReplacementStage.TerminalRecreationStarted(
-                                        plan.Terminals.Length,
-                                        plan.ResumeCommands.Count
-                                    )
-                                )
-                            )
-
-                            match!
-                                recreateTerminals
-                                    operations
-                                    stagedConfig
-                                    replacement
-                                    plan
-                                    withStagedHost
-                            with
-                            | Error(progress, failure) ->
-                                return
-                                    recoveryRequiredWithDiagnostics
-                                        diagnostics
-                                        plan
-                                        progress
-                                        failure
-                            | Ok(registry, progress) ->
-                                diagnostics (
-                                    LifecycleDiagnostics.Diagnostic.ReplacementTransition(
-                                        LifecycleDiagnostics.ReplacementStage.TerminalRecreationCompleted(
-                                            progress.RecreatedTerminals.Length,
-                                            progress.DeliveredCommandTerminalIds.Count
-                                        )
-                                    )
-                                )
-
-                                diagnostics (
-                                    LifecycleDiagnostics.Diagnostic.ReplacementTransition
-                                        LifecycleDiagnostics.ReplacementStage.Completed
-                                )
-
-                                return
-                                    ReplacementCommit.ApplyRegistry(
-                                        replacement,
-                                        registry,
-                                        ReplacementOutcome.Replaced
-                                            plan.StagedVersion
-                                    )
+                return!
+                    stopOldHost
+                        diagnostics
+                        operations
+                        config
+                        plan
+                        connection
     }
 
 let internal commitReplacementWith =

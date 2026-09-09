@@ -28,7 +28,8 @@ failure closes the newly created terminal and reports the launch failure.
 ## Technical Approach
 
 `SessionActivityStore.LatestSessionIdForWorktree` performs the scalar durable lookup independently
-of heartbeat recency and the live-session window. `TerminalSessionActivity.tryFindLiveTerminalId`
+of heartbeat recency and the live-session window, ranking exact process instances together with the
+pre-upgrade identities retained in `resume_sessions`. `TerminalSessionActivity.tryFindLiveTerminalId`
 joins that selected Copilot session to a running terminal through its exact
 `TREEMON_TERMINAL_SESSION_ID` origin.
 

@@ -13,22 +13,20 @@ open Server.SessionActivityStore
 open Server.TerminalSessionActivity
 open Tests.TestUtils
 
+let private exactWorktree = WorktreePath(PathUtils.normalizePath "C:/wt/exact")
+
 let private exactIdentity processId startTicks =
-    ProcessIdentity.create processId startTicks
+    ProcessIdentity.create processId startTicks |> Result.defaultWith invalidOp
+
+let private terminal (hexSuffix: string) =
+    TerminalSessionId.create (String('0', 32 - hexSuffix.Length) + hexSuffix)
     |> Result.defaultWith invalidOp
 
-let private report
-    processId
-    sessionId
-    terminalSessionId
-    eventId
-    occurredAt
-    event
-    =
+let private report processId sessionId terminalSessionId eventId occurredAt event =
     { ParentProcessId = processId
       SessionId = SessionId sessionId
       TerminalSessionId = terminalSessionId
-      WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/exact")
+      WorktreePath = exactWorktree
       Provider = CopilotCli
       EventId = EventId eventId
       OccurredAt = occurredAt
@@ -61,7 +59,7 @@ let private storedInstance
     { ProcessIdentity = identity
       SessionId = SessionId sessionId
       TerminalSessionId = Some terminalSessionId
-      WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/exact")
+      WorktreePath = exactWorktree
       Provider = CopilotCli
       Status = emptyStatus
       UpdatedAt = lastSeen.AddSeconds(-1.0)
@@ -70,47 +68,26 @@ let private storedInstance
       ContextUsageAt = None
       ClosedAt = None }
 
+/// Run `action` against a service over a throwaway temp .db, wired to `resolver` and `diagnostics`.
 let private withServiceDiagnostics
     resolver
     diagnostics
-    (action:
-        SessionActivityService
-            * SessionActivityStore
-            * string
-            -> unit)
+    (action: SessionActivityService * SessionActivityStore * string -> unit)
     =
-    let directory =
-        Path.Combine(
-            Path.GetTempPath(),
-            $"treemon-exact-activity-{Guid.NewGuid():N}"
-        )
-
+    let directory = uniquePath "exact-activity"
     Directory.CreateDirectory directory |> ignore
     let dbPath = Path.Combine(directory, "activity.db")
     use store = new SessionActivityStore(dbPath)
     let scheduler = SchedulerState.createAgent ()
-
-    use service =
-        new SessionActivityService(
-            store,
-            scheduler,
-            resolver,
-            diagnostics
-        )
+    use service = new SessionActivityService(store, scheduler, resolver, diagnostics)
 
     try
         action (service, store, dbPath)
     finally
-        try
-            Directory.Delete(directory, recursive = true)
-        with _ ->
-            ()
+        try Directory.Delete(directory, recursive = true) with _ -> ()
 
 let private withService resolver action =
-    withServiceDiagnostics
-        resolver
-        LifecycleDiagnostics.ignore
-        action
+    withServiceDiagnostics resolver LifecycleDiagnostics.ignore action
 
 let private requirePresence =
     function
@@ -119,17 +96,8 @@ let private requirePresence =
         Assert.Fail $"Expected acknowledged presence, got: {reason}"
         failwith "unreachable"
 
-let private queryAt
-    (service: SessionActivityService)
-    now
-    terminalSessionIds
-    =
-    match
-        service.QueryTerminalActivityAt(
-            now,
-            terminalSessionIds
-        )
-    with
+let private queryAt (service: SessionActivityService) now terminalSessionIds =
+    match service.QueryTerminalActivityAt(now, terminalSessionIds) with
     | Ok value -> value
     | Error error ->
         Assert.Fail error
@@ -143,55 +111,36 @@ type PresenceAcknowledgementTests() =
     [<Test>]
     member _.``presence acknowledges only after the exact row is durable``() =
         let identity = exactIdentity 4101 5101L
-
         let resolver =
             ProcessIdentityResolver.create (fun processId ->
                 if processId = 4101 then Ok(Some identity) else Ok None)
 
         withService resolver (fun (service, store, dbPath) ->
             let receivedAt = ts "2026-09-04T10:00:00Z"
+            let instanceCount () =
+                SqliteTestDatabase.scalarInt dbPath "SELECT count(*) FROM session_instances;"
 
             let acknowledged =
-                present
-                    service
-                    4101
-                    "shared-session"
-                    None
-                    receivedAt
-                |> requirePresence
+                present service 4101 "shared-session" None receivedAt |> requirePresence
 
             let durable = store.InstanceByIdentity identity
 
             Assert.Multiple(fun () ->
                 Assert.That(acknowledged, Is.EqualTo identity)
-                Assert.That(durable.IsSome, Is.True)
                 Assert.That(durable |> Option.map _.LastSeen, Is.EqualTo(Some receivedAt))
+                Assert.That(instanceCount (), Is.EqualTo 1)
                 Assert.That(
-                    SqliteTestDatabase.scalarInt
-                        dbPath
-                        "SELECT count(*) FROM session_instances;",
-                    Is.EqualTo 1
-                )
-                Assert.That(
-                    SqliteTestDatabase.scalarInt
-                        dbPath
-                        "SELECT count(*) FROM activity_events;",
-                    Is.Zero
+                    SqliteTestDatabase.scalarInt dbPath "SELECT count(*) FROM activity_events;",
+                    Is.Zero,
+                    "presence is not an activity event"
                 ))
 
-            present
-                service
-                4101
-                "shared-session"
-                None
-                (receivedAt.AddSeconds(1.0))
+            present service 4101 "shared-session" None (receivedAt.AddSeconds(1.0))
             |> requirePresence
             |> ignore
 
             Assert.That(
-                SqliteTestDatabase.scalarInt
-                    dbPath
-                    "SELECT count(*) FROM session_instances;",
+                instanceCount (),
                 Is.EqualTo 1,
                 "presence is idempotent for one exact identity"
             ))
@@ -204,80 +153,42 @@ type PresenceAcknowledgementTests() =
 
         let identities =
             [ first; second; third ]
-            |> List.map (fun identity ->
-                ProcessIdentity.processId identity,
-                identity)
+            |> List.map (fun identity -> ProcessIdentity.processId identity, identity)
             |> Map.ofList
 
         let resolver =
-            ProcessIdentityResolver.create (fun processId ->
-                Ok(identities |> Map.tryFind processId))
+            ProcessIdentityResolver.create (fun processId -> Ok(identities |> Map.tryFind processId))
 
-        let firstTerminal =
-            TerminalSessionId.create
-                "00000000000000000000000000000051"
-            |> Result.defaultWith invalidOp
+        let firstTerminal = terminal "51"
+        let secondTerminal = terminal "52"
+        let diagnostics = ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
-        let secondTerminal =
-            TerminalSessionId.create
-                "00000000000000000000000000000052"
-            |> Result.defaultWith invalidOp
+        withServiceDiagnostics resolver diagnostics.Enqueue (fun (service, _, _) ->
+            let at = ts "2026-09-04T10:00:00Z"
 
-        let diagnostics =
-            ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
-
-        withServiceDiagnostics
-            resolver
-            diagnostics.Enqueue
-            (fun (service, _, _) ->
-                let at = ts "2026-09-04T10:00:00Z"
-
-                present service 4151 "shared-session" (Some firstTerminal) at
+            [ 4151, "shared-session", firstTerminal, 0.0
+              4152, "shared-session", secondTerminal, 1.0
+              4153, "independent-session", firstTerminal, 2.0
+              4151, "shared-session", firstTerminal, 3.0 ]
+            |> List.iter (fun (processId, sessionId, terminalSessionId, offset) ->
+                present service processId sessionId (Some terminalSessionId) (at.AddSeconds offset)
                 |> requirePresence
-                |> ignore
-
-                present
-                    service
-                    4152
-                    "shared-session"
-                    (Some secondTerminal)
-                    (at.AddSeconds(1.0))
-                |> requirePresence
-                |> ignore
-
-                present
-                    service
-                    4153
-                    "independent-session"
-                    (Some firstTerminal)
-                    (at.AddSeconds(2.0))
-                |> requirePresence
-                |> ignore
-
-                present
-                    service
-                    4151
-                    "shared-session"
-                    (Some firstTerminal)
-                    (at.AddSeconds(3.0))
-                |> requirePresence
-                |> ignore)
+                |> ignore))
 
         let events = diagnostics.ToArray()
 
         let presenceKinds =
             events
             |> Array.choose (function
-                | LifecycleDiagnostics.Diagnostic.PresenceAcknowledged presence ->
-                    Some presence.Kind
+                | LifecycleDiagnostics.Diagnostic.PresenceAcknowledged presence -> Some presence.Kind
                 | _ -> None)
 
         let sameSession =
             events
             |> Array.choose (function
-                | LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved multiplicity
-                    when multiplicity.Boundary =
-                         LifecycleDiagnostics.ObservationBoundary.Presence ->
+                | LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved multiplicity when
+                    multiplicity.Boundary = LifecycleDiagnostics.ObservationBoundary.Presence
+                    ->
                     Some multiplicity
                 | _ -> None)
             |> Array.last
@@ -285,9 +196,9 @@ type PresenceAcknowledgementTests() =
         let multipleSessions =
             events
             |> Array.choose (function
-                | LifecycleDiagnostics.Diagnostic.MultipleSessionsObserved multiple
-                    when multiple.Boundary =
-                         LifecycleDiagnostics.ObservationBoundary.Presence ->
+                | LifecycleDiagnostics.Diagnostic.MultipleSessionsObserved multiple when
+                    multiple.Boundary = LifecycleDiagnostics.ObservationBoundary.Presence
+                    ->
                     Some multiple
                 | _ -> None)
             |> Array.last
@@ -302,247 +213,107 @@ type PresenceAcknowledgementTests() =
                        LifecycleDiagnostics.PresenceKind.Reconnected |]
                 )
             )
-            Assert.That(
-                sameSession.ProcessIdentities,
-                Is.EquivalentTo([ first; second ])
-            )
+            Assert.That(sameSession.ProcessIdentities, Is.EquivalentTo([ first; second ]))
             Assert.That(
                 sameSession.TerminalSessionIds,
                 Is.EquivalentTo([ firstTerminal; secondTerminal ])
             )
             Assert.That(
                 multipleSessions.SessionIds,
-                Is.EquivalentTo(
-                    [ SessionId "shared-session"
-                      SessionId "independent-session" ]
-                )
+                Is.EquivalentTo([ SessionId "shared-session"; SessionId "independent-session" ])
             ))
 
     [<Test>]
-    member _.``presence returns explicit resolver and store failures``() =
-        let missingResolver =
-            ProcessIdentityResolver.create (fun _ -> Ok None)
+    member _.``an unresolvable process is a terminal negative acknowledgement``() =
+        let missingResolver = ProcessIdentityResolver.create (fun _ -> Ok None)
+        let at = ts "2026-09-04T10:00:00Z"
 
         withService missingResolver (fun (service, store, _) ->
-            match
-                present
-                    service
-                    4201
-                    "missing-process"
-                    None
-                    (ts "2026-09-04T10:00:00Z")
-            with
+            match present service 4201 "missing-process" None at with
             | PresenceAcknowledge.NotRecorded(false, _) ->
-                Assert.That(
-                    store.LoadRecentInstances(
-                        ts "2026-09-04T10:00:00Z"
-                    ),
-                    Is.Empty
-                )
-            | outcome ->
-                Assert.Fail $"Expected terminal missing-process acknowledgement, got {outcome}")
+                Assert.That(store.LoadRecentInstances at, Is.Empty)
+            | outcome -> Assert.Fail $"Expected terminal missing-process acknowledgement, got {outcome}")
 
+    [<Test>]
+    member _.``a failing resolver is a retryable negative acknowledgement``() =
         let failingResolver =
-            ProcessIdentityResolver.create (fun _ ->
-                Error "simulated resolver failure")
+            ProcessIdentityResolver.create (fun _ -> Error "simulated resolver failure")
 
         withService failingResolver (fun (service, _, _) ->
-            match
-                present
-                    service
-                    4202
-                    "resolver-failure"
-                    None
-                    (ts "2026-09-04T10:00:00Z")
-            with
+            match present service 4202 "resolver-failure" None (ts "2026-09-04T10:00:00Z") with
             | PresenceAcknowledge.NotRecorded(true, _) -> ()
-            | outcome ->
-                Assert.Fail $"Expected retryable resolver acknowledgement, got {outcome}")
+            | outcome -> Assert.Fail $"Expected retryable resolver acknowledgement, got {outcome}")
 
-        let directory =
-            Path.Combine(
-                Path.GetTempPath(),
-                $"treemon-presence-failure-{Guid.NewGuid():N}"
-            )
-
+    [<Test>]
+    member _.``a failing store is a retryable negative acknowledgement``() =
+        let directory = uniquePath "presence-failure"
         Directory.CreateDirectory directory |> ignore
-        let dbPath = Path.Combine(directory, "activity.db")
         // Test fault injection is mutable because connection creation is the impure boundary under test.
         let mutable failConnections = false
 
         try
             use store =
                 new SessionActivityStore(
-                    dbPath,
+                    Path.Combine(directory, "activity.db"),
                     connectionOpened =
-                        (fun _ ->
-                            if failConnections then
-                                failwith "simulated store failure")
+                        (fun _ -> if failConnections then failwith "simulated store failure")
                 )
 
             let identity = exactIdentity 4203 5203L
-            let resolver =
-                ProcessIdentityResolver.create (fun _ ->
-                    Ok(Some identity))
-            let scheduler = SchedulerState.createAgent ()
-
-            use service =
-                new SessionActivityService(
-                    store,
-                    scheduler,
-                    resolver
-                )
-
+            let resolver = ProcessIdentityResolver.create (fun _ -> Ok(Some identity))
+            use service = new SessionActivityService(store, SchedulerState.createAgent (), resolver)
             failConnections <- true
 
-            match
-                present
-                    service
-                    4203
-                    "store-failure"
-                    None
-                    (ts "2026-09-04T10:00:00Z")
-            with
+            match present service 4203 "store-failure" None (ts "2026-09-04T10:00:00Z") with
             | PresenceAcknowledge.NotRecorded(true, _) -> ()
-            | outcome ->
-                Assert.Fail $"Expected retryable store acknowledgement, got {outcome}"
+            | outcome -> Assert.Fail $"Expected retryable store acknowledgement, got {outcome}"
         finally
-            try
-                Directory.Delete(directory, recursive = true)
-            with _ ->
-                ()
+            try Directory.Delete(directory, recursive = true) with _ -> ()
 
     [<Test>]
     member _.``presence returns an explicit negative acknowledgement after mailbox shutdown``() =
-        let directory =
-            Path.Combine(
-                Path.GetTempPath(),
-                $"treemon-presence-stopped-{Guid.NewGuid():N}"
-            )
-
+        let directory = uniquePath "presence-stopped"
         Directory.CreateDirectory directory |> ignore
 
         try
-            use store =
-                new SessionActivityStore(
-                    Path.Combine(directory, "activity.db")
-                )
-
+            use store = new SessionActivityStore(Path.Combine(directory, "activity.db"))
             let identity = exactIdentity 4204 5204L
-            let resolver =
-                ProcessIdentityResolver.create (fun _ ->
-                    Ok(Some identity))
-            let scheduler = SchedulerState.createAgent ()
-
-            let service =
-                new SessionActivityService(
-                    store,
-                    scheduler,
-                    resolver
-                )
-
+            let resolver = ProcessIdentityResolver.create (fun _ -> Ok(Some identity))
+            let service = new SessionActivityService(store, SchedulerState.createAgent (), resolver)
             (service :> IDisposable).Dispose()
 
-            match
-                present
-                    service
-                    4204
-                    "stopped-service"
-                    None
-                    (ts "2026-09-04T10:00:00Z")
-            with
+            match present service 4204 "stopped-service" None (ts "2026-09-04T10:00:00Z") with
             | PresenceAcknowledge.NotRecorded(true, _) -> ()
-            | outcome ->
-                Assert.Fail $"Expected stopped-mailbox acknowledgement, got {outcome}"
+            | outcome -> Assert.Fail $"Expected stopped-mailbox acknowledgement, got {outcome}"
         finally
-            try
-                Directory.Delete(directory, recursive = true)
-            with _ ->
-                ()
+            try Directory.Delete(directory, recursive = true) with _ -> ()
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type ExactInstanceIsolationTests() =
+type CloseProcessIsolationTests() =
 
     [<Test>]
-    member _.``same durable session keeps exact status idempotency closure and PID reuse isolated``() =
+    member _.``CloseProcess closes only the selected exact identity and rejects its reopening while a reused PID starts a fresh row``() =
         let first = exactIdentity 4301 5301L
         let second = exactIdentity 4302 5302L
         let reused = exactIdentity 4301 6301L
         // The running-process table is mutable because this test exercises PID reuse over time.
-        let mutable running =
-            Map.ofList
-                [ 4301, first
-                  4302, second ]
+        let mutable running = Map.ofList [ 4301, first; 4302, second ]
 
         let resolver =
-            ProcessIdentityResolver.create (fun processId ->
-                Ok(Map.tryFind processId running))
+            ProcessIdentityResolver.create (fun processId -> Ok(Map.tryFind processId running))
 
-        withService resolver (fun (service, store, dbPath) ->
-            let terminalA =
-                TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            let terminalB =
-                TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        withService resolver (fun (service, store, _dbPath) ->
+            let terminalA = TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            let terminalB = TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             let at = ts "2026-09-04T10:00:00Z"
 
-            present service 4301 "same-session" (Some terminalA) at
-            |> requirePresence
-            |> ignore
-
-            present service 4302 "same-session" (Some terminalB) at
-            |> requirePresence
-            |> ignore
-
-            service.Submit(
-                report
-                    4301
-                    "same-session"
-                    (Some terminalA)
-                    "same-event"
-                    (at.AddSeconds(1.0))
-                    TurnStarted
-            )
-
-            service.Submit(
-                report
-                    4302
-                    "same-session"
-                    (Some terminalB)
-                    "same-event"
-                    (at.AddSeconds(2.0))
-                    WentIdle
-            )
-
-            let exact = service.ExactSnapshot()
-
-            Assert.Multiple(fun () ->
-                Assert.That(exact.Count, Is.EqualTo 2)
-                Assert.That(
-                    exact[first].Status.Status,
-                    Is.EqualTo SessionLevelStatus.Working
-                )
-                Assert.That(
-                    exact[second].Status.Status,
-                    Is.EqualTo SessionLevelStatus.Idle
-                )
-                Assert.That(
-                    SqliteTestDatabase.scalarInt
-                        dbPath
-                        "SELECT count(*) FROM activity_events
-                         WHERE event_id = 'same-event';",
-                    Is.EqualTo 2,
-                    "event idempotency is scoped to exact identity"
-                )
-                Assert.That(
-                    service.ExactSnapshot().Count,
-                    Is.EqualTo 2,
-                    "application-visible exact state must not collapse duplicate durable SessionIds"
-                ))
+            present service 4301 "same-session" (Some terminalA) at |> requirePresence |> ignore
+            present service 4302 "same-session" (Some terminalB) at |> requirePresence |> ignore
 
             Assert.That(
-                service.CloseProcess(first, at.AddSeconds(3.0)),
+                service.CloseProcess(first, at.AddSeconds(1.0)),
                 Is.EqualTo ClosureAcknowledge.Closed
             )
 
@@ -555,13 +326,7 @@ type ExactInstanceIsolationTests() =
             let secondBefore = store.InstanceByIdentity second |> Option.get
 
             service.Submit(
-                report
-                    4301
-                    "same-session"
-                    (Some terminalA)
-                    "late-heartbeat"
-                    (at.AddSeconds(4.0))
-                    Heartbeat
+                report 4301 "same-session" (Some terminalA) "late-heartbeat" (at.AddSeconds(2.0)) Heartbeat
             )
 
             service.ExactSnapshot() |> ignore
@@ -569,209 +334,148 @@ type ExactInstanceIsolationTests() =
             let secondAfter = store.InstanceByIdentity second |> Option.get
 
             Assert.Multiple(fun () ->
-                Assert.That(closedProcesses, Does.Contain first)
-                Assert.That(closedProcesses, Does.Not.Contain second)
-                Assert.That(closedAfter.ClosedAt, Is.EqualTo closed.ClosedAt)
-                Assert.That(closedAfter.LastSeen, Is.EqualTo closed.LastSeen)
-                Assert.That(secondAfter, Is.EqualTo secondBefore))
+                Assert.That(closedProcesses, Does.Contain first, "the closed identity must be reported closed")
+                Assert.That(closedProcesses, Does.Not.Contain second, "the sibling identity must remain open")
+                Assert.That(closedAfter.ClosedAt, Is.EqualTo closed.ClosedAt, "a late heartbeat must not revive ClosedAt")
+                Assert.That(closedAfter.LastSeen, Is.EqualTo closed.LastSeen, "a late heartbeat must not revive LastSeen")
+                Assert.That(secondAfter, Is.EqualTo secondBefore, "closing one identity must not touch its sibling"))
 
-            match
-                present
-                    service
-                    4301
-                    "same-session"
-                    (Some terminalA)
-                    (at.AddSeconds(5.0))
-            with
+            match present service 4301 "same-session" (Some terminalA) (at.AddSeconds(3.0)) with
             | PresenceAcknowledge.NotRecorded(false, _) -> ()
-            | outcome ->
-                Assert.Fail $"A closed identity must not re-open, got {outcome}"
+            | outcome -> Assert.Fail $"A closed identity must not re-open, got {outcome}"
 
             running <- running |> Map.add 4301 reused
 
-            service.Submit(
-                report
-                    4301
-                    "same-session"
-                    (Some terminalA)
-                    "reused-heartbeat"
-                    (at.AddSeconds(6.0))
-                    Heartbeat
-            )
-
-            service.ExactSnapshot() |> ignore
-            Assert.That(store.InstanceByIdentity reused, Is.EqualTo None)
-
-            present
-                service
-                4301
-                "same-session"
-                (Some terminalA)
-                (at.AddSeconds(7.0))
+            present service 4301 "same-session" (Some terminalA) (at.AddSeconds(4.0))
             |> requirePresence
             |> ignore
 
             Assert.Multiple(fun () ->
                 Assert.That(
-                    store.InstanceByIdentity first
-                    |> Option.bind _.ClosedAt
-                    |> Option.isSome,
-                    Is.True
+                    store.InstanceByIdentity first |> Option.bind _.ClosedAt |> Option.isSome,
+                    Is.True,
+                    "the original closed identity must stay closed"
                 )
                 Assert.That(
-                    store.InstanceByIdentity reused
-                    |> Option.bind _.ClosedAt
-                    |> Option.isNone,
-                    Is.True
+                    store.InstanceByIdentity reused |> Option.bind _.ClosedAt |> Option.isNone,
+                    Is.True,
+                    "PID reuse with a new start-ticks identity must open a fresh row"
                 )))
+
+/// One startup-reconciliation case: a durable terminal-owned row that the server did not see
+/// re-present, resolved against a live process (or not) at a query time inside or past the open
+/// window.
+type PendingReconciliationScenario =
+    { Name: string
+      ProcessId: int
+      QueryAt: string
+      AuthoritativeOrigin: bool
+      ProcessStillAlive: bool
+      ExpectClosed: bool }
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type StartupReconciliationTests() =
 
+    static member PendingCases: TestCaseData seq =
+        [ { Name = "a proven-dead process closes its pending identity"
+            ProcessId = 4402
+            QueryAt = "2026-09-04T10:00:00Z"
+            AuthoritativeOrigin = true
+            ProcessStillAlive = false
+            ExpectClosed = true }
+          { Name = "a missing terminal origin drops the pending identity without closing it"
+            ProcessId = 4403
+            QueryAt = "2026-09-04T10:00:00Z"
+            AuthoritativeOrigin = false
+            ProcessStillAlive = true
+            ExpectClosed = false }
+          { Name = "an expired open window drops the pending identity without closing it"
+            ProcessId = 4404
+            QueryAt = "2026-09-04T10:03:00Z"
+            AuthoritativeOrigin = true
+            ProcessStillAlive = true
+            ExpectClosed = false } ]
+        |> Seq.map (fun scenario -> TestCaseData(scenario).SetName(scenario.Name))
+
     [<Test>]
     member _.``recent terminal-owned identity stays pending until the same identity re-presents``() =
         let now = ts "2026-09-04T10:00:00Z"
         let identity = exactIdentity 4401 5401L
-        let terminal =
-            TerminalSessionId "cccccccccccccccccccccccccccccccc"
-        let resolver =
-            ProcessIdentityResolver.create (fun _ ->
-                Ok(Some identity))
+        let owningTerminal = terminal "cccccccccccccccccccccccccccccccc"
+        let resolver = ProcessIdentityResolver.create (fun _ -> Ok(Some identity))
 
         withService resolver (fun (service, store, _) ->
             store.UpsertInstance(
-                storedInstance
-                    identity
-                    "pending-session"
-                    terminal
-                    (now.AddMinutes(-1.0))
+                storedInstance identity "pending-session" owningTerminal (now.AddMinutes(-1.0))
             )
             |> ignore
 
             service.StartAt now
-
-            let epoch, instances, pending =
-                queryAt service now (Set.singleton terminal)
+            let epoch, instances, pending = queryAt service now (Set.singleton owningTerminal)
 
             let snapshot =
-                ownedSessionSnapshot
-                    now
-                    (Set.singleton terminal)
-                    (epoch, instances, pending)
+                ownedSessionSnapshot now (Set.singleton owningTerminal) (epoch, instances, pending)
 
             Assert.Multiple(fun () ->
                 Assert.That(pending, Is.EqualTo(Set.singleton identity))
                 Assert.That(
                     replacementSessionPlan
                         (fun _ -> Some CopilotCli)
-                        [ { TerminalHostReplacement.ReplacementTerminal.TerminalSessionId =
-                                terminal
+                        [ { TerminalHostReplacement.ReplacementTerminal.TerminalSessionId = owningTerminal
                             WorktreePath = "C:/wt/exact" } ]
                         snapshot,
-                    Is.EqualTo
-                        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                    Is.EqualTo TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
                 ))
 
-            present
-                service
-                4401
-                "pending-session"
-                (Some terminal)
-                (now.AddSeconds(1.0))
+            present service 4401 "pending-session" (Some owningTerminal) (now.AddSeconds(1.0))
             |> requirePresence
             |> ignore
 
             let _, _, afterPresence =
-                queryAt
-                    service
-                    (now.AddSeconds(1.0))
-                    (Set.singleton terminal)
+                queryAt service (now.AddSeconds(1.0)) (Set.singleton owningTerminal)
 
             Assert.That(afterPresence, Is.Empty))
 
-    [<Test>]
-    member _.``pending reconciliation clears on proven death missing origin and open-window expiry``() =
-        let runCase
-            processId
-            terminal
-            queryAtTime
-            authoritativeOrigins
-            resolvedIdentity
-            expectClosed
-            =
-            let now = ts "2026-09-04T10:00:00Z"
-            let identity = exactIdentity processId (int64 processId + 10_000L)
+    [<TestCaseSource("PendingCases")>]
+    member _.``pending reconciliation clears without reopening a session``
+        (scenario: PendingReconciliationScenario)
+        =
+        let now = ts "2026-09-04T10:00:00Z"
+        let queryTime = ts scenario.QueryAt
+        let identity = exactIdentity scenario.ProcessId (int64 scenario.ProcessId + 10_000L)
+        let owningTerminal = terminal (string scenario.ProcessId)
 
-            let resolver =
-                ProcessIdentityResolver.create (fun _ ->
-                    Ok resolvedIdentity)
+        let resolver =
+            ProcessIdentityResolver.create (fun _ ->
+                Ok(if scenario.ProcessStillAlive then Some identity else None))
 
-            withService resolver (fun (service, store, _) ->
-                store.UpsertInstance(
-                    storedInstance
-                        identity
-                        $"pending-{processId}"
-                        terminal
-                        (now.AddMinutes(-1.0))
-                )
-                |> ignore
+        let authoritativeOrigins =
+            if scenario.AuthoritativeOrigin then Set.singleton owningTerminal else Set.empty
 
-                service.StartAt now
-                let activity =
-                    queryAt service queryAtTime authoritativeOrigins
-                let _, _, pending = activity
-                let snapshot =
-                    ownedSessionSnapshot
-                        queryAtTime
-                        authoritativeOrigins
-                        activity
+        withService resolver (fun (service, store, _) ->
+            store.UpsertInstance(
+                storedInstance
+                    identity
+                    $"pending-{scenario.ProcessId}"
+                    owningTerminal
+                    (now.AddMinutes(-1.0))
+            )
+            |> ignore
 
-                Assert.Multiple(fun () ->
-                    Assert.That(pending, Is.Empty)
-                    Assert.That(snapshot.OpenSessions, Is.Empty)
-                    Assert.That(
-                        store.InstanceByIdentity identity
-                        |> Option.bind _.ClosedAt
-                        |> Option.isSome,
-                        Is.EqualTo expectClosed
-                    )))
+            service.StartAt now
+            let activity = queryAt service queryTime authoritativeOrigins
+            let _, _, pending = activity
+            let snapshot = ownedSessionSnapshot queryTime authoritativeOrigins activity
 
-        let deadTerminal =
-            TerminalSessionId "dddddddddddddddddddddddddddddddd"
-
-        runCase
-            4402
-            deadTerminal
-            (ts "2026-09-04T10:00:00Z")
-            (Set.singleton deadTerminal)
-            None
-            true
-
-        let missingTerminal =
-            TerminalSessionId "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-        let missingIdentity = exactIdentity 4403 14_403L
-
-        runCase
-            4403
-            missingTerminal
-            (ts "2026-09-04T10:00:00Z")
-            Set.empty
-            (Some missingIdentity)
-            false
-
-        let expiredTerminal =
-            TerminalSessionId "ffffffffffffffffffffffffffffffff"
-        let expiredIdentity = exactIdentity 4404 14_404L
-
-        runCase
-            4404
-            expiredTerminal
-            (ts "2026-09-04T10:03:00Z")
-            (Set.singleton expiredTerminal)
-            (Some expiredIdentity)
-            false
+            Assert.Multiple(fun () ->
+                Assert.That(pending, Is.Empty)
+                Assert.That(snapshot.OpenSessions, Is.Empty)
+                Assert.That(
+                    store.InstanceByIdentity identity |> Option.bind _.ClosedAt |> Option.isSome,
+                    Is.EqualTo scenario.ExpectClosed
+                )))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -794,19 +498,12 @@ type SharedProcessResolverTests() =
                 | _ -> Ok None)
 
         withService resolver (fun (service, _, _) ->
-            present
-                service
-                4501
-                "resolver-session"
-                None
-                (ts "2026-09-04T10:00:00Z")
+            present service 4501 "resolver-session" None (ts "2026-09-04T10:00:00Z")
             |> requirePresence
             |> ignore
 
             let config =
-                TerminalHostClient.defaultConfigWithProcessIdentityResolver
-                    resolver
-                    []
+                TerminalHostClient.defaultConfigWithProcessIdentityResolver resolver []
 
             let manifest: TerminalHostManifest.DiscoveryManifest =
                 { Pid = 4502
@@ -818,14 +515,9 @@ type SharedProcessResolverTests() =
                   StagedExecutableVersion = None }
 
             Assert.Multiple(fun () ->
-                match
-                    TerminalHostManifest.processIdentityMatches
-                        config
-                        manifest
-                with
+                match TerminalHostManifest.processIdentityMatches config manifest with
                 | Ok true -> ()
-                | outcome ->
-                    Assert.Fail $"Expected exact live host identity, got {outcome}"
+                | outcome -> Assert.Fail $"Expected exact live host identity, got {outcome}"
 
                 Assert.That(calls, Does.Contain 4501)
                 Assert.That(calls, Does.Contain 4502)))
@@ -834,19 +526,31 @@ type SharedProcessResolverTests() =
     member _.``exact liveness rejects a reused PID``() =
         let original = exactIdentity 4503 5503L
         let replacement = exactIdentity 4503 6503L
-        let resolver =
-            ProcessIdentityResolver.create (fun _ ->
-                Ok(Some replacement))
+        let resolver = ProcessIdentityResolver.create (fun _ -> Ok(Some replacement))
 
         match ProcessIdentityResolver.isAlive resolver original with
         | Ok false -> ()
-        | outcome ->
-            Assert.Fail $"Expected reused PID to be rejected, got {outcome}"
+        | outcome -> Assert.Fail $"Expected reused PID to be rejected, got {outcome}"
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type ExactFoldAndWireTests() =
+
+    let wireRequest parentProcessId kind : SessionActivityRequest =
+        { parentProcessId = parentProcessId
+          sessionId = "wire-session"
+          terminalSessionId = null
+          worktreePath = "C:/wt/exact"
+          provider = "copilot_cli"
+          eventId = "wire-event"
+          occurredAt = "2026-09-04T10:00:00Z"
+          kind = kind
+          message = Unchecked.defaultof<MessageDto>
+          skillName = null
+          toolCallId = null
+          currentTokens = 0
+          tokenLimit = 0 }
 
     [<Test>]
     member _.``presence and closure do not mutate the conversation fold``() =
@@ -862,55 +566,15 @@ type ExactFoldAndWireTests() =
     [<TestCase("session_present")>]
     [<TestCase("session_closed")>]
     member _.``wire parses exact instance state events``(kind: string) =
-        let request: SessionActivityRequest =
-            { parentProcessId = 4601
-              sessionId = "wire-session"
-              terminalSessionId = null
-              worktreePath = "C:/wt/exact"
-              provider = "copilot_cli"
-              eventId = "wire-event"
-              occurredAt = "2026-09-04T10:00:00Z"
-              kind = kind
-              message = Unchecked.defaultof<MessageDto>
-              skillName = null
-              toolCallId = null
-              currentTokens = 0
-              tokenLimit = 0 }
-
-        let parsed =
-            parseReport
-                (ts "2026-09-04T10:01:00Z")
-                request
+        let parsed = parseReport (ts "2026-09-04T10:01:00Z") (wireRequest 4601 kind)
 
         match kind, parsed with
-        | "session_present", Ok report ->
-            Assert.That(report.Event, Is.EqualTo SessionPresent)
-        | "session_closed", Ok report ->
-            Assert.That(report.Event, Is.EqualTo SessionClosed)
+        | "session_present", Ok report -> Assert.That(report.Event, Is.EqualTo SessionPresent)
+        | "session_closed", Ok report -> Assert.That(report.Event, Is.EqualTo SessionClosed)
         | _, outcome -> Assert.Fail $"Unexpected parse outcome: {outcome}"
 
     [<Test>]
     member _.``wire rejects PID-less reporters``() =
-        let request: SessionActivityRequest =
-            { parentProcessId = 0
-              sessionId = "wire-session"
-              terminalSessionId = null
-              worktreePath = "C:/wt/exact"
-              provider = "copilot_cli"
-              eventId = "wire-event"
-              occurredAt = "2026-09-04T10:00:00Z"
-              kind = "session_present"
-              message = Unchecked.defaultof<MessageDto>
-              skillName = null
-              toolCallId = null
-              currentTokens = 0
-              tokenLimit = 0 }
-
-        match
-            parseReport
-                (ts "2026-09-04T10:01:00Z")
-                request
-        with
+        match parseReport (ts "2026-09-04T10:01:00Z") (wireRequest 0 "session_present") with
         | Error "missing or invalid parentProcessId" -> ()
-        | outcome ->
-            Assert.Fail $"Expected PID-less rejection, got {outcome}"
+        | outcome -> Assert.Fail $"Expected PID-less rejection, got {outcome}"

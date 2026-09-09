@@ -88,9 +88,6 @@ module TerminalRegistry =
             return result
         }
 
-    let private stopAndClose sessionId (dataPlane: TerminalDataPlane) (terminalProcess: TerminalProcess) =
-        closeTerminal sessionId (Some dataPlane) terminalProcess
-
     let private cleanupFailureMessage =
         function
         | ProcessPreparationFailed error
@@ -99,44 +96,36 @@ module TerminalRegistry =
     let private pendingCleanupMessage startupError cleanupError =
         $"{startupError}; terminal cleanup remains pending: {cleanupError}"
 
+    let private closeCleanupBatch (cleanups: Map<string, PendingTerminalCleanup>) =
+        cleanups
+        |> Map.toList
+        |> List.map (fun (sessionId, cleanup) ->
+            async {
+                let! result = closeTerminal sessionId cleanup.DataPlane cleanup.Process
+                return sessionId, cleanup, result
+            })
+        |> fun work -> Async.Parallel(work, maxDegreeOfParallelism = ShutdownParallelism)
+
     let private closeAll (entries: Map<string, HostedTerminal>) =
         async {
             let! results =
                 entries
-                |> Map.toList
-                |> List.map (fun (key, terminal) ->
-                    async {
-                        let! result =
-                            stopAndClose
-                                key
-                                terminal.DataPlane
-                                terminal.Process
+                |> Map.map (fun _ terminal ->
+                    { Process = terminal.Process
+                      DataPlane = Some terminal.DataPlane })
+                |> closeCleanupBatch
 
-                        return key, result })
-                |> fun work -> Async.Parallel(work, maxDegreeOfParallelism = ShutdownParallelism)
             return
-                results |> Array.choose (function
-                    | key, Ok() -> Some key
-                    | _, Error _ -> None)
+                results
+                |> Array.choose (function
+                    | key, _, Ok() -> Some key
+                    | _, _, Error _ -> None)
                 |> Set.ofArray
         }
 
     let private retryPendingCleanups (state: RegistryState) =
         async {
-            let! results =
-                state.PendingCleanups
-                |> Map.toList
-                |> List.map (fun (sessionId, cleanup: PendingTerminalCleanup) ->
-                    async {
-                        let! result =
-                            closeTerminal
-                                sessionId
-                                cleanup.DataPlane
-                                cleanup.Process
-
-                        return sessionId, cleanup, result
-                    })
-                |> fun work -> Async.Parallel(work, maxDegreeOfParallelism = ShutdownParallelism)
+            let! results = closeCleanupBatch state.PendingCleanups
 
             let remaining =
                 results
@@ -150,12 +139,7 @@ module TerminalRegistry =
 
     let private removeAfterClose (state: RegistryState) (key, terminal: HostedTerminal) =
         async {
-            match!
-                stopAndClose
-                    key
-                    terminal.DataPlane
-                    terminal.Process
-            with
+            match! closeTerminal key (Some terminal.DataPlane) terminal.Process with
             | Error _ ->
                 return state
             | Ok() ->

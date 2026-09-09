@@ -11,15 +11,15 @@ open Server.SessionActivity
 open Server.SessionActivityStoreSchema
 open Server.SqliteStorage
 
-// SQLite is the durable single-writer mirror behind exact process-instance activity. Legacy
-// session_status rows are copied once into migration-only retained_sessions and the legacy table is
-// then retired. Runtime writes target only session_instances and process-scoped activity_events.
+// SQLite is the durable single-writer mirror behind exact process-instance activity. Pre-upgrade
+// session rows contribute only their durable identity to resume_sessions so explicit Resume keeps
+// working; runtime writes target session_instances and dedupe-only activity_events.
 
 // --- Row shapes -------------------------------------------------------------------------------
 
-/// One durable conversation representative used only for card/footer history and automatic
-/// fallback identity when no physical process is open. It deliberately carries no liveness,
-/// terminal origin, or process identity, so it cannot be mistaken for a live address.
+/// The greatest-activity exact instance of one worktree, projected for card/footer history and for
+/// automatic fallback identity when no physical process is open. It deliberately carries no
+/// liveness, terminal origin, or process identity, so it cannot be mistaken for a live address.
 type RetainedSession =
     { SessionId: SessionId
       WorktreePath: WorktreePath
@@ -64,16 +64,11 @@ module StoredInstance =
         |> List.sortByDescending activityOrderKey
         |> List.tryHead
 
-/// One accepted history-bearing event. Event identity is scoped to the exact producer process.
+/// One accepted history-bearing event, reduced to its deduplication key. Event identity is scoped
+/// to the exact producer process; folded state lives on `session_instances`.
 type ActivityEventRow =
     { ProcessIdentity: ProcessIdentity
       EventId: EventId
-      SessionId: SessionId
-      WorktreePath: WorktreePath
-      Provider: CodingToolProvider
-      Kind: string
-      Status: SessionLevelStatus
-      Skill: string option
       Ts: DateTimeOffset }
 
 // --- Serialization ----------------------------------------------------------------------------
@@ -318,10 +313,6 @@ context_current_tokens, context_token_limit, context_usage_at,
 awaiting_user_since, user_input_completed_at
 """
 
-let private representativeColumns =
-    retainedColumns.Trim()
-    + ", process_id, process_start_ticks"
-
 let private upsertInstanceSql =
     """
 INSERT INTO session_instances
@@ -365,71 +356,12 @@ ON CONFLICT(process_id, process_start_ticks) DO UPDATE SET
     closed_at = COALESCE(session_instances.closed_at, excluded.closed_at);
 """
 
-let private upsertWorktreeRepresentativeSql =
-    $"""
-INSERT INTO worktree_representatives ({representativeColumns})
-SELECT {representativeColumns}
-FROM session_instances
-WHERE process_id = $processId
-  AND process_start_ticks = $processStartTicks
-ON CONFLICT(worktree_path) DO UPDATE SET
-    session_id = excluded.session_id,
-    provider = excluded.provider,
-    status = excluded.status,
-    current_skill = excluded.current_skill,
-    last_user_msg = excluded.last_user_msg,
-    last_user_ts = excluded.last_user_ts,
-    last_asst_msg = excluded.last_asst_msg,
-    last_asst_ts = excluded.last_asst_ts,
-    intent_text = excluded.intent_text,
-    intent_ts = excluded.intent_ts,
-    title_text = excluded.title_text,
-    title_ts = excluded.title_ts,
-    updated_at = excluded.updated_at,
-    context_current_tokens = excluded.context_current_tokens,
-    context_token_limit = excluded.context_token_limit,
-    context_usage_at = excluded.context_usage_at,
-    awaiting_user_since = excluded.awaiting_user_since,
-    user_input_completed_at = excluded.user_input_completed_at,
-    process_id = excluded.process_id,
-    process_start_ticks = excluded.process_start_ticks
-WHERE excluded.updated_at > worktree_representatives.updated_at
-   OR (
-       excluded.updated_at = worktree_representatives.updated_at
-       AND excluded.session_id > worktree_representatives.session_id
-   )
-   OR (
-       excluded.updated_at = worktree_representatives.updated_at
-       AND excluded.session_id = worktree_representatives.session_id
-       AND excluded.process_id > worktree_representatives.process_id
-   )
-   OR (
-       excluded.updated_at = worktree_representatives.updated_at
-       AND excluded.session_id = worktree_representatives.session_id
-       AND excluded.process_id = worktree_representatives.process_id
-       AND excluded.process_start_ticks >= worktree_representatives.process_start_ticks
-   );
-"""
-
 let private appendSql =
     """
 INSERT OR IGNORE INTO activity_events
-    (process_id, process_start_ticks, event_id, session_id, worktree_path,
-     provider, kind, status, skill, ts)
+    (process_id, process_start_ticks, event_id, ts)
 VALUES
-    ($processId, $processStartTicks, $eventId, $sessionId, $worktreePath,
-     $provider, $kind, $status, $skill, $timestamp);
-"""
-
-let private heartbeatSql =
-    """
-UPDATE session_instances
-SET last_seen =
-        CASE WHEN last_seen < $lastSeen THEN $lastSeen ELSE last_seen END,
-    terminal_session_id = COALESCE($terminalSessionId, terminal_session_id)
-WHERE process_id = $processId
-  AND process_start_ticks = $processStartTicks
-  AND closed_at IS NULL;
+    ($processId, $processStartTicks, $eventId, $timestamp);
 """
 
 let private closeSql =
@@ -469,35 +401,15 @@ ORDER BY last_seen, process_id, process_start_ticks;
 let private retainedByWorktreeSql =
     $"""
 SELECT {retainedColumns}
-FROM worktree_representatives;
-"""
-
-let private rebuildWorktreeRepresentativesSql =
-    $"""
-DELETE FROM worktree_representatives;
-
-WITH candidates AS (
-    SELECT {representativeColumns}
-    FROM session_instances
-
-    UNION ALL
-
+FROM (
     SELECT {retainedColumns},
-           0 AS process_id, 0 AS process_start_ticks
-    FROM retained_sessions
-),
-ranked AS (
-    SELECT *,
            ROW_NUMBER() OVER (
                PARTITION BY worktree_path
                ORDER BY updated_at DESC, session_id DESC,
                         process_id DESC, process_start_ticks DESC
            ) AS activity_rank
-    FROM candidates
+    FROM session_instances
 )
-INSERT INTO worktree_representatives ({representativeColumns})
-SELECT {representativeColumns}
-FROM ranked
 WHERE activity_rank = 1;
 """
 
@@ -512,7 +424,7 @@ FROM (
     UNION ALL
 
     SELECT session_id, updated_at, 0 AS process_id, 0 AS process_start_ticks
-    FROM retained_sessions
+    FROM resume_sessions
     WHERE worktree_path = $worktreePath
 )
 ORDER BY updated_at DESC, session_id DESC, process_id DESC, process_start_ticks DESC
@@ -528,38 +440,15 @@ WHERE terminal_session_id IS NOT NULL;
 
 let private pruneSql =
     """
-WITH retained_event_baselines AS (
-    SELECT event.rowid
-    FROM activity_events AS event
-    JOIN session_instances AS instance
-      ON instance.process_id = event.process_id
-     AND instance.process_start_ticks = event.process_start_ticks
-    WHERE event.ts < $cutoff
-      AND (
-          instance.updated_at >= $cutoff
-          OR instance.last_seen >= $cutoff
-          OR instance.closed_at >= $cutoff
-      )
-      AND event.rowid = (
-          SELECT baseline.rowid
-          FROM activity_events AS baseline
-          WHERE baseline.process_id = event.process_id
-            AND baseline.process_start_ticks = event.process_start_ticks
-            AND baseline.ts < $cutoff
-          ORDER BY baseline.ts DESC, baseline.rowid DESC
-          LIMIT 1
-      )
-)
 DELETE FROM activity_events
-WHERE ts < $cutoff
-  AND rowid NOT IN (SELECT rowid FROM retained_event_baselines);
+WHERE ts < $cutoff;
 
 DELETE FROM session_instances
 WHERE updated_at < $cutoff
   AND last_seen < $cutoff
   AND (closed_at IS NULL OR closed_at < $cutoff);
 
-DELETE FROM retained_sessions
+DELETE FROM resume_sessions
 WHERE updated_at < $cutoff;
 """
 
@@ -629,12 +518,6 @@ let private bindInstance (command: SqliteCommand) (stored: StoredInstance) =
 let private bindEvent (command: SqliteCommand) (row: ActivityEventRow) =
     bindIdentity command row.ProcessIdentity
     command.Parameters.AddWithValue("$eventId", EventId.value row.EventId) |> ignore
-    command.Parameters.AddWithValue("$sessionId", SessionId.value row.SessionId) |> ignore
-    command.Parameters.AddWithValue("$worktreePath", WorktreePath.value row.WorktreePath) |> ignore
-    command.Parameters.AddWithValue("$provider", providerText row.Provider) |> ignore
-    command.Parameters.AddWithValue("$kind", row.Kind) |> ignore
-    command.Parameters.AddWithValue("$status", statusText row.Status) |> ignore
-    command.Parameters.AddWithValue("$skill", optToDb row.Skill) |> ignore
     command.Parameters.AddWithValue("$timestamp", isoUtc row.Ts) |> ignore
 
 let private readInstanceByIdentity
@@ -658,26 +541,6 @@ let private upsertInstance
     transaction |> Option.iter (fun value -> command.Transaction <- value)
     command.CommandText <- upsertInstanceSql
     bindInstance command stored
-    command.ExecuteNonQuery() |> ignore
-
-let private upsertWorktreeRepresentative
-    (connection: SqliteConnection)
-    (transaction: SqliteTransaction option)
-    identity
-    =
-    use command = connection.CreateCommand()
-    transaction |> Option.iter (fun value -> command.Transaction <- value)
-    command.CommandText <- upsertWorktreeRepresentativeSql
-    bindIdentity command identity
-    command.ExecuteNonQuery() |> ignore
-
-let private rebuildWorktreeRepresentatives
-    (connection: SqliteConnection)
-    (transaction: SqliteTransaction option)
-    =
-    use command = connection.CreateCommand()
-    transaction |> Option.iter (fun value -> command.Transaction <- value)
-    command.CommandText <- rebuildWorktreeRepresentativesSql
     command.ExecuteNonQuery() |> ignore
 
 // --- Store ------------------------------------------------------------------------------------
@@ -723,9 +586,6 @@ type SessionActivityStore
 
         try
             initializeSchema connection
-            use transaction = connection.BeginTransaction()
-            rebuildWorktreeRepresentatives connection (Some transaction)
-            transaction.Commit()
             connection
         with _ ->
             connection.Dispose()
@@ -737,10 +597,6 @@ type SessionActivityStore
         use connection = openConnection ()
         use transaction = connection.BeginTransaction()
         upsertInstance connection (Some transaction) stored
-        upsertWorktreeRepresentative
-            connection
-            (Some transaction)
-            stored.ProcessIdentity
 
         let persisted =
             readInstanceByIdentity
@@ -769,48 +625,11 @@ type SessionActivityStore
         let persisted =
             if inserted then
                 upsertInstance connection (Some transaction) stored
-                upsertWorktreeRepresentative
-                    connection
-                    (Some transaction)
-                    stored.ProcessIdentity
 
                 readInstanceByIdentity
                     connection
                     (Some transaction)
                     stored.ProcessIdentity
-            else
-                None
-
-        transaction.Commit()
-        persisted
-
-    /// Refresh liveness only for an already-known, still-open exact identity.
-    member _.RecordHeartbeat
-        (
-            identity: ProcessIdentity,
-            lastSeen: DateTimeOffset,
-            terminalSessionId: TerminalSessionId option
-        ) =
-        use connection = openConnection ()
-        use transaction = connection.BeginTransaction()
-        use command = connection.CreateCommand()
-        command.Transaction <- transaction
-        command.CommandText <- heartbeatSql
-        bindIdentity command identity
-        command.Parameters.AddWithValue("$lastSeen", isoUtc lastSeen) |> ignore
-        command.Parameters.AddWithValue(
-            "$terminalSessionId",
-            terminalSessionId
-            |> Option.map TerminalSessionId.value
-            |> optToDb
-        )
-        |> ignore
-
-        let updated = command.ExecuteNonQuery() = 1
-
-        let persisted =
-            if updated then
-                readInstanceByIdentity connection (Some transaction) identity
             else
                 None
 
@@ -871,8 +690,8 @@ type SessionActivityStore
         use reader = command.ExecuteReader()
         readRows reader readInstance []
 
-    /// One materialized durable footer representative per worktree across exact and migration-only
-    /// history. The hot read is bounded by displayed worktrees rather than retained process rows.
+    /// One durable footer representative per worktree, ranked directly from exact instances. The
+    /// read returns at most one row per worktree instead of the 60-day process-instance history.
     member _.RetainedByWorktree() =
         use connection = openConnection ()
         use command = connection.CreateCommand()
@@ -920,7 +739,6 @@ type SessionActivityStore
         command.CommandText <- pruneSql
         command.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
         let deleted = command.ExecuteNonQuery()
-        rebuildWorktreeRepresentatives connection (Some transaction)
         transaction.Commit()
         deleted
 

@@ -63,7 +63,7 @@ missed time, late inputs, or downtime.
 - Treemon downtime produces no rows. Captured rows before the gap remain available.
 - Legacy liveness, task-snapshot, rollup, staging, publication-state, and observation-bound history
   tables are removed. Existing reconstructed history is not migrated.
-- `activity_events` remains unchanged for ingestion idempotency and is not read by Overview history.
+- `activity_events` holds ingestion dedupe keys only and is not read by Overview history.
 
 ### Sampling and API
 

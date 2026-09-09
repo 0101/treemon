@@ -192,18 +192,9 @@ let private isIndependentHistory =
     | BackgroundAgentFinished _ -> true
     | _ -> false
 
-let private eventRow
-    (exact: ExactReport)
-    (status: SessionStatus)
-    =
+let private eventRow (exact: ExactReport) =
     { ProcessIdentity = exact.ProcessIdentity
       EventId = exact.Report.EventId
-      SessionId = exact.Report.SessionId
-      WorktreePath = exact.Report.WorktreePath
-      Provider = exact.Report.Provider
-      Kind = kindText exact.Report.Event
-      Status = effectiveStatus status
-      Skill = status.Skill
       Ts = exact.Report.OccurredAt }
 
 let private withAcceptedOrigin
@@ -213,6 +204,30 @@ let private withAcceptedOrigin
     resolvedTerminalOrigin prior report
     |> Result.map (fun terminalSessionId ->
         { prior with TerminalSessionId = terminalSessionId })
+
+/// Shared tail of every known-report path except closure: resolve the accepted terminal origin,
+/// let the caller fold its event-specific fields onto it, persist, and publish to scheduler state.
+/// `persist` returns `None` for a no-op/dedupe write (e.g. a duplicate event ID), leaving `state`
+/// unchanged.
+let private persistAcceptedInstance
+    (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
+    (state: ServiceState)
+    (exact: ExactReport)
+    (prior: StoredInstance)
+    (buildNext: StoredInstance -> StoredInstance)
+    (persist: StoredInstance -> StoredInstance option)
+    =
+    withAcceptedOrigin prior exact.Report
+    |> Result.map (fun withOrigin ->
+        match persist (buildNext withOrigin) with
+        | None -> state
+        | Some persisted ->
+            publishInstance
+                scheduler
+                exact.ReceivedAt
+                (Some prior)
+                state
+                persisted)
 
 let private applyLifecycleEvent
     (store: SessionActivityStore)
@@ -226,43 +241,31 @@ let private applyLifecycleEvent
         |> Option.exists (fun timestamp ->
             exact.Report.OccurredAt < timestamp)
 
-    let rowState =
+    let buildNext (withOrigin: StoredInstance) =
         if isOutOfOrder then
-            fold emptyStatus exact.Report.Event
+            withOrigin
         else
-            fold prior.Status exact.Report.Event
-
-    withAcceptedOrigin prior exact.Report
-    |> Result.bind (fun withOrigin ->
-        let next =
-            if isOutOfOrder then
-                withOrigin
-            else
-                { withOrigin with
-                    Status = rowState
-                    UpdatedAt =
-                        max
-                            withOrigin.UpdatedAt
+            { withOrigin with
+                Status = fold prior.Status exact.Report.Event
+                UpdatedAt =
+                    max
+                        withOrigin.UpdatedAt
+                        exact.Report.OccurredAt
+                LifecycleAt =
+                    Some(
+                        withOrigin.LifecycleAt
+                        |> Option.fold
+                            max
                             exact.Report.OccurredAt
-                    LifecycleAt =
-                        Some(
-                            withOrigin.LifecycleAt
-                            |> Option.fold
-                                max
-                                exact.Report.OccurredAt
-                        ) }
+                    ) }
 
-        match store.AppendAndUpsert(eventRow exact rowState, next) with
-        | None -> Ok state
-        | Some persisted ->
-            Ok(
-                publishInstance
-                    scheduler
-                    exact.ReceivedAt
-                    (Some prior)
-                    state
-                    persisted
-            ))
+    persistAcceptedInstance
+        scheduler
+        state
+        exact
+        prior
+        buildNext
+        (fun next -> store.AppendAndUpsert(eventRow exact, next))
 
 let private applyIndependentHistoryEvent
     (store: SessionActivityStore)
@@ -286,39 +289,27 @@ let private applyIndependentHistoryEvent
         else
             fold prior.Status exact.Report.Event
 
-    let rowState =
-        if exact.Report.OccurredAt < prior.UpdatedAt then
-            fold emptyStatus exact.Report.Event
-        else
-            nextStatus
-
     if expiredBackgroundEvent then
         Ok state
     else
-        withAcceptedOrigin prior exact.Report
-        |> Result.bind (fun withOrigin ->
-            let next =
-                { withOrigin with
-                    Status = nextStatus
-                    UpdatedAt =
-                        if nextStatus = prior.Status then
+        let buildNext (withOrigin: StoredInstance) =
+            { withOrigin with
+                Status = nextStatus
+                UpdatedAt =
+                    if nextStatus = prior.Status then
+                        withOrigin.UpdatedAt
+                    else
+                        max
                             withOrigin.UpdatedAt
-                        else
-                            max
-                                withOrigin.UpdatedAt
-                                exact.Report.OccurredAt }
+                            exact.Report.OccurredAt }
 
-            match store.AppendAndUpsert(eventRow exact rowState, next) with
-            | None -> Ok state
-            | Some persisted ->
-                Ok(
-                    publishInstance
-                        scheduler
-                        exact.ReceivedAt
-                        (Some prior)
-                        state
-                        persisted
-                ))
+        persistAcceptedInstance
+            scheduler
+            state
+            exact
+            prior
+            buildNext
+            (fun next -> store.AppendAndUpsert(eventRow exact, next))
 
 let private applyTitleBootstrap
     (store: SessionActivityStore)
@@ -327,20 +318,15 @@ let private applyTitleBootstrap
     (exact: ExactReport)
     (prior: StoredInstance)
     =
-    withAcceptedOrigin prior exact.Report
-    |> Result.map (fun withOrigin ->
-        let next =
+    persistAcceptedInstance
+        scheduler
+        state
+        exact
+        prior
+        (fun (withOrigin: StoredInstance) ->
             { withOrigin with
-                Status = fold prior.Status exact.Report.Event }
-
-        let persisted = store.UpsertInstance next
-
-        publishInstance
-            scheduler
-            exact.ReceivedAt
-            (Some prior)
-            state
-            persisted)
+                Status = fold prior.Status exact.Report.Event })
+        (fun next -> Some(store.UpsertInstance next))
 
 let private applyUsage
     (store: SessionActivityStore)
@@ -359,25 +345,20 @@ let private applyUsage
     if stale then
         Ok state
     else
-        withAcceptedOrigin prior exact.Report
-        |> Result.map (fun withOrigin ->
-            let next =
+        persistAcceptedInstance
+            scheduler
+            state
+            exact
+            prior
+            (fun (withOrigin: StoredInstance) ->
                 { withOrigin with
                     Status.ContextUsage =
                         Some
                             { CurrentTokens = currentTokens
                               TokenLimit = tokenLimit }
                     ContextUsageAt =
-                        Some exact.Report.OccurredAt }
-
-            let persisted = store.UpsertInstance next
-
-            publishInstance
-                scheduler
-                exact.ReceivedAt
-                (Some prior)
-                state
-                persisted)
+                        Some exact.Report.OccurredAt })
+            (fun next -> Some(store.UpsertInstance next))
 
 let private applyHeartbeat
     (store: SessionActivityStore)
@@ -390,21 +371,15 @@ let private applyHeartbeat
         Ok state
     else
         withMatchingMetadata prior exact.Report (fun () ->
-            resolvedTerminalOrigin prior exact.Report
-            |> Result.map (fun terminalSessionId ->
-                let next =
-                    { prior with
-                        TerminalSessionId = terminalSessionId
-                        LastSeen = max prior.LastSeen exact.ReceivedAt }
-
-                let persisted = store.UpsertInstance next
-
-                publishInstance
-                    scheduler
-                    exact.ReceivedAt
-                    (Some prior)
-                    state
-                    persisted))
+            persistAcceptedInstance
+                scheduler
+                state
+                exact
+                prior
+                (fun (withOrigin: StoredInstance) ->
+                    { withOrigin with
+                        LastSeen = max prior.LastSeen exact.ReceivedAt })
+                (fun next -> Some(store.UpsertInstance next)))
 
 let private applyClosure
     (store: SessionActivityStore)

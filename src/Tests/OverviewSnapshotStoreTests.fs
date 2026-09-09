@@ -251,12 +251,6 @@ END;
              legacy.AppendAndUpsert(
                  { ProcessIdentity = identity
                    EventId = EventId "event-1"
-                   SessionId = stored.SessionId
-                   WorktreePath = stored.WorktreePath
-                   Provider = stored.Provider
-                   Kind = "turn_start"
-                   Status = SessionLevelStatus.Working
-                   Skill = None
                    Ts = anchor },
                  stored
              )
@@ -338,8 +332,8 @@ VALUES ({anchor.ToUnixTimeSeconds()}, '[{{"Kind":"Queued","Count":2}},{{"Kind":"
             Assert.Multiple(fun () ->
                 Assert.That(schemaNames path "table" legacyTables, Is.Empty)
                 Assert.That(
-                    schemaNames path "table" [ "session_instances"; "retained_sessions"; "activity_events"; "overview_snapshots_v2" ],
-                    Is.EqualTo [ "activity_events"; "overview_snapshots_v2"; "retained_sessions"; "session_instances" ]
+                    schemaNames path "table" [ "session_instances"; "resume_sessions"; "activity_events"; "overview_snapshots_v2" ],
+                    Is.EqualTo [ "activity_events"; "overview_snapshots_v2"; "resume_sessions"; "session_instances" ]
                 )
                 Assert.That(scalarInt path "SELECT count(*) FROM session_instances;", Is.EqualTo 1)
                 Assert.That(scalarInt path "SELECT count(*) FROM activity_events;", Is.EqualTo 1)
@@ -347,6 +341,6 @@ VALUES ({anchor.ToUnixTimeSeconds()}, '[{{"Kind":"Queued","Count":2}},{{"Kind":"
                     schemaNames
                         path
                         "index"
-                        [ "ix_instances_worktree_activity"; "ix_events_ts"; "ix_events_session_ts" ],
-                    Is.EqualTo [ "ix_events_session_ts"; "ix_events_ts"; "ix_instances_worktree_activity" ]
+                        [ "ix_instances_worktree_activity"; "ix_events_ts"; "ix_resume_worktree_activity" ],
+                    Is.EqualTo [ "ix_events_ts"; "ix_instances_worktree_activity"; "ix_resume_worktree_activity" ]
                 )))

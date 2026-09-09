@@ -8,12 +8,8 @@ import { createReportingRuntime } from "./reporting-runtime.mjs";
 const PROVIDER = "copilot_cli";
 const TREEMON_FETCH_TIMEOUT_MS = 5000;
 
-const portsRaw = process.env.TREEMON_PORTS || process.env.TREEMON_PORT || "5000";
-const activityUrls = portsRaw
-  .split(",")
-  .map((port) => port.trim())
-  .filter(Boolean)
-  .map((port) => `http://127.0.0.1:${port}/api/session/activity`);
+const port = process.env.TREEMON_PORT?.trim() || "5000";
+const activityUrl = `http://127.0.0.1:${port}/api/session/activity`;
 
 const log = (message) => console.error(`[treemon-reporting] ${message}`);
 
@@ -83,7 +79,7 @@ const runtime = createReportingRuntime({
     worktreePath: process.cwd(),
     provider: PROVIDER,
   },
-  activityUrls,
+  activityUrl,
   post: postActivityReport,
   randomId: randomUUID,
   log: logErrorThrottled,
@@ -94,7 +90,7 @@ process.on("SIGTERM", cleanup);
 process.on("SIGINT", cleanup);
 
 log(
-  `startup pid=${process.pid} parentPid=${parentProcessId} terminalOrigin=${terminalSessionId ? "present" : "absent"} endpoints=${activityUrls.length}`,
+  `startup pid=${process.pid} parentPid=${parentProcessId} terminalOrigin=${terminalSessionId ? "present" : "absent"} endpointPort=${port}`,
 );
 await runtime.start();
-log(`joined ${sessionId} — reporting to ${activityUrls.join(", ")}`);
+log(`joined ${sessionId} — reporting to ${activityUrl}`);

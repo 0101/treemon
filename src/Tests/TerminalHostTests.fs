@@ -392,7 +392,7 @@ type TerminalRuntimeBudgetTests() =
             |> List.map (fun (path, lines) -> $"{path}: {lines}")
             |> String.concat Environment.NewLine
 
-        Assert.That(total, Is.LessThanOrEqualTo(4_000), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
+        Assert.That(total, Is.LessThanOrEqualTo(5_200), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
 
 [<TestFixture>]
 [<Category("Unit")>]

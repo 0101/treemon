@@ -38,6 +38,7 @@
     <Compile Include="AzDoFixtureTests.fs" />
     <Compile Include="SessionActivityTests.fs" />
     <Compile Include="LifecycleDiagnosticsTests.fs" />
+    <Compile Include="SessionActivityMigrationFixture.fs" />
     <Compile Include="SessionActivityStoreTests.fs" />
     <Compile Include="SessionActivityMigrationTests.fs" />
     <Compile Include="SessionActivityServiceTests.fs" />

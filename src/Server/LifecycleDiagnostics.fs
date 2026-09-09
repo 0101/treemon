@@ -99,6 +99,13 @@ type internal ReplacementFailureKind =
     | CommandDelivery
 
 [<RequireQualifiedAccess>]
+type internal ReplacementHostOutcome =
+    | OldHostRunning
+    | OldHostUnresolved
+    | StagedHostRetained
+    | NoHostRunning
+
+[<RequireQualifiedAccess>]
 type internal ReplacementStage =
     | Captured of terminalCount: int * processCount: int * selectedSessionCount: int
     | RecheckStarted
@@ -115,52 +122,8 @@ type internal ReplacementStage =
     | StagedHostRunning of ProcessIdentity option
     | TerminalRecreationStarted of terminalCount: int * selectedSessionCount: int
     | TerminalRecreationCompleted of recreatedCount: int * deliveredCommandCount: int
-    | RecoveryRequired of ReplacementFailureKind
-    | RecoveryStarted
+    | Failed of ReplacementFailureKind * ReplacementHostOutcome * ProcessIdentity option
     | Completed
-
-[<RequireQualifiedAccess>]
-type internal HostGeneration =
-    | Old
-    | Staged
-    | Unknown
-
-[<RequireQualifiedAccess>]
-type internal RecoveryHostOutcome =
-    | Running of HostGeneration * ProcessIdentity option
-    | Stopped
-    | Unresolved of HostGeneration * ProcessIdentity option
-
-[<RequireQualifiedAccess>]
-type internal RecoveryRegistryOutcome =
-    | Exact of terminalCount: int
-    | Unavailable
-
-[<RequireQualifiedAccess>]
-type internal RecoverySelectedOutcome =
-    | ResumeDelivered
-    | ShutdownUnconfirmed
-    | ResumeDeliveryUnconfirmed
-    | ResumeNotAttempted
-
-type internal RecoverySelectedSessionDiagnostic =
-    { OriginalTerminalSessionId: TerminalSessionId
-      CurrentTerminalSessionId: TerminalSessionId option
-      SessionId: SessionId
-      Outcome: RecoverySelectedOutcome }
-
-[<RequireQualifiedAccess>]
-type internal RecoveryStatus =
-    | Recovered
-    | Rejected
-
-type internal RecoveryDiagnostic =
-    { Status: RecoveryStatus
-      Host: RecoveryHostOutcome
-      Registry: RecoveryRegistryOutcome
-      SelectedSessions: RecoverySelectedSessionDiagnostic list
-      UnresolvedProcesses: ProcessIdentity list
-      UnidentifiedHostGenerations: HostGeneration list }
 
 [<RequireQualifiedAccess>]
 type internal TeardownTarget =
@@ -175,21 +138,12 @@ type internal HostCloseOutcome =
     | Unavailable
 
 [<RequireQualifiedAccess>]
-type internal TeardownClosureOutcome =
-    | Recorded
-    | Failed
-
-[<RequireQualifiedAccess>]
 type internal TeardownStage =
     | Started of TeardownTarget * TerminalSessionId list
-    | GracefulShutdownStarted of terminalCount: int
-    | GracefulShutdownCompleted of terminalCount: int
-    | HostCloseStarted of terminalCount: int
-    | HostCloseCompleted of HostCloseOutcome * requestedCount: int * closedCount: int
-    | ExactClosureStarted of terminalCount: int
-    | ExactClosureCompleted of TeardownClosureOutcome * terminalCount: int
-    | Completed of closedTerminalCount: int
-    | Failed of remainingTerminalCount: int
+    | GracefulShutdownAttempted of terminalCount: int
+    | HostCloseCompleted of HostCloseOutcome * closedCount: int * remainingCount: int
+    | Completed
+    | Failed
 
 [<RequireQualifiedAccess>]
 type internal Diagnostic =
@@ -201,7 +155,6 @@ type internal Diagnostic =
     | ShutdownTransition of ShutdownDiagnostic
     | ExactClosure of ExactClosureDiagnostic
     | ReplacementTransition of ReplacementStage
-    | RecoveryCompleted of RecoveryDiagnostic
     | TeardownTransition of TeardownStage
 
 type internal Sink = Diagnostic -> unit
@@ -257,18 +210,12 @@ let private replacementFailureText =
     | ReplacementFailureKind.TerminalRecreation -> "terminal_recreation"
     | ReplacementFailureKind.CommandDelivery -> "command_delivery"
 
-let private hostGenerationText =
+let private replacementHostOutcomeText =
     function
-    | HostGeneration.Old -> "old"
-    | HostGeneration.Staged -> "staged"
-    | HostGeneration.Unknown -> "unknown"
-
-let private recoverySelectedOutcomeText =
-    function
-    | RecoverySelectedOutcome.ResumeDelivered -> "resume_delivered"
-    | RecoverySelectedOutcome.ShutdownUnconfirmed -> "shutdown_unconfirmed"
-    | RecoverySelectedOutcome.ResumeDeliveryUnconfirmed -> "resume_delivery_unconfirmed"
-    | RecoverySelectedOutcome.ResumeNotAttempted -> "resume_not_attempted"
+    | ReplacementHostOutcome.OldHostRunning -> "old_host_running"
+    | ReplacementHostOutcome.OldHostUnresolved -> "old_host_unresolved"
+    | ReplacementHostOutcome.StagedHostRetained -> "staged_host_retained"
+    | ReplacementHostOutcome.NoHostRunning -> "no_host_running"
 
 let private formatReplacementStage =
     function
@@ -302,61 +249,10 @@ let private formatReplacementStage =
         $"event=replacement stage=terminal_recreation_started terminal_count={terminalCount} selected_session_count={selectedSessionCount}"
     | ReplacementStage.TerminalRecreationCompleted(recreatedCount, deliveredCommandCount) ->
         $"event=replacement stage=terminal_recreation_completed recreated_count={recreatedCount} delivered_command_count={deliveredCommandCount}"
-    | ReplacementStage.RecoveryRequired failure ->
-        $"event=replacement stage=recovery_required failure={replacementFailureText failure}"
-    | ReplacementStage.RecoveryStarted ->
-        "event=replacement stage=recovery_started"
+    | ReplacementStage.Failed(failure, hostOutcome, identity) ->
+        $"event=replacement stage=failed failure={replacementFailureText failure} host_state={replacementHostOutcomeText hostOutcome} host_process={optionText processIdentityText identity}"
     | ReplacementStage.Completed ->
         "event=replacement stage=completed"
-
-let private formatRecoverySelected selected =
-    let current =
-        selected.CurrentTerminalSessionId
-        |> optionText terminalSessionIdText
-
-    $"{sessionIdText selected.SessionId}/{recoverySelectedOutcomeText selected.Outcome}/{terminalSessionIdText selected.OriginalTerminalSessionId}/{current}"
-
-let private formatRecovery diagnostic =
-    let host =
-        match diagnostic.Host with
-        | RecoveryHostOutcome.Running(generation, identity) ->
-            $"host_state=running host_generation={hostGenerationText generation} host_process={optionText processIdentityText identity}"
-        | RecoveryHostOutcome.Stopped ->
-            "host_state=stopped host_generation=none host_process=none"
-        | RecoveryHostOutcome.Unresolved(generation, identity) ->
-            $"host_state=unresolved host_generation={hostGenerationText generation} host_process={optionText processIdentityText identity}"
-
-    let registry =
-        match diagnostic.Registry with
-        | RecoveryRegistryOutcome.Exact terminalCount ->
-            $"registry=exact terminal_count={terminalCount}"
-        | RecoveryRegistryOutcome.Unavailable ->
-            "registry=unavailable terminal_count=unknown"
-
-    let status =
-        match diagnostic.Status with
-        | RecoveryStatus.Recovered -> "recovered"
-        | RecoveryStatus.Rejected -> "rejected"
-
-    let selected =
-        boundedFields
-            "selected_sessions"
-            formatRecoverySelected
-            diagnostic.SelectedSessions
-
-    let unresolved =
-        boundedFields
-            "unresolved_processes"
-            processIdentityText
-            diagnostic.UnresolvedProcesses
-
-    let unidentified =
-        boundedFields
-            "unidentified_host_generations"
-            hostGenerationText
-            diagnostic.UnidentifiedHostGenerations
-
-    $"event=recovery status={status} {host} {registry} {selected} {unresolved} {unidentified}"
 
 let private formatTeardownStage =
     function
@@ -373,13 +269,9 @@ let private formatTeardownStage =
                 terminalSessionIds
 
         $"event=teardown stage=started target={targetText} {terminalFields}"
-    | TeardownStage.GracefulShutdownStarted terminalCount ->
-        $"event=teardown stage=graceful_shutdown_started terminal_count={terminalCount}"
-    | TeardownStage.GracefulShutdownCompleted terminalCount ->
-        $"event=teardown stage=graceful_shutdown_completed terminal_count={terminalCount}"
-    | TeardownStage.HostCloseStarted terminalCount ->
-        $"event=teardown stage=host_close_started terminal_count={terminalCount}"
-    | TeardownStage.HostCloseCompleted(outcome, requestedCount, closedCount) ->
+    | TeardownStage.GracefulShutdownAttempted terminalCount ->
+        $"event=teardown stage=graceful_shutdown_attempted terminal_count={terminalCount}"
+    | TeardownStage.HostCloseCompleted(outcome, closedCount, remainingCount) ->
         let outcomeText =
             match outcome with
             | HostCloseOutcome.Confirmed -> "confirmed"
@@ -387,20 +279,9 @@ let private formatTeardownStage =
             | HostCloseOutcome.Unverified -> "unverified"
             | HostCloseOutcome.Unavailable -> "unavailable"
 
-        $"event=teardown stage=host_close_completed outcome={outcomeText} requested_count={requestedCount} closed_count={closedCount}"
-    | TeardownStage.ExactClosureStarted terminalCount ->
-        $"event=teardown stage=exact_closure_started terminal_count={terminalCount}"
-    | TeardownStage.ExactClosureCompleted(outcome, terminalCount) ->
-        let outcomeText =
-            match outcome with
-            | TeardownClosureOutcome.Recorded -> "recorded"
-            | TeardownClosureOutcome.Failed -> "failed"
-
-        $"event=teardown stage=exact_closure_completed outcome={outcomeText} terminal_count={terminalCount}"
-    | TeardownStage.Completed closedTerminalCount ->
-        $"event=teardown stage=completed closed_terminal_count={closedTerminalCount}"
-    | TeardownStage.Failed remainingTerminalCount ->
-        $"event=teardown stage=failed remaining_terminal_count={remainingTerminalCount}"
+        $"event=teardown stage=host_close_completed outcome={outcomeText} closed_count={closedCount} remaining_count={remainingCount}"
+    | TeardownStage.Completed -> "event=teardown stage=completed"
+    | TeardownStage.Failed -> "event=teardown stage=failed"
 
 let internal format =
     function
@@ -476,8 +357,6 @@ let internal format =
         $"event=exact_closure source=terminal_teardown outcome={outcome} process={processIdentityText closure.ProcessIdentity} session={sessionIdText closure.SessionId} terminal={terminalSessionIdText closure.TerminalSessionId}"
     | Diagnostic.ReplacementTransition stage ->
         formatReplacementStage stage
-    | Diagnostic.RecoveryCompleted recovery ->
-        formatRecovery recovery
     | Diagnostic.TeardownTransition stage ->
         formatTeardownStage stage
 

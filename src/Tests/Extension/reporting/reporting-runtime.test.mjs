@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   classifyPresenceResult,
   createReportingRuntime,
+  presenceRetryDelay,
 } from "../../../Extension/reporting/reporting-runtime.mjs";
 
 const baseContext = {
@@ -13,1021 +14,581 @@ const baseContext = {
   provider: "copilot_cli",
 };
 
-const acknowledged = {
-  ok: true,
-  status: 200,
-  body: { recorded: true, monitored: true, retryable: false },
+const activityUrl = "http://127.0.0.1:5199/api/session/activity";
+const runtimeNow = Date.parse("2026-09-04T17:00:00.000Z");
+const runtimeNowIso = "2026-09-04T17:00:00.000Z";
+
+const answer = (body) => ({ ok: true, status: 200, body });
+const acknowledged = answer({ recorded: true, monitored: true, retryable: false });
+
+/** Scripted transport replies, addressed by the short tokens used in the scenario table. */
+const replies = {
+  ack: acknowledged,
+  retryable: answer({ recorded: false, monitored: true, retryable: true, reason: "mailbox busy" }),
+  ignored: answer({ recorded: false, monitored: true }),
+  unmonitored: answer({ recorded: false, monitored: false, retryable: false }),
+  deadParent: answer({
+    recorded: false, monitored: true, reason: "the parent Copilot process is not running",
+  }),
+  unavailable: { ok: false, status: 503, statusText: "Unavailable" },
 };
 
-const runtimeNow = Date.parse("2026-09-04T17:00:00.000Z");
-
-function sdkEvent(id, timestamp, type, data = {}) {
-  return { id, timestamp, type, data };
-}
+const at = (offsetSeconds) => new Date(runtimeNow + (offsetSeconds * 1000)).toISOString();
+const ev = (id, offsetSeconds, type, data = {}) => ({ id, timestamp: at(offsetSeconds), type, data });
 
 function deferred() {
   let resolve;
-  const promise = new Promise((resolvePromise) => {
-    resolve = resolvePromise;
-  });
+  const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
   return { promise, resolve };
 }
 
-function createFakeSession(historyProvider = async () => [], summaryProvider = async () => ({})) {
-  const handlers = new Map();
-  let getEventsCalls = 0;
+/**
+ * One manual timer lane holding the single live handle the runtime keeps for it: presence retries
+ * fire once (`oneShot`), heartbeats until cleared. Registration and cancellation are appended to
+ * the shared `order` log, and `started` resolves on the first registration.
+ */
+function createManualTimers(label, order, oneShot = false) {
+  let current = null;
+  const started = deferred();
 
   return {
-    session: {
-      on(type, handler) {
-        const current = handlers.get(type) ?? new Set();
-        current.add(handler);
-        handlers.set(type, current);
-        return () => current.delete(handler);
-      },
-      async getEvents() {
-        getEventsCalls += 1;
-        return historyProvider();
-      },
-      rpc: {
-        metadata: {
-          snapshot: summaryProvider,
-        },
-      },
+    started: started.promise,
+    pending: () => (current ? [current] : []),
+    add: (callback) => {
+      current = { callback };
+      order.push(`${label}-start`);
+      started.resolve();
+      return current;
     },
-    emit(event) {
-      for (const handler of [...(handlers.get(event.type) ?? [])]) handler(event);
+    cancel: (handle) => {
+      if (current !== handle) return;
+      current = null;
+      order.push(`${label}-stop`);
     },
-    getEventsCalls: () => getEventsCalls,
-  };
-}
-
-function createManualScheduler() {
-  const scheduled = [];
-
-  return {
-    schedule(callback, delayMs) {
-      const item = { callback, delayMs, cancelled: false };
-      scheduled.push(item);
-      return item;
-    },
-    cancel(item) {
-      item.cancelled = true;
-    },
-    pending() {
-      return scheduled.filter((item) => !item.cancelled);
-    },
-    async runAll() {
-      const ready = this.pending();
-      ready.forEach((item) => {
-        item.cancelled = true;
-      });
-      await Promise.all(ready.map((item) => item.callback()));
+    run: async () => {
+      const ready = current;
+      if (oneShot) current = null;
+      if (ready) await ready.callback();
     },
   };
 }
 
-function createManualHeartbeat(order = [], onStart = () => {}) {
-  const handles = [];
-  const active = () => handles.filter((handle) => !handle.cancelled);
-
-  return {
-    setInterval(callback, intervalMs) {
-      const handle = { callback, intervalMs, cancelled: false };
-      handles.push(handle);
-      order.push("heartbeat-start");
-      onStart(handle);
-      return handle;
-    },
-    clearInterval(handle) {
-      if (!handle.cancelled) {
-        handle.cancelled = true;
-        order.push("heartbeat-stop");
-      }
-    },
-    async tick() {
-      await Promise.all(active().map((handle) => handle.callback()));
-    },
-  };
-}
-
-function runtimeOptions(fake, post, scheduler, heartbeat, activityUrls) {
+/**
+ * One runtime wired to a fake SDK session, transport, scheduler and heartbeat lane. `order`
+ * interleaves timer changes with posts; `sent` records every report the runtime posted.
+ */
+function createFixture({
+  history = async () => [], post = async () => acknowledged, metadata = async () => ({}),
+  baseContext: contextOverride,
+} = {}) {
+  const order = [];
+  const sent = [];
+  const handlers = [];
+  const scheduler = createManualTimers("retry", order, true);
+  const heartbeat = createManualTimers("heartbeat", order);
+  let historyReads = 0;
   let generatedId = 0;
-  return {
-    session: fake.session,
-    baseContext,
-    activityUrls,
-    post,
+
+  const runtime = createReportingRuntime({
+    session: {
+      on: (type, handler) => {
+        const entry = { type, handler, cancelled: false };
+        handlers.push(entry);
+        return () => { entry.cancelled = true; };
+      },
+      getEvents: () => { historyReads += 1; return history(); },
+      rpc: { metadata: { snapshot: metadata } },
+    },
+    baseContext: { ...baseContext, ...contextOverride },
+    activityUrl,
+    post: async (url, report) => {
+      assert.equal(url, activityUrl);
+      sent.push(report);
+      order.push(`post:${report.kind}`);
+      return post(report);
+    },
     randomId: () => `generated-${++generatedId}`,
-    now: () => runtimeNow,
-    nowIso: () => "2026-09-04T17:00:00.000Z",
-    schedule: scheduler.schedule.bind(scheduler),
-    cancel: scheduler.cancel.bind(scheduler),
-    retryDelay: () => 1,
-    setInterval: heartbeat.setInterval.bind(heartbeat),
-    clearInterval: heartbeat.clearInterval.bind(heartbeat),
+    now: () => runtimeNow, nowIso: () => runtimeNowIso, retryDelay: () => 1,
+    schedule: scheduler.add, cancel: scheduler.cancel,
+    setInterval: heartbeat.add, clearInterval: heartbeat.cancel,
     log: () => {},
+  });
+
+  return {
+    runtime, scheduler, heartbeat, sent, order,
+    emit: (event) => handlers.filter((entry) => !entry.cancelled && entry.type === event.type)
+      .forEach((entry) => entry.handler(event)),
+    historyReads: () => historyReads,
   };
 }
+
+const identityOf = (report) => `${report.parentProcessId}|${report.sessionId}`
+  + `|${report.terminalSessionId}|${report.worktreePath}|${report.provider}`;
+const presenceSent = "session_present:generated-1";
+const presenceOnly = [presenceSent];
+
+/**
+ * One normalized observation of the runtime. Only the keys named by `expected` are compared, so
+ * checkpoints stay narrow.
+ */
+function assertObservation(fixture, expected) {
+  const { state, closed, retryAttempt, heartbeatRunning } = fixture.runtime.snapshot();
+  const observation = {
+    state, retries: retryAttempt, heartbeat: heartbeatRunning, closed, reports: fixture.sent,
+    sent: fixture.sent.map((report) => `${report.kind}:${report.eventId}`),
+    historyReads: fixture.historyReads(), pending: fixture.scheduler.pending().length,
+    identities: [...new Set(fixture.sent.map(identityOf))],
+  };
+
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(expected).map((key) => [key, observation[key]])),
+    expected,
+  );
+}
+
+const expect = (observation) => ({ expect: observation });
+
+/**
+ * Replies to each report from the scenario's script: `presence` for presence attempts, `ordinary`
+ * keyed by event id or report kind. A script is one token or a per-attempt token list whose last
+ * token repeats; `throw` raises a transport failure.
+ */
+function scriptedPost({ presence = "ack", ordinary = {} }) {
+  // Attempt counters per script key: a scripted transport is stateful by nature.
+  const attempts = new Map();
+
+  return async (report) => {
+    const [key, script] = report.kind === "session_present"
+      ? ["presence", presence]
+      : [report.eventId, ordinary[report.eventId] ?? ordinary[report.kind] ?? "ack"];
+    const tokens = Array.isArray(script) ? script : [script];
+    const attempt = attempts.get(key) ?? 0;
+    attempts.set(key, attempt + 1);
+    const token = tokens[Math.min(attempt, tokens.length - 1)];
+    if (token === "throw") throw new Error("connection refused");
+    return replies[token];
+  };
+}
+
+/**
+ * Drives one runtime through scripted history reads, endpoint responses, live events and
+ * scheduler/heartbeat ticks. A step is `"retry"`, `"heartbeat"`, an SDK event to emit, or an
+ * `expect(...)` checkpoint; `expected` is asserted once every step has settled.
+ */
+async function runScenario(scenario) {
+  const reads = scenario.history ?? [[]];
+  // Cursor over the scripted history reads: one read is consumed per getEvents() call.
+  let readIndex = 0;
+
+  const fixture = createFixture({
+    baseContext: scenario.baseContext,
+    metadata: scenario.metadata,
+    history: async () => {
+      const read = reads[Math.min(readIndex++, reads.length - 1)];
+      if (read === "fail") throw new Error("history unavailable");
+      return read;
+    },
+    post: scriptedPost(scenario),
+  });
+  const { runtime } = fixture;
+
+  await runtime.start();
+  await runtime.flush();
+
+  for (const step of scenario.steps ?? []) {
+    if (step.expect) {
+      assertObservation(fixture, step.expect);
+      continue;
+    }
+    if (step === "retry") await fixture.scheduler.run();
+    else if (step === "heartbeat") await fixture.heartbeat.run();
+    else fixture.emit(step);
+    await runtime.flush();
+  }
+
+  assertObservation(fixture, {
+    state: "ready", retries: 0, heartbeat: true, historyReads: 1, pending: 0, closed: false,
+    identities: [identityOf(baseContext)],
+    ...scenario.expected,
+  });
+  runtime.stop();
+}
+
+const outageReplay = [
+  "turn_ended:turn-end", "awaiting_user_input:wait",
+  "background_agent_started:background", "intent_reported:live-intent",
+];
+
+// History collapses into the newest report of each kind plus unresolved or recently finished
+// background-agent pairs; the pair that finished outside the five-minute window is dropped.
+const boundedHistory = [
+  ["old-background-start", -420, "subagent.started", { toolCallId: "old" }],
+  ["old-background-finish", -410, "subagent.completed", { toolCallId: "old" }],
+  ["active-background-finish", -390, "subagent.completed", { toolCallId: "active" }],
+  ["active-background-start", -380, "subagent.started", { toolCallId: "active" }],
+  ["turn-old", -250, "assistant.turn_start"], ["turn-current", -240, "assistant.turn_end"],
+  ["title-old", -210, "session.title_changed", { title: "Old" }],
+  ["title-current", -200, "session.title_changed", { title: "Current" }],
+  ["recent-background-start", -20, "subagent.started", { toolCallId: "recent" }],
+  ["recent-background-finish", -10, "subagent.completed", { toolCallId: "recent" }],
+].map((event) => ev(...event));
+const boundedReplay = [
+  "background_agent_finished:active-background-finish",
+  "background_agent_started:active-background-start", "turn_ended:turn-current",
+  "title_reported:title-current", "background_agent_started:recent-background-start",
+  "background_agent_finished:recent-background-finish",
+];
+const boundedPass = [presenceSent, ...boundedReplay, "intent_reported:live-reconnect"];
+const recoveredReplay = [
+  presenceSent, "turn_started:working",
+  "awaiting_user_input:waiting", "background_agent_started:background-live",
+];
+const resumedShape = (eventId, occurredAt, kind) =>
+  ({ ...baseContext, sessionId: "selected-durable-session", eventId, occurredAt, kind });
+
+const scenarios = [
+  {
+    name: "presence retries through a transport outage, then replays what it could not send",
+    presence: ["throw", "ack"],
+    history: [[
+      ev("turn-end", -90, "assistant.turn_end"),
+      ev("wait", -89, "elicitation.requested", { message: "Choose a recovery" }),
+      ev("background", -88, "subagent.started", { toolCallId: "tool-background" }),
+    ]],
+    steps: [
+      expect({ state: "connecting", retries: 1, heartbeat: false, pending: 1, historyReads: 0 }),
+      ev("live-intent", -87, "assistant.intent", { intent: "Waiting on background verification" }),
+      expect({ sent: presenceOnly }),
+      "retry",
+    ],
+    expected: { sent: [presenceSent, presenceSent, ...outageReplay] },
+  },
+  ...[
+    ["unmonitored", "an unmonitored endpoint acknowledgement"],
+    ["deadParent", "a permanently rejected presence"],
+  ].map(([presence, label]) => ({
+    name: `${label} stops reporting without a retry or a replay`,
+    presence,
+    steps: [
+      expect({ state: "terminal", heartbeat: false, pending: 0 }),
+      ev("after-terminal", -600, "assistant.turn_start"),
+    ],
+    expected: { state: "terminal", heartbeat: false, sent: presenceOnly, historyReads: 0 },
+  })),
+  {
+    name: "a reconnect reuses the one bounded historical replay snapshot",
+    ordinary: { "live-reconnect": ["throw", "ack"] },
+    history: [boundedHistory],
+    steps: [
+      expect({ sent: [presenceSent, ...boundedReplay], historyReads: 1 }),
+      ev("live-reconnect", 1, "assistant.intent", { intent: "Reconnect now" }),
+      expect({ state: "connecting", retries: 1, pending: 1 }),
+      "retry",
+    ],
+    expected: { sent: [...boundedPass, ...boundedPass] },
+  },
+  {
+    name: "a failed historical snapshot load is retried until one succeeds",
+    ordinary: { "live-after-failure": ["throw", "ack"] },
+    history: ["fail", [ev("historical-turn", -1800, "assistant.turn_start")]],
+    steps: [
+      ev("live-after-failure", -900, "assistant.turn_start"),
+      expect({ state: "connecting", pending: 1 }),
+      "retry",
+    ],
+    expected: {
+      historyReads: 2,
+      sent: [
+        presenceSent, "turn_started:live-after-failure",
+        presenceSent, "turn_started:historical-turn", "turn_started:live-after-failure",
+      ],
+    },
+  },
+  {
+    name: "presence is re-established and replayed after heartbeat and ordinary transport loss",
+    ordinary: { heartbeat: ["throw", "ack"], "live-turn": ["retryable", "ack"] },
+    history: [[ev("working", -1800, "assistant.turn_start")]],
+    steps: [
+      "heartbeat",
+      expect({ state: "connecting", retries: 1, heartbeat: false, pending: 1 }),
+      ev("waiting", -1799, "user_input.requested", { question: "Continue?" }),
+      ev("background-live", -1798, "subagent.started", { toolCallId: "tool-reconnect" }),
+      "retry",
+      expect({ state: "ready", retries: 0, heartbeat: true }),
+      ev("live-turn", -1797, "assistant.turn_start"),
+      expect({ state: "connecting", pending: 1 }),
+      "retry",
+    ],
+    expected: {
+      sent: [
+        presenceSent, "turn_started:working", "heartbeat:generated-3",
+        ...recoveredReplay, "turn_started:live-turn", ...recoveredReplay, "turn_started:live-turn",
+      ],
+    },
+  },
+  {
+    name: "ordinary ignored responses stay ready while unmonitored responses terminate",
+    ordinary: { "ignored-turn": "ignored", "unmonitored-turn": "unmonitored" },
+    steps: [
+      ev("ignored-turn", -600, "assistant.turn_start"),
+      expect({ state: "ready", heartbeat: true }),
+      ev("unmonitored-turn", -599, "assistant.turn_end"),
+      expect({ state: "terminal", pending: 0 }),
+      ev("after-terminal", -598, "assistant.turn_start"),
+    ],
+    expected: {
+      state: "terminal", heartbeat: false,
+      sent: [presenceSent, "turn_started:ignored-turn", "turn_ended:unmonitored-turn"],
+    },
+  },
+  {
+    name: "the metadata title bootstrap reports the session summary after presence",
+    metadata: async () => ({ summary: "Bootstrapped title" }),
+    expected: { sent: [presenceSent, "title_bootstrap:generated-2"] },
+  },
+  {
+    name: "resumed startup replays the selected identity in canonical shape, minus historical shutdown",
+    baseContext: { sessionId: "selected-durable-session" },
+    history: [[
+      ev("old-shutdown", -3660, "session.shutdown", { shutdownType: "routine" }),
+      ev("resumed-idle", -3600, "session.idle"),
+    ]],
+    steps: ["heartbeat"],
+    expected: {
+      sent: [presenceSent, "went_idle:resumed-idle", "heartbeat:generated-3"],
+      // generated-2 is spent on the blank metadata title bootstrap, which reports nothing.
+      reports: [
+        resumedShape("generated-1", runtimeNowIso, "session_present"),
+        resumedShape("resumed-idle", at(-3600), "went_idle"),
+        resumedShape("generated-3", runtimeNowIso, "heartbeat"),
+      ],
+      identities: [identityOf({ ...baseContext, sessionId: "selected-durable-session" })],
+    },
+  },
+];
 
 test("presence retries only transient transport and explicit retry acknowledgements", () => {
-  assert.deepEqual(classifyPresenceResult(acknowledged), { kind: "acknowledged" });
   assert.deepEqual(
-    classifyPresenceResult({
-      ok: true,
-      status: 200,
-      body: { recorded: false, monitored: true, retryable: true, reason: "store busy" },
-    }),
-    { kind: "retry", reason: "store busy" },
-  );
-  assert.deepEqual(
-    classifyPresenceResult({
-      ok: true,
-      status: 200,
-      body: { recorded: false, monitored: false, retryable: true },
-    }),
-    { kind: "terminal", reason: "worktree is not monitored by this endpoint" },
-  );
-  assert.deepEqual(
-    classifyPresenceResult({
-      ok: true,
-      status: 200,
-      body: { recorded: false, monitored: true },
-    }),
-    { kind: "terminal", reason: "presence was not recorded" },
-  );
-  assert.deepEqual(
-    classifyPresenceResult({ ok: false, status: 400, statusText: "Bad Request" }),
-    { kind: "terminal", reason: "HTTP 400 Bad Request" },
-  );
-  assert.deepEqual(
-    classifyPresenceResult({ ok: false, status: 503, statusText: "Unavailable" }),
-    { kind: "retry", reason: "HTTP 503 Unavailable" },
-  );
-});
-
-test("fan-out presence, replay, and retry state are independent per endpoint", async () => {
-  const history = [
-    sdkEvent("turn-end", "2026-09-04T16:00:00.000Z", "assistant.turn_end"),
-    sdkEvent("wait", "2026-09-04T16:00:01.000Z", "elicitation.requested", {
-      message: "Choose a recovery",
-    }),
-    sdkEvent("background", "2026-09-04T16:00:02.000Z", "subagent.started", {
-      toolCallId: "tool-background",
-    }),
-  ];
-  const fake = createFakeSession(async () => history);
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat();
-  const urls = {
-    monitored: "http://127.0.0.1:5101/api/session/activity",
-    transport: "http://127.0.0.1:5102/api/session/activity",
-    retryable: "http://127.0.0.1:5103/api/session/activity",
-    unmonitored: "http://127.0.0.1:5104/api/session/activity",
-    invalidProcess: "http://127.0.0.1:5105/api/session/activity",
-    pidless: "http://127.0.0.1:5106/api/session/activity",
-  };
-  const presenceAttempts = new Map();
-  const calls = [];
-
-  const post = async (url, report) => {
-    calls.push({ url, report });
-    if (report.kind !== "session_present") return acknowledged;
-
-    const attempt = (presenceAttempts.get(url) ?? 0) + 1;
-    presenceAttempts.set(url, attempt);
-    if (url === urls.transport && attempt === 1) throw new Error("connection refused");
-    if (url === urls.retryable && attempt === 1) {
-      return {
-        ok: true,
-        status: 200,
-        body: { recorded: false, monitored: true, retryable: true, reason: "mailbox timeout" },
-      };
-    }
-    if (url === urls.unmonitored) {
-      return {
-        ok: true,
-        status: 200,
-        body: { recorded: false, monitored: false, retryable: false },
-      };
-    }
-    if (url === urls.invalidProcess) {
-      return {
-        ok: true,
-        status: 200,
-        body: {
-          recorded: false,
-          monitored: true,
-          retryable: false,
-          reason: "the parent Copilot process is not running",
-        },
-      };
-    }
-    if (url === urls.pidless) {
-      return { ok: false, status: 400, statusText: "Bad Request" };
-    }
-    return acknowledged;
-  };
-
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    Object.values(urls),
-  ));
-  await runtime.start();
-  await runtime.flush();
-
-  assert.deepEqual(
-    runtime.snapshot().endpoints.map(({ url, phase }) => [url, phase]),
     [
-      [urls.monitored, "ready"],
-      [urls.transport, "retry_wait"],
-      [urls.retryable, "retry_wait"],
-      [urls.unmonitored, "terminal"],
-      [urls.invalidProcess, "terminal"],
-      [urls.pidless, "terminal"],
+      acknowledged,
+      answer({ recorded: false, monitored: true, retryable: true, reason: "store busy" }),
+      answer({ recorded: false, monitored: false, retryable: true }),
+      answer({ recorded: false, monitored: true }),
+      { ok: false, status: 400, statusText: "Bad Request" },
+      replies.unavailable,
+    ].map(classifyPresenceResult),
+    [
+      { kind: "ok" }, { kind: "retry", reason: "store busy" },
+      { kind: "terminal", reason: "worktree is not monitored by this endpoint" },
+      { kind: "terminal", reason: "presence was not recorded" },
+      { kind: "terminal", reason: "HTTP 400 Bad Request" },
+      { kind: "retry", reason: "HTTP 503 Unavailable" },
     ],
   );
-  assert.equal(scheduler.pending().length, 2);
-
-  const liveIntent = sdkEvent(
-    "live-intent",
-    "2026-09-04T16:00:03.000Z",
-    "assistant.intent",
-    { intent: "Waiting on background verification" },
-  );
-  fake.emit(liveIntent);
-  await runtime.flush();
-
-  assert.equal(
-    calls.some(({ url, report }) => url === urls.monitored && report.eventId === "live-intent"),
-    true,
-  );
-  assert.equal(
-    calls.some(({ url, report }) => url === urls.transport && report.eventId === "live-intent"),
-    false,
-  );
-
-  await scheduler.runAll();
-  await runtime.flush();
-
-  for (const url of [urls.transport, urls.retryable]) {
-    const reports = calls.filter((call) => call.url === url).map((call) => call.report);
-    const presenceReports = reports.filter((report) => report.kind === "session_present");
-    assert.equal(presenceReports.length, 2);
-    assert.equal(new Set(presenceReports.map((report) => report.eventId)).size, 1);
-    assert.deepEqual(
-      reports
-        .filter((report) => report.kind !== "session_present")
-        .map((report) => report.kind),
-      [
-        "turn_ended",
-        "awaiting_user_input",
-        "background_agent_started",
-        "intent_reported",
-      ],
-    );
-  }
-
-  assert.equal(fake.getEventsCalls(), 1);
-  assert.equal(calls.every(({ report }) => report.parentProcessId === 777), true);
-  assert.deepEqual(
-    runtime.snapshot().endpoints.map(({ phase }) => phase),
-    ["ready", "ready", "ready", "terminal", "terminal", "terminal"],
-  );
-  runtime.stop();
 });
 
-test("two endpoints and a reconnect reuse one bounded historical replay snapshot", async () => {
-  const at = (offsetSeconds) => new Date(runtimeNow + (offsetSeconds * 1000)).toISOString();
-  const assistantHistory = Array.from({ length: 60 }, (_, index) => sdkEvent(
-    `assistant-${index}`,
-    at(-150 + index),
-    "assistant.message",
-    { content: `Assistant message ${index}` },
-  ));
-  const history = [
-    sdkEvent("old-background-start", at(-420), "subagent.started", {
-      toolCallId: "old-background",
-    }),
-    sdkEvent("old-background-finish", at(-410), "subagent.completed", {
-      toolCallId: "old-background",
-    }),
-    sdkEvent("active-background-finish", at(-390), "subagent.completed", {
-      toolCallId: "active-background",
-    }),
-    sdkEvent("active-background-start", at(-380), "subagent.started", {
-      toolCallId: "active-background",
-    }),
-    sdkEvent("start-only-background", at(-370), "subagent.started", {
-      toolCallId: "start-only",
-    }),
-    sdkEvent("finish-only-background", at(-360), "subagent.failed", {
-      toolCallId: "finish-only",
-    }),
-    sdkEvent("turn-old", at(-250), "assistant.turn_start"),
-    sdkEvent("turn-current", at(-240), "assistant.turn_end"),
-    sdkEvent("skill-old", at(-230), "skill.invoked", { name: "old-skill" }),
-    sdkEvent("skill-current", at(-220), "skill.invoked", { name: "current-skill" }),
-    sdkEvent("title-old", at(-210), "session.title_changed", { title: "Old title" }),
-    sdkEvent("title-current", at(-200), "session.title_changed", { title: "Current title" }),
-    sdkEvent("intent-old", at(-190), "assistant.intent", { intent: "Old intent" }),
-    sdkEvent("intent-current", at(-180), "assistant.intent", { intent: "Current intent" }),
-    sdkEvent("user-old", at(-170), "user.message", { content: "Old prompt" }),
-    sdkEvent("user-current", at(-160), "user.message", { content: "Current prompt" }),
-    ...assistantHistory,
-    sdkEvent("ask-old", at(-80), "user_input.requested", { question: "Old question?" }),
-    sdkEvent("ask-current", at(-70), "user_input.requested", {
-      question: "Current question?",
-    }),
-    sdkEvent("answer-old", at(-60), "user_input.completed"),
-    sdkEvent("answer-current", at(-50), "user_input.completed"),
-    sdkEvent("usage-old", at(-40), "session.usage_info", {
-      currentTokens: 20,
-      tokenLimit: 100,
-    }),
-    sdkEvent("usage-current", at(-30), "session.usage_info", {
-      currentTokens: 30,
-      tokenLimit: 100,
-    }),
-    sdkEvent("recent-background-start", at(-20), "subagent.started", {
-      toolCallId: "recent-background",
-    }),
-    sdkEvent("recent-background-finish", at(-10), "subagent.completed", {
-      toolCallId: "recent-background",
-    }),
-    sdkEvent("historical-shutdown", at(-5), "session.shutdown"),
-  ];
-  const expectedHistoricalIds = [
-    "active-background-finish",
-    "active-background-start",
-    "start-only-background",
-    "finish-only-background",
-    "turn-current",
-    "skill-current",
-    "title-current",
-    "intent-current",
-    "user-current",
-    "assistant-59",
-    "ask-current",
-    "answer-current",
-    "usage-current",
-    "recent-background-start",
-    "recent-background-finish",
-  ];
-  const fake = createFakeSession(async () => history);
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat();
-  const urls = [
-    "http://127.0.0.1:5151/api/session/activity",
-    "http://127.0.0.1:5152/api/session/activity",
-  ];
-  const calls = [];
-  let rejectReconnectTrigger = true;
-
-  const post = async (url, report) => {
-    calls.push({ url, report });
-    if (
-      url === urls[0]
-      && report.eventId === "live-reconnect"
-      && rejectReconnectTrigger
-    ) {
-      rejectReconnectTrigger = false;
-      throw new Error("endpoint restarted");
-    }
-    return acknowledged;
-  };
-
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    urls,
-  ));
-  await runtime.start();
-  await runtime.flush();
-
-  assert.ok(history.length > expectedHistoricalIds.length * 4);
-  for (const url of urls) {
-    assert.deepEqual(
-      calls
-        .filter((call) => call.url === url && call.report.kind !== "session_present")
-        .map((call) => call.report.eventId),
-      expectedHistoricalIds,
-    );
-  }
-  assert.equal(fake.getEventsCalls(), 1);
-
-  fake.emit(sdkEvent(
-    "live-reconnect",
-    at(1),
-    "assistant.intent",
-    { intent: "Reconnect now" },
-  ));
-  await runtime.flush();
-  assert.equal(runtime.snapshot().endpoints[0].phase, "retry_wait");
-
-  const reconnectStart = calls.length;
-  await scheduler.runAll();
-  await runtime.flush();
-
-  assert.deepEqual(
-    calls
-      .slice(reconnectStart)
-      .filter((call) => call.url === urls[0] && call.report.kind !== "session_present")
-      .map((call) => call.report.eventId),
-    [...expectedHistoricalIds, "live-reconnect"],
-  );
-  assert.equal(fake.getEventsCalls(), 1);
-  assert.equal(runtime.snapshot().endpoints[0].phase, "ready");
-  runtime.stop();
+test("presence backoff grows exponentially and stays bounded", () => {
+  assert.deepEqual([0, 1, 3, 7, 40].map(presenceRetryDelay), [1000, 2000, 8000, 120000, 120000]);
 });
 
-test("a failed historical snapshot load is retried until one succeeds", async () => {
-  let historyAttempt = 0;
-  const fake = createFakeSession(async () => {
-    historyAttempt += 1;
-    if (historyAttempt === 1) throw new Error("history unavailable");
-    return [
-      sdkEvent("historical-turn", "2026-09-04T16:30:00.000Z", "assistant.turn_start"),
-    ];
-  });
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat();
-  const url = "http://127.0.0.1:5171/api/session/activity";
-  const calls = [];
-  let rejectLiveTurn = true;
+for (const scenario of scenarios) test(scenario.name, () => runScenario(scenario));
 
-  const post = async (target, report) => {
-    calls.push({ url: target, report });
-    if (report.eventId === "live-after-history-failure" && rejectLiveTurn) {
-      rejectLiveTurn = false;
-      throw new Error("reconnect");
-    }
-    return acknowledged;
-  };
+test("the heartbeat cadence starts on acknowledgement while replay is still in flight", async () => {
+  const historicalRead = deferred();
+  const fixture = createFixture({ history: () => historicalRead.promise });
+  const startTask = fixture.runtime.start();
 
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    [url],
-  ));
-  await runtime.start();
-  await runtime.flush();
-  assert.equal(fake.getEventsCalls(), 1);
+  await fixture.heartbeat.started;
+  assertObservation(fixture, { state: "replaying", heartbeat: true, sent: presenceOnly });
 
-  fake.emit(sdkEvent(
-    "live-after-history-failure",
-    "2026-09-04T16:45:00.000Z",
-    "assistant.turn_start",
-  ));
-  await runtime.flush();
-  await scheduler.runAll();
-  await runtime.flush();
+  await fixture.heartbeat.run();
+  assertObservation(fixture, { sent: [presenceSent, "heartbeat:generated-2"] });
 
-  const secondPresence = calls
-    .map(({ report }) => report.kind)
-    .lastIndexOf("session_present");
-  assert.deepEqual(
-    calls.slice(secondPresence + 1).map(({ report }) => report.eventId),
-    ["historical-turn", "live-after-history-failure"],
-  );
-  assert.equal(fake.getEventsCalls(), 2);
-  runtime.stop();
-});
-
-test("an acknowledged endpoint heartbeats while a peer presence attempt is slow", async () => {
-  const slowPresence = deferred();
-  const historicalReplay = deferred();
-  const heartbeatStarted = deferred();
-  const fake = createFakeSession(() => historicalReplay.promise);
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat([], () => heartbeatStarted.resolve());
-  const urls = [
-    "http://127.0.0.1:5181/api/session/activity",
-    "http://127.0.0.1:5182/api/session/activity",
-  ];
-  const calls = [];
-
-  const post = async (url, report) => {
-    calls.push({ url, report });
-    if (url === urls[1] && report.kind === "session_present") {
-      return slowPresence.promise;
-    }
-    return acknowledged;
-  };
-
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    urls,
-  ));
-  const startTask = runtime.start();
-  await heartbeatStarted.promise;
-
-  assert.deepEqual(
-    runtime.snapshot().endpoints.map(({ phase, heartbeatRunning }) => ({
-      phase,
-      heartbeatRunning,
-    })),
-    [
-      { phase: "replaying", heartbeatRunning: true },
-      { phase: "presence", heartbeatRunning: false },
-    ],
-  );
-
-  await heartbeat.tick();
-  assert.equal(
-    calls.some(({ url, report }) => url === urls[0] && report.kind === "heartbeat"),
-    true,
-  );
-  assert.equal(
-    calls.some(({ url, report }) => url === urls[1] && report.kind === "heartbeat"),
-    false,
-  );
-
-  historicalReplay.resolve([]);
-  slowPresence.resolve(acknowledged);
+  historicalRead.resolve([]);
   await startTask;
-  await runtime.flush();
-  runtime.stop();
+  await fixture.runtime.flush();
+  assertObservation(fixture, { state: "ready", heartbeat: true });
+  fixture.runtime.stop();
 });
 
-test("heartbeat failure restarts presence without a slow reconnect replay winning the race", async () => {
-  const slowReplay = deferred();
-  const replayStarted = deferred();
-  const fake = createFakeSession(async () => [
-    sdkEvent("historical-working", "2026-09-04T16:30:00.000Z", "assistant.turn_start"),
-  ]);
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat();
-  const url = "http://127.0.0.1:5191/api/session/activity";
-  const calls = [];
+test("a heartbeat failure invalidates a slow reconnect replay instead of letting it finish", async () => {
+  const slowPost = deferred();
+  const slowPostStarted = deferred();
   let presenceAttempts = 0;
-  let rejectReconnectTrigger = true;
-  let rejectReconnectHeartbeat = true;
-  let slowReplayCallIndex = -1;
 
-  const post = async (target, report) => {
-    calls.push({ url: target, report });
-    if (report.kind === "session_present") {
-      presenceAttempts += 1;
-      return acknowledged;
-    }
-    if (report.eventId === "trigger-reconnect" && rejectReconnectTrigger) {
-      rejectReconnectTrigger = false;
-      throw new Error("connection reset");
-    }
-    if (report.eventId === "historical-working" && presenceAttempts === 2) {
-      slowReplayCallIndex = calls.length - 1;
-      replayStarted.resolve();
-      return slowReplay.promise;
-    }
-    if (
-      report.kind === "heartbeat"
-      && presenceAttempts === 2
-      && rejectReconnectHeartbeat
-    ) {
-      rejectReconnectHeartbeat = false;
-      throw new Error("heartbeat failed");
-    }
-    return acknowledged;
-  };
-
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    [url],
-  ));
+  const fixture = createFixture({
+    history: async () => [ev("historical-working", -1800, "assistant.turn_start")],
+    post: async (report) => {
+      if (report.kind === "session_present") { presenceAttempts += 1; return acknowledged; }
+      if (report.kind === "heartbeat") throw new Error("heartbeat failed");
+      if (report.eventId === "trigger-reconnect" && presenceAttempts === 1) {
+        throw new Error("connection reset");
+      }
+      if (report.eventId !== "historical-working" || presenceAttempts !== 2) return acknowledged;
+      slowPostStarted.resolve();
+      return slowPost.promise;
+    },
+  });
+  const { runtime, scheduler, heartbeat } = fixture;
   await runtime.start();
   await runtime.flush();
 
-  fake.emit(sdkEvent(
-    "trigger-reconnect",
-    "2026-09-04T16:45:00.000Z",
-    "assistant.intent",
-    { intent: "Reconnect" },
-  ));
+  fixture.emit(ev("trigger-reconnect", -900, "assistant.intent", { intent: "Reconnect" }));
   await runtime.flush();
-  assert.equal(runtime.snapshot().endpoints[0].phase, "retry_wait");
+  assertObservation(fixture, { state: "connecting", pending: 1 });
 
-  const reconnectTask = scheduler.runAll();
-  await replayStarted.promise;
-  assert.equal(runtime.snapshot().endpoints[0].phase, "replaying");
-  assert.equal(runtime.snapshot().endpoints[0].heartbeatRunning, true);
+  const reconnectTask = scheduler.run();
+  await slowPostStarted.promise;
+  assertObservation(fixture, { state: "replaying", heartbeat: true });
 
-  await heartbeat.tick();
-  assert.equal(runtime.snapshot().endpoints[0].phase, "retry_wait");
-  assert.equal(runtime.snapshot().endpoints[0].heartbeatRunning, false);
-  assert.equal(scheduler.pending().length, 1);
+  await heartbeat.run();
+  assertObservation(fixture, { state: "connecting", heartbeat: false, pending: 1 });
 
-  const heartbeatCall = calls.findIndex(({ report }) => report.kind === "heartbeat");
-  assert.ok(heartbeatCall > slowReplayCallIndex);
-
-  slowReplay.resolve(acknowledged);
+  slowPost.resolve(acknowledged);
   await reconnectTask;
-  assert.equal(runtime.snapshot().endpoints[0].phase, "retry_wait");
+  assertObservation(fixture, { state: "connecting", pending: 1 });
 
-  await scheduler.runAll();
+  await scheduler.run();
   await runtime.flush();
   assert.equal(presenceAttempts, 3);
-  assert.equal(fake.getEventsCalls(), 1);
-  assert.equal(runtime.snapshot().endpoints[0].phase, "ready");
-  assert.equal(runtime.snapshot().endpoints[0].heartbeatRunning, true);
+  assertObservation(fixture, { state: "ready", heartbeat: true, historyReads: 1 });
   runtime.stop();
 });
 
-test("an active endpoint re-establishes presence and replays after transport loss", async () => {
-  const history = [
-    sdkEvent("working", "2026-09-04T16:30:00.000Z", "assistant.turn_start"),
-  ];
-  const fake = createFakeSession(async () => history);
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat();
-  const url = "http://127.0.0.1:5201/api/session/activity";
-  const calls = [];
-  let failHeartbeat = true;
-
-  const post = async (target, report) => {
-    calls.push({ url: target, report });
-    if (report.kind === "heartbeat" && failHeartbeat) {
-      failHeartbeat = false;
-      throw new Error("server restarted");
-    }
-    return acknowledged;
-  };
-
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    [url],
-  ));
-  await runtime.start();
-  await runtime.flush();
-
-  await heartbeat.tick();
-  await runtime.flush();
-  assert.equal(runtime.snapshot().endpoints[0].phase, "retry_wait");
-  assert.equal(scheduler.pending().length, 1);
-
-  fake.emit(sdkEvent(
-    "waiting",
-    "2026-09-04T16:30:01.000Z",
-    "user_input.requested",
-    { question: "Continue?" },
-  ));
-  fake.emit(sdkEvent(
-    "background-live",
-    "2026-09-04T16:30:02.000Z",
-    "subagent.started",
-    { toolCallId: "tool-reconnect" },
-  ));
-  await scheduler.runAll();
-  await runtime.flush();
-
-  const kinds = calls.map(({ report }) => report.kind);
-  const secondPresence = kinds.lastIndexOf("session_present");
-  assert.ok(secondPresence > 0);
-  assert.equal(
-    new Set(
-      calls
-        .filter(({ report }) => report.kind === "session_present")
-        .map(({ report }) => report.eventId),
-    ).size,
-    1,
-  );
-  assert.deepEqual(
-    kinds.slice(secondPresence + 1),
-    ["turn_started", "awaiting_user_input", "background_agent_started"],
-  );
-  assert.equal(fake.getEventsCalls(), 1);
-  assert.equal(runtime.snapshot().endpoints[0].phase, "ready");
-  runtime.stop();
-});
-
-test("a retryable ordinary rejection re-establishes presence and replays the report", async () => {
-  let history = [];
-  const fake = createFakeSession(async () => history);
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat();
-  const url = "http://127.0.0.1:5251/api/session/activity";
-  const calls = [];
-  let rejectLiveTurn = true;
-
-  const post = async (target, report) => {
-    calls.push({ url: target, report });
-    if (report.kind === "turn_started" && rejectLiveTurn) {
-      rejectLiveTurn = false;
-      return {
-        ok: true,
-        status: 200,
-        body: {
-          recorded: false,
-          monitored: true,
-          retryable: true,
-          reason: "mailbox unavailable",
-        },
-      };
-    }
-    return acknowledged;
-  };
-
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    [url],
-  ));
-  await runtime.start();
-  await runtime.flush();
-
-  const liveTurn = sdkEvent(
-    "live-turn",
-    "2026-09-04T16:45:00.000Z",
-    "assistant.turn_start",
-  );
-  history = [liveTurn];
-  fake.emit(liveTurn);
-  await runtime.flush();
-
-  assert.equal(runtime.snapshot().endpoints[0].phase, "retry_wait");
-  assert.equal(scheduler.pending().length, 1);
-
-  await scheduler.runAll();
-  await runtime.flush();
-
-  const presenceReports = calls.filter(({ report }) => report.kind === "session_present");
-  const turnReports = calls.filter(({ report }) => report.kind === "turn_started");
-  assert.equal(presenceReports.length, 2);
-  assert.equal(new Set(presenceReports.map(({ report }) => report.eventId)).size, 1);
-  assert.deepEqual(turnReports.map(({ report }) => report.eventId), ["live-turn", "live-turn"]);
-  assert.equal(fake.getEventsCalls(), 1);
-  assert.equal(runtime.snapshot().endpoints[0].phase, "ready");
-  runtime.stop();
-});
-
-test("ordinary ignored responses stay ready while unmonitored responses terminate", async () => {
-  const fake = createFakeSession();
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat();
-  const url = "http://127.0.0.1:5252/api/session/activity";
-  const calls = [];
-
-  const post = async (target, report) => {
-    calls.push({ url: target, report });
-    if (report.kind === "turn_started") {
-      return {
-        ok: true,
-        status: 200,
-        body: { recorded: false, monitored: true, retryable: false },
-      };
-    }
-    if (report.kind === "turn_ended") {
-      return {
-        ok: true,
-        status: 200,
-        body: {
-          recorded: false,
-          monitored: false,
-          retryable: false,
-          reason: "worktree removed",
-        },
-      };
-    }
-    return acknowledged;
-  };
-
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    [url],
-  ));
-  await runtime.start();
-  await runtime.flush();
-
-  fake.emit(sdkEvent(
-    "ignored-turn",
-    "2026-09-04T16:50:00.000Z",
-    "assistant.turn_start",
-  ));
-  await runtime.flush();
-  assert.equal(runtime.snapshot().endpoints[0].phase, "ready");
-
-  fake.emit(sdkEvent(
-    "unmonitored-turn",
-    "2026-09-04T16:50:01.000Z",
-    "assistant.turn_end",
-  ));
-  await runtime.flush();
-
-  assert.equal(runtime.snapshot().endpoints[0].phase, "terminal");
-  assert.equal(scheduler.pending().length, 0);
-  const callCount = calls.length;
-
-  fake.emit(sdkEvent(
-    "after-terminal",
-    "2026-09-04T16:50:02.000Z",
-    "assistant.turn_start",
-  ));
-  await runtime.flush();
-  assert.equal(calls.length, callCount);
-  runtime.stop();
-});
-
-test("shutdown waits for an in-flight presence acknowledgement before exact closure", async () => {
-  const pendingPresence = deferred();
-  const fake = createFakeSession();
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat();
-  const url = "http://127.0.0.1:5291/api/session/activity";
-  const calls = [];
-
-  const post = async (target, report) => {
-    calls.push({ url: target, report });
-    return report.kind === "session_present" ? pendingPresence.promise : acknowledged;
-  };
-
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    [url],
-  ));
-  const startTask = runtime.start();
-
-  assert.deepEqual(calls.map(({ report }) => report.kind), ["session_present"]);
-  fake.emit(sdkEvent(
-    "shutdown-during-presence",
-    "2026-09-04T17:00:01.000Z",
-    "session.shutdown",
-  ));
-  assert.equal(runtime.snapshot().endpoints[0].phase, "presence");
-
-  pendingPresence.resolve(acknowledged);
-  await startTask;
-  await runtime.flush();
-
-  assert.deepEqual(
-    calls.map(({ report }) => report.kind),
-    ["session_present", "session_closed"],
-  );
-  assert.equal(runtime.snapshot().closed, true);
-  assert.equal(runtime.snapshot().endpoints[0].phase, "terminal");
-});
-
-test("shutdown retries ambiguous presence with the same event before exact closure", async () => {
-  const pendingPresence = deferred();
-  const fake = createFakeSession();
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat();
-  const url = "http://127.0.0.1:5292/api/session/activity";
-  const calls = [];
+test("shutdown survives a transient replay failure and closes after reconnect", async () => {
+  const replayPost = deferred();
+  const replayStarted = deferred();
   let presenceAttempts = 0;
 
-  const post = async (target, report) => {
-    calls.push({ url: target, report });
-    if (report.kind !== "session_present") return acknowledged;
-
-    presenceAttempts += 1;
-    return presenceAttempts === 1 ? pendingPresence.promise : acknowledged;
-  };
-
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    [url],
-  ));
-  const startTask = runtime.start();
-
-  fake.emit(sdkEvent(
-    "shutdown-before-presence-retry",
-    "2026-09-04T17:00:01.000Z",
-    "session.shutdown",
-  ));
-  pendingPresence.resolve({
-    ok: false,
-    status: 503,
-    statusText: "Unavailable",
+  const fixture = createFixture({
+    history: async () => [ev("historical-working", -1800, "assistant.turn_start")],
+    post: async (report) => {
+      if (report.kind === "session_present") {
+        presenceAttempts += 1;
+        return acknowledged;
+      }
+      if (report.eventId === "historical-working") {
+        replayStarted.resolve();
+        return replayPost.promise;
+      }
+      return acknowledged;
+    },
   });
+
+  const startTask = fixture.runtime.start();
+  await replayStarted.promise;
+  fixture.emit(ev("shutdown-during-replay", 1, "session.shutdown"));
+  replayPost.resolve(replies.unavailable);
   await startTask;
 
-  assert.equal(runtime.snapshot().endpoints[0].phase, "retry_wait");
-  assert.equal(scheduler.pending().length, 1);
-  assert.deepEqual(calls.map(({ report }) => report.kind), ["session_present"]);
+  assertObservation(fixture, {
+    state: "connecting",
+    closed: true,
+    heartbeat: false,
+    pending: 1,
+  });
 
-  await scheduler.runAll();
-  await runtime.flush();
+  await fixture.scheduler.run();
+  await fixture.runtime.flush();
 
-  assert.deepEqual(
-    calls.map(({ report }) => report.kind),
-    ["session_present", "session_present", "session_closed"],
-  );
-  const presenceReports = calls.filter(({ report }) => report.kind === "session_present");
-  assert.equal(new Set(presenceReports.map(({ report }) => report.eventId)).size, 1);
-  assert.equal(runtime.snapshot().closed, true);
-  assert.equal(runtime.snapshot().endpoints[0].phase, "terminal");
+  assert.equal(presenceAttempts, 2);
+  assertObservation(fixture, {
+    sent: [
+      presenceSent,
+      "turn_started:historical-working",
+      presenceSent,
+      "session_closed:shutdown-during-replay",
+    ],
+    state: "terminal",
+    heartbeat: false,
+    closed: true,
+    pending: 0,
+  });
 });
 
-test("resumed startup reports the selected identity first and ignores historical shutdown", async () => {
-  const selectedSessionId = "selected-durable-session";
-  const fake = createFakeSession(async () => [
-    sdkEvent("old-shutdown", "2026-09-04T15:59:00.000Z", "session.shutdown", {
-      shutdownType: "routine",
-    }),
-    sdkEvent("resumed-idle", "2026-09-04T16:00:00.000Z", "session.idle"),
-  ]);
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat();
-  const url = "http://127.0.0.1:5301/api/session/activity";
-  const calls = [];
+/** Starts a runtime whose first presence attempt is still in flight when a live shutdown arrives. */
+async function shutdownDuringPresence() {
+  const pendingPresence = deferred();
+  const presenceInFlight = deferred();
+  let presenceAttempts = 0;
 
-  const post = async (target, report) => {
-    calls.push({ url: target, report });
-    return acknowledged;
+  const fixture = createFixture({
+    post: async (report) => {
+      if (report.kind !== "session_present") return acknowledged;
+      presenceAttempts += 1;
+      presenceInFlight.resolve();
+      return presenceAttempts === 1 ? pendingPresence.promise : acknowledged;
+    },
+  });
+  const startTask = fixture.runtime.start();
+
+  await presenceInFlight.promise;
+  assertObservation(fixture, { state: "connecting", sent: presenceOnly, closed: false });
+  fixture.emit(ev("shutdown-in-flight", 1, "session.shutdown"));
+  assertObservation(fixture, { state: "connecting", closed: true, sent: presenceOnly });
+
+  return { ...fixture, pendingPresence, startTask };
+}
+
+for (const { name, reply, retried, sent } of [
+  {
+    name: "shutdown retries an unresolved presence and then closes exactly once",
+    reply: replies.unavailable, retried: true,
+    sent: [presenceSent, presenceSent, "session_closed:shutdown-in-flight"],
+  },
+  {
+    name: "a permanently rejected presence terminates a pending shutdown without a close report",
+    reply: replies.deadParent, retried: false, sent: presenceOnly,
+  },
+]) {
+  test(name, async () => {
+    const fixture = await shutdownDuringPresence();
+
+    fixture.pendingPresence.resolve(reply);
+    await fixture.startTask;
+    if (retried) {
+      assertObservation(fixture, { state: "connecting", pending: 1, sent: presenceOnly });
+      await fixture.scheduler.run();
+    }
+
+    await fixture.runtime.flush();
+    assertObservation(fixture, {
+      sent, state: "terminal", heartbeat: false, closed: true, pending: 0,
+    });
+  });
+}
+
+test("a live shutdown stops the heartbeat before delivering exactly one closure", async () => {
+  const fixture = createFixture();
+  await fixture.runtime.start();
+  await fixture.runtime.flush();
+  fixture.order.length = 0;
+
+  fixture.emit(ev("live-shutdown", 60, "session.shutdown", { shutdownType: "routine" }));
+  fixture.runtime.stop();
+  await fixture.runtime.flush();
+
+  assert.deepEqual(fixture.order, ["heartbeat-stop", "post:session_closed"]);
+  const closedOnce = {
+    sent: [presenceSent, "session_closed:live-shutdown"], state: "terminal",
+    heartbeat: false, closed: true,
   };
+  assertObservation(fixture, closedOnce);
 
-  const options = runtimeOptions(fake, post, scheduler, heartbeat, [url]);
-  options.baseContext = { ...baseContext, sessionId: selectedSessionId };
-  const runtime = createReportingRuntime(options);
-
-  await runtime.start();
-  await runtime.flush();
-
-  assert.deepEqual(
-    calls.map(({ report }) => report.kind),
-    ["session_present", "went_idle"],
-  );
-  assert.equal(calls[0].report.sessionId, selectedSessionId);
-  assert.ok(calls.every(({ report }) => report.sessionId === selectedSessionId));
-  assert.equal(runtime.snapshot().closed, false);
-  assert.equal(runtime.snapshot().heartbeatRunning, true);
-
-  runtime.stop();
+  await fixture.heartbeat.run();
+  await fixture.runtime.flush();
+  assertObservation(fixture, closedOnce);
 });
 
-test("live shutdown stops heartbeats before exact closure", async () => {
-  const order = [];
-  const fake = createFakeSession();
-  const scheduler = createManualScheduler();
-  const heartbeat = createManualHeartbeat(order);
-  const url = "http://127.0.0.1:5301/api/session/activity";
-  const calls = [];
+test("the metadata title bootstrap stays non-blocking and never overwrites a live title", async () => {
+  const metadataRead = deferred();
+  const fixture = createFixture({ metadata: () => metadataRead.promise });
+  await fixture.runtime.start();
 
-  const post = async (target, report) => {
-    calls.push({ url: target, report });
-    order.push(`post:${report.kind}`);
-    return acknowledged;
-  };
+  fixture.emit(ev("live-title", 1, "session.title_changed", { title: "Live title" }));
+  metadataRead.resolve({ summary: "Stale bootstrap title" });
+  await fixture.runtime.flush();
 
-  const runtime = createReportingRuntime(runtimeOptions(
-    fake,
-    post,
-    scheduler,
-    heartbeat,
-    [url],
-  ));
-  await runtime.start();
-  await runtime.flush();
-
-  order.length = 0;
-
-  fake.emit(sdkEvent(
-    "live-shutdown",
-    "2026-09-04T17:01:00.000Z",
-    "session.shutdown",
-    { shutdownType: "routine" },
-  ));
-  runtime.stop();
-  await runtime.flush();
-
-  assert.ok(order.indexOf("heartbeat-stop") >= 0);
-  assert.ok(order.indexOf("post:session_closed") > order.indexOf("heartbeat-stop"));
-  assert.equal(
-    calls.filter(({ report }) => report.kind === "session_closed").length,
-    1,
-  );
-  assert.equal(runtime.snapshot().closed, true);
-  assert.equal(runtime.snapshot().heartbeatRunning, false);
-  assert.equal(runtime.snapshot().endpoints[0].phase, "terminal");
-
-  heartbeat.tick();
-  await runtime.flush();
-  assert.equal(calls.some(({ report }) => report.kind === "heartbeat"), false);
+  assertObservation(fixture, { state: "ready", sent: [presenceSent, "title_reported:live-title"] });
+  fixture.runtime.stop();
 });

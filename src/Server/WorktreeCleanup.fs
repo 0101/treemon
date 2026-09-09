@@ -7,6 +7,9 @@ open Server.SessionActivity
 open Server.TerminalHostClient
 open Server.TerminalHostManifest
 
+/// Exact-session work bracketing the authoritative host close: the capture that produced this plan
+/// already fixed the identities, so the graceful attempt and the monotonic closure act on the same
+/// instances no matter what the registry does in between.
 type SessionClosePlan =
     { BeforeHostClose: Set<TerminalSessionId> -> Async<unit>
       AfterHostClose: Set<TerminalSessionId> -> Result<unit, string> }
@@ -18,55 +21,39 @@ let internal noSessionClose _ =
     { BeforeHostClose = fun _ -> async.Return()
       AfterHostClose = fun _ -> Ok() }
 
-let private record
-    (diagnostics: LifecycleDiagnostics.Sink)
-    stage
-    =
-    diagnostics (
-        LifecycleDiagnostics.Diagnostic.TeardownTransition
-            stage
-    )
+type private Stage = LifecycleDiagnostics.TeardownStage
+type private HostOutcome = LifecycleDiagnostics.HostCloseOutcome
+
+/// One teardown attempt as the authoritative registry left it: which terminals it proved closed,
+/// what the manager must reconcile, and why the caller's mutation is refused when it is.
+type private HostClose =
+    { Outcome: HostOutcome
+      Registry: (DiscoveryManifest * RegistrySnapshot) option
+      ConfirmedClosed: Set<EmbeddedTerminalId>
+      RemainingOnFailure: int
+      Interruption: string option
+      Failure: string option }
+
+let private record (diagnostics: LifecycleDiagnostics.Sink) stage =
+    diagnostics (LifecycleDiagnostics.Diagnostic.TeardownTransition stage)
 
 let private diagnosticTarget =
     function
-    | OneTerminal _ ->
-        LifecycleDiagnostics.TeardownTarget.Terminal
-    | WorktreeTerminals _ ->
-        LifecycleDiagnostics.TeardownTarget.Worktree
+    | OneTerminal _ -> LifecycleDiagnostics.TeardownTarget.Terminal
+    | WorktreeTerminals _ -> LifecycleDiagnostics.TeardownTarget.Worktree
 
 let private terminalSessionIds terminalIds =
     terminalIds
     |> Set.map (EmbeddedTerminalId.value >> TerminalSessionId)
 
-let private recordHostCloseFailure
-    diagnostics
-    (lease: CleanupLease)
-    outcome
-    =
-    let terminalIds =
-        lease.CachedTerminalIds
-        |> terminalSessionIds
-        |> Set.toList
-
-    record
-        diagnostics
-        (LifecycleDiagnostics.TeardownStage.Started(
-            diagnosticTarget lease.Target,
-            terminalIds
-        ))
-
-    record
-        diagnostics
-        (LifecycleDiagnostics.TeardownStage.HostCloseCompleted(
-            outcome,
-            terminalIds.Length,
-            0
-        ))
-
-    record
-        diagnostics
-        (LifecycleDiagnostics.TeardownStage.Failed
-            terminalIds.Length)
+/// Nothing was proven closed, so the manager keeps every tab and marks it interrupted.
+let private hostUnusable (lease: CleanupLease) error =
+    { Outcome = HostOutcome.Unverified
+      Registry = None
+      ConfirmedClosed = Set.empty
+      RemainingOnFailure = lease.CachedTerminalIds.Count
+      Interruption = Some error
+      Failure = Some error }
 
 let private targetRecords (lease: CleanupLease) (registry: RegistrySnapshot) =
     let pathMatches (terminal: TerminalRecord) =
@@ -104,14 +91,16 @@ let private originPaths (lease: CleanupLease) records =
              lease.WorktreePath)
          |> Map.ofSeq)
 
-let private prepareSessionClose prepare paths =
+let private preparePlan prepare paths =
     try Ok(prepare paths)
     with _ -> Error "Could not prepare exact session cleanup"
 
-let private beforeHostClose prepared terminalIds =
+/// A graceful attempt is best effort: its failure never authorizes claiming closure and never
+/// prevents the host close of this user-authorized teardown.
+let private gracefulShutdown prepared terminalIds =
     match prepared with
     | Error _ -> async.Return()
-    | Ok plan ->
+    | Ok(plan: SessionClosePlan) ->
         async {
             let! _ =
                 plan.BeforeHostClose(terminalSessionIds terminalIds)
@@ -120,22 +109,12 @@ let private beforeHostClose prepared terminalIds =
             return ()
         }
 
-let private afterHostClose prepared terminalIds =
-    if Set.isEmpty terminalIds then
-        Ok()
-    else
-        match prepared with
-        | Error error -> Error error
-        | Ok plan ->
-            try plan.AfterHostClose(terminalSessionIds terminalIds)
-            with _ -> Error "Could not record exact session closure"
-
-let private cleanupResult snapshot hostError sessionResult =
-    match hostError, sessionResult with
-    | None, Ok() -> Ok snapshot
-    | Some error, Ok() -> Error error
-    | None, Error error -> Error error
-    | Some host, Error session -> Error $"{host}; {session}"
+let private exactClosure prepared closedIds =
+    match prepared with
+    | Error error -> Error error
+    | Ok(plan: SessionClosePlan) ->
+        try plan.AfterHostClose(terminalSessionIds closedIds)
+        with _ -> Error "Could not record exact session closure"
 
 let private safeWithoutHealthyHost config lastHost = function
     | DeadHost error -> Ok $"{error}. Its terminals were interrupted."
@@ -153,38 +132,28 @@ let rec private closeTarget config connection latest failures = function
         | [] -> async.Return(Ok latest)
         | errors ->
             async.Return(
-                Error(
-                    MutationRejected(
-                        latest,
-                        String.concat "; " errors
-                    )
-                )
+                Error(MutationRejected(latest, String.concat "; " errors))
             )
     | (terminal: TerminalRecord) :: remaining ->
         async {
             match! closeTerminalOnHost config connection terminal.SessionId with
             | Ok after ->
-                return!
-                    closeTarget
-                        config
-                        connection
-                        after
-                        failures
-                        remaining
+                return! closeTarget config connection after failures remaining
             | Error(MutationRejected(after, error)) ->
                 return!
-                    closeTarget
-                        config
-                        connection
-                        after
-                        (error :: failures)
-                        remaining
-            | Error(MutationUnverified(None, error)) ->
-                return Error(MutationUnverified(Some latest, error))
-            | Error(MutationUnverified(Some registry, error)) ->
-                return Error(MutationUnverified(Some registry, error))
+                    closeTarget config connection after (error :: failures) remaining
+            | Error(MutationUnverified(lastRegistry, error)) ->
+                return
+                    Error(
+                        MutationUnverified(
+                            Some(Option.defaultValue latest lastRegistry),
+                            error
+                        )
+                    )
         }
 
+/// Registry absence is the only accepted proof that a terminal is closed; anything still listed,
+/// and anything an unverified attempt could not relist, stays with the manager.
 let private confirmedClosed targetIds initialAbsent registry =
     registry
     |> Option.map (fun snapshot ->
@@ -195,85 +164,67 @@ let private confirmedClosed targetIds initialAbsent registry =
             |> Option.isNone))
     |> Option.defaultValue initialAbsent
 
-let private closeHealthy
-    (diagnostics: LifecycleDiagnostics.Sink)
-    prepare
-    manager
-    lease
-    connection
-    registry
-    =
+let private finish diagnostics manager prepared hostClose =
     async {
-        match targetRecords lease registry with
+        record
+            diagnostics
+            (Stage.HostCloseCompleted(
+                hostClose.Outcome,
+                hostClose.ConfirmedClosed.Count,
+                hostClose.RemainingOnFailure
+            ))
+
+        let! snapshot =
+            EmbeddedTerminal.applyCleanup
+                manager
+                { Registry = hostClose.Registry
+                  ClosedTerminalIds = hostClose.ConfirmedClosed
+                  Interruption = hostClose.Interruption }
+
+        let closure =
+            if Set.isEmpty hostClose.ConfirmedClosed then
+                Ok()
+            else
+                exactClosure prepared hostClose.ConfirmedClosed
+
+        let result =
+            match hostClose.Failure, closure with
+            | None, Ok() -> Ok snapshot
+            | Some error, Ok() -> Error error
+            | None, Error error -> Error error
+            | Some host, Error session -> Error $"{host}; {session}"
+
+        record diagnostics (if Result.isOk result then Stage.Completed else Stage.Failed)
+        return result
+    }
+
+let private closeHealthy diagnostics prepare manager (lease: CleanupLease) connection registry =
+    async {
+        let records = targetRecords lease registry
+
+        let prepared =
+            records |> Result.defaultValue [] |> originPaths lease |> preparePlan prepare
+
+        match records with
         | Error error ->
-            let cachedIds =
-                lease.CachedTerminalIds
-                |> terminalSessionIds
-                |> Set.toList
-
-            record
-                diagnostics
-                (LifecycleDiagnostics.TeardownStage.Started(
-                    diagnosticTarget lease.Target,
-                    cachedIds
-                ))
-
-            record
-                diagnostics
-                (LifecycleDiagnostics.TeardownStage.Failed
-                    cachedIds.Length)
-
-            let! _ =
-                EmbeddedTerminal.applyCleanup
-                    manager
-                    (ReconcileCleanup(
-                        connection,
-                        registry,
-                        KeepCleanupTargets
-                    ))
-
-            return Error error
+            // The trust boundary rejects the close before any host request is made.
+            return!
+                finish diagnostics manager prepared
+                    { Outcome = HostOutcome.Rejected
+                      Registry = Some(connection, registry)
+                      ConfirmedClosed = Set.empty
+                      RemainingOnFailure = lease.CachedTerminalIds.Count
+                      Interruption = None
+                      Failure = Some error }
         | Ok records ->
             let activeIds =
-                records
-                |> List.map (_.SessionId >> EmbeddedTerminalId)
-                |> Set.ofList
+                records |> List.map (_.SessionId >> EmbeddedTerminalId) |> Set.ofList
 
             let targetIds = Set.union lease.CachedTerminalIds activeIds
             let initialAbsent = Set.difference targetIds activeIds
-            let diagnosticTerminalIds =
-                targetIds
-                |> terminalSessionIds
-                |> Set.toList
 
-            record
-                diagnostics
-                (LifecycleDiagnostics.TeardownStage.Started(
-                    diagnosticTarget lease.Target,
-                    diagnosticTerminalIds
-                ))
-
-            let prepared =
-                records
-                |> originPaths lease
-                |> prepareSessionClose prepare
-
-            record
-                diagnostics
-                (LifecycleDiagnostics.TeardownStage.GracefulShutdownStarted
-                    activeIds.Count)
-
-            do! beforeHostClose prepared activeIds
-
-            record
-                diagnostics
-                (LifecycleDiagnostics.TeardownStage.GracefulShutdownCompleted
-                    activeIds.Count)
-
-            record
-                diagnostics
-                (LifecycleDiagnostics.TeardownStage.HostCloseStarted
-                    activeIds.Count)
+            record diagnostics (Stage.GracefulShutdownAttempted activeIds.Count)
+            do! gracefulShutdown prepared activeIds
 
             let! closeResult =
                 closeTarget
@@ -283,215 +234,73 @@ let private closeHealthy
                     []
                     records
 
-            let closedIds, update, hostError, hostOutcome =
+            let outcome, lastRegistry, failure =
                 match closeResult with
-                | Ok after ->
-                    confirmedClosed targetIds initialAbsent (Some after),
-                    ReconcileCleanup(
-                        connection,
-                        after,
-                        RemoveCleanupTarget lease.Target
-                    ),
-                    None,
-                    LifecycleDiagnostics.HostCloseOutcome.Confirmed
+                | Ok after -> HostOutcome.Confirmed, Some after, None
                 | Error(MutationRejected(after, error)) ->
-                    let closed =
-                        confirmedClosed targetIds initialAbsent (Some after)
-
-                    closed,
-                    ReconcileCleanup(
-                        connection,
-                        after,
-                        RemoveClosedTerminals closed
-                    ),
-                    Some error,
-                    LifecycleDiagnostics.HostCloseOutcome.Rejected
+                    HostOutcome.Rejected, Some after, Some error
                 | Error(MutationUnverified(lastRegistry, error)) ->
-                    let closed =
-                        confirmedClosed targetIds initialAbsent lastRegistry
+                    HostOutcome.Unverified, lastRegistry, Some error
 
-                    closed,
-                    UnverifiedCleanup(
-                        connection,
-                        lastRegistry,
-                        closed,
-                        error
-                    ),
-                    Some error,
-                    LifecycleDiagnostics.HostCloseOutcome.Unverified
+            let closed = confirmedClosed targetIds initialAbsent lastRegistry
 
-            record
-                diagnostics
-                (LifecycleDiagnostics.TeardownStage.HostCloseCompleted(
-                    hostOutcome,
-                    activeIds.Count,
-                    closedIds.Count
-                ))
-
-            let! snapshot =
-                EmbeddedTerminal.applyCleanup manager update
-
-            record
-                diagnostics
-                (LifecycleDiagnostics.TeardownStage.ExactClosureStarted
-                    closedIds.Count)
-
-            let sessionResult =
-                afterHostClose prepared closedIds
-
-            let closureOutcome =
-                if Result.isOk sessionResult then
-                    LifecycleDiagnostics.TeardownClosureOutcome.Recorded
-                else
-                    LifecycleDiagnostics.TeardownClosureOutcome.Failed
-
-            record
-                diagnostics
-                (LifecycleDiagnostics.TeardownStage.ExactClosureCompleted(
-                    closureOutcome,
-                    closedIds.Count
-                ))
-
-            let result =
-                cleanupResult snapshot hostError sessionResult
-
-            record
-                diagnostics
-                (match result with
-                 | Ok _ ->
-                     LifecycleDiagnostics.TeardownStage.Completed
-                         closedIds.Count
-                 | Error _ ->
-                     LifecycleDiagnostics.TeardownStage.Failed(
-                         targetIds.Count - closedIds.Count
-                     ))
-
-            return result
+            return!
+                finish diagnostics manager prepared
+                    { Outcome = outcome
+                      Registry =
+                        lastRegistry |> Option.map (fun snapshot -> connection, snapshot)
+                      ConfirmedClosed = closed
+                      RemainingOnFailure = targetIds.Count - closed.Count
+                      Interruption =
+                        if outcome = HostOutcome.Unverified then failure else None
+                      Failure = failure }
     }
 
-let private closeReserved
-    (diagnostics: LifecycleDiagnostics.Sink)
-    prepare
-    manager
-    (lease: CleanupLease)
-    =
+let private closeReserved diagnostics prepare manager (lease: CleanupLease) =
     async {
         let config = EmbeddedTerminal.clientConfig manager
+
+        record
+            diagnostics
+            (Stage.Started(
+                diagnosticTarget lease.Target,
+                lease.CachedTerminalIds |> terminalSessionIds |> Set.toList
+            ))
+
+        let unusable error =
+            finish diagnostics manager (Ok(noSessionClose ())) (hostUnusable lease error)
 
         match! discoverHost config with
         | HealthyHost connection ->
             match! listTerminals config connection with
             | Ok registry ->
-                return!
-                    closeHealthy
-                        diagnostics
-                        prepare
-                        manager
-                        lease
-                        connection
-                        registry
-            | Error error ->
-                recordHostCloseFailure
-                    diagnostics
-                    lease
-                    LifecycleDiagnostics.HostCloseOutcome.Unverified
-
-                let! _ =
-                    EmbeddedTerminal.applyCleanup
-                        manager
-                        (FailedCleanup error)
-
-                return Error error
+                return! closeHealthy diagnostics prepare manager lease connection registry
+            | Error error -> return! unusable error
         | discovery ->
             match safeWithoutHealthyHost config lease.LastHost discovery with
-            | Error error ->
-                recordHostCloseFailure
-                    diagnostics
-                    lease
-                    LifecycleDiagnostics.HostCloseOutcome.Unverified
-
-                let! _ =
-                    EmbeddedTerminal.applyCleanup
-                        manager
-                        (FailedCleanup error)
-
-                return Error error
+            | Error error -> return! unusable error
             | Ok reason ->
-                let prepared =
-                    originPaths lease []
-                    |> prepareSessionClose prepare
-
-                let terminalIds =
-                    lease.CachedTerminalIds
-                    |> terminalSessionIds
-                    |> Set.toList
-
-                record
-                    diagnostics
-                    (LifecycleDiagnostics.TeardownStage.Started(
-                        diagnosticTarget lease.Target,
-                        terminalIds
-                    ))
-
-                record
-                    diagnostics
-                    (LifecycleDiagnostics.TeardownStage.HostCloseCompleted(
-                        LifecycleDiagnostics.HostCloseOutcome.Unavailable,
-                        terminalIds.Length,
-                        terminalIds.Length
-                    ))
-
-                let! snapshot =
-                    EmbeddedTerminal.applyCleanup
-                        manager
-                        (UnavailableCleanup(reason, lease.Target))
-
-                record
-                    diagnostics
-                    (LifecycleDiagnostics.TeardownStage.ExactClosureStarted
-                        terminalIds.Length)
-
-                let sessionResult =
-                    afterHostClose prepared lease.CachedTerminalIds
-
-                let closureOutcome =
-                    if Result.isOk sessionResult then
-                        LifecycleDiagnostics.TeardownClosureOutcome.Recorded
-                    else
-                        LifecycleDiagnostics.TeardownClosureOutcome.Failed
-
-                record
-                    diagnostics
-                    (LifecycleDiagnostics.TeardownStage.ExactClosureCompleted(
-                        closureOutcome,
-                        terminalIds.Length
-                    ))
-
-                let result =
-                    cleanupResult snapshot None sessionResult
-
-                record
-                    diagnostics
-                    (match result with
-                     | Ok _ ->
-                         LifecycleDiagnostics.TeardownStage.Completed
-                             terminalIds.Length
-                     | Error _ ->
-                         LifecycleDiagnostics.TeardownStage.Failed
-                             terminalIds.Length)
-
-                return result
+                return!
+                    finish diagnostics manager (originPaths lease [] |> preparePlan prepare)
+                        { Outcome = HostOutcome.Unavailable
+                          Registry = None
+                          ConfirmedClosed = lease.CachedTerminalIds
+                          RemainingOnFailure = 0
+                          Interruption = Some reason
+                          Failure = None }
     }
 
 let private asTask cancellation workflow =
     Async.StartAsTask(workflow, cancellationToken = cancellation)
 
-let private reserveTarget reserveCleanup manager target =
+/// A close request naming a terminal this manager has never listed still has to find the worktree
+/// that owns it, otherwise the reservation would guard the wrong path.
+let private reserveTarget manager target =
     async {
-        match! reserveCleanup target None with
-        | Ok(NoCleanupNeeded snapshot) ->
+        match! EmbeddedTerminal.reserveCleanup manager target None with
+        | Ok None ->
             match target with
-            | WorktreeTerminals _ -> return Ok(NoCleanupNeeded snapshot)
+            | WorktreeTerminals _ -> return Ok None
             | OneTerminal terminalId ->
                 let config = EmbeddedTerminal.clientConfig manager
 
@@ -504,69 +313,58 @@ let private reserveTarget reserveCleanup manager target =
                             registry.Terminals
                             |> findTerminalById (EmbeddedTerminalId.value terminalId)
                         with
-                        | None -> return Ok(NoCleanupNeeded snapshot)
+                        | None -> return Ok None
                         | Some terminal ->
                             return!
-                                reserveCleanup
+                                EmbeddedTerminal.reserveCleanup
+                                    manager
                                     target
-                                    (Some(
-                                        PathUtils.toWorktreePath
-                                            terminal.WorktreePath
-                                    ))
+                                    (Some(PathUtils.toWorktreePath terminal.WorktreePath))
                 | MissingHost
-                | DeadHost _ -> return Ok(NoCleanupNeeded snapshot)
+                | DeadHost _ -> return Ok None
                 | IncompatibleHost(_, error)
                 | UnusableHost error -> return Error error
         | result -> return result
     }
 
+/// The teardown itself runs uncancellable so a cancelled caller can never abandon half-closed
+/// terminals; only the caller's own mutation observes `cancellation`.
 let private withTerminalCleanupResult
     (diagnostics: LifecycleDiagnostics.Sink)
     (prepare: PrepareSessionClose)
     (manager: EmbeddedTerminal.Manager)
     (target: CloseTarget)
     (cancellation: Threading.CancellationToken)
-    (
-        operation:
-            EmbeddedTerminalSnapshot
-                -> Async<Result<'value, string>>
-    )
+    (operation: EmbeddedTerminalSnapshot -> Async<Result<'value, string>>)
     : Async<Result<'value, string>>
     =
-    EmbeddedTerminal.withCleanupLease
-        manager
-        (fun reserveCleanup ->
-            reserveTarget reserveCleanup manager target)
-        (fun reservation ->
-            task {
-                match reservation with
-                | Error error -> return Error error
-                | Ok(NoCleanupNeeded snapshot) ->
-                    return!
-                        operation snapshot
-                        |> asTask cancellation
-                | Ok(CleanupReserved lease) ->
-                    match!
-                        closeReserved
-                            diagnostics
-                            prepare
-                            manager
-                            lease
-                        |> asTask Threading.CancellationToken.None
-                    with
-                    | Error error -> return Error error
-                    | Ok snapshot ->
-                        return!
-                            operation snapshot
-                            |> asTask cancellation
-            })
+    task {
+        let! reservation =
+            reserveTarget manager target
+            |> asTask Threading.CancellationToken.None
 
-let internal closeEmbeddedTerminalWithDiagnostics
-    diagnostics
-    prepare
-    manager
-    terminalId
-    =
+        match reservation with
+        | Error error -> return Error error
+        | Ok None ->
+            let! snapshot =
+                EmbeddedTerminal.getCached manager
+                |> asTask Threading.CancellationToken.None
+
+            return! operation snapshot |> asTask cancellation
+        | Ok(Some lease) ->
+            try
+                match!
+                    closeReserved diagnostics prepare manager lease
+                    |> asTask Threading.CancellationToken.None
+                with
+                | Error error -> return Error error
+                | Ok snapshot -> return! operation snapshot |> asTask cancellation
+            finally
+                EmbeddedTerminal.releaseCleanup manager lease
+    }
+    |> Async.AwaitTask
+
+let internal closeEmbeddedTerminalWithDiagnostics diagnostics prepare manager terminalId =
     withTerminalCleanupResult
         diagnostics
         prepare
@@ -575,11 +373,7 @@ let internal closeEmbeddedTerminalWithDiagnostics
         Threading.CancellationToken.None
         (Ok >> async.Return)
 
-let internal closeEmbeddedTerminalWith
-    prepare
-    manager
-    terminalId
-    =
+let internal closeEmbeddedTerminalWith prepare manager terminalId =
     closeEmbeddedTerminalWithDiagnostics
         LifecycleDiagnostics.write
         prepare
@@ -607,12 +401,7 @@ let internal withTerminalCleanupWithDiagnostics
                 (fun _ -> operation ())
     }
 
-let internal withTerminalCleanup
-    prepare
-    manager
-    worktreePath
-    operation
-    =
+let internal withTerminalCleanup prepare manager worktreePath operation =
     withTerminalCleanupWithDiagnostics
         LifecycleDiagnostics.write
         prepare

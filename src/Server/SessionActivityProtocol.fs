@@ -148,26 +148,6 @@ let internal parseEvent
             Ok(UsageInfo(max 0 currentTokens, tokenLimit))
     | other -> Error $"unknown kind '{other}'"
 
-let internal kindText =
-    function
-    | SessionPresent -> "session_present"
-    | SessionClosed -> "session_closed"
-    | TurnStarted -> "turn_started"
-    | UserPrompt _ -> "user_prompt"
-    | AssistantMessage _ -> "assistant_message"
-    | SkillInvoked _ -> "skill_invoked"
-    | IntentReported _ -> "intent_reported"
-    | TitleReported _ -> "title_reported"
-    | TitleBootstrap _ -> "title_bootstrap"
-    | AwaitingUserInput _ -> "awaiting_user_input"
-    | UserInputCompleted _ -> "user_input_completed"
-    | BackgroundAgentStarted _ -> "background_agent_started"
-    | BackgroundAgentFinished _ -> "background_agent_finished"
-    | TurnEnded -> "turn_ended"
-    | WentIdle -> "went_idle"
-    | Heartbeat -> "heartbeat"
-    | UsageInfo _ -> "usage_info"
-
 let private withMessageTimestamp timestamp =
     function
     | UserPrompt message ->

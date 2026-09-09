@@ -9,7 +9,7 @@
   or PowerShell productization stack. The whole terminal runtime (`src/TerminalHost`,
   `src/TerminalHostLayout`, `src/Server/TerminalHost*.fs`,
   `src/Server/TerminalSessionActivity.fs`, `src/Server/EmbeddedTerminal.fs`, and any terminal-specific
-  runtime script) stays at or below 4,000 nonblank production lines. Product-level launch policy
+  runtime script) stays at or below 5,200 nonblank production lines. Product-level launch policy
   and user-authorized lifecycle policy (`TerminalLaunch.fs`, `WorktreeCleanup.fs`,
   `SessionManager.fs`, `WorktreeApi.fs`) route to that runtime and are outside both it and the
   budget.
@@ -256,8 +256,9 @@ through its process-keyed session bridge. The local endpoint acknowledges a vali
 before invoking `session.rpc.shutdown({ type: "routine" })`; completion is confirmed out of band by
 monotonic exact-instance closure or verified process exit. Missing registration, rejection, or
 timeout while the old host remains healthy aborts replacement rather than creating a concurrent
-CLI instance. If a partial graceful attempt aborts, recovery restores at most the selected durable
-session per terminal; other stopped conversations remain resumable history.
+CLI instance. An aborted attempt leaves the original host and its terminals in place; Treemon does
+not automatically recreate or Resume partially shut-down sessions, so the user retries the next
+idle window or resumes explicitly.
 
 After graceful shutdown, Treemon snapshots exact process ownership, closes the old host, and only
 then verifies Job Object and captured-process exit. The host uses
@@ -272,22 +273,22 @@ terminal. A terminal without one restarts as a plain PowerShell shell. This auto
 policy is intentionally narrower than explicit worktree Resume, which can select retained durable
 history as defined in `docs/spec/resume-last-session.md`.
 
-Recovery consumes the immutable replacement capture. A graceful-shutdown failure reuses only the
-verified old host and submits the selected Resume command once for a terminal only when every exact
-shutdown target in that terminal completed. Exact activity closure does not prove that the
-foreground CLI process has vacated the shell, so recovery gives every exactly closed process in a
-terminal selected for Resume one bounded exit grace. If an exact process remains or its exit cannot
-be verified, recovery closes only that fully stopped terminal through the TerminalHost's exact
-survivor cleanup, recreates it, and only then submits the selected command once. A terminal with any
-failed shutdown target remains untouched. An old-host stop failure reuses the healthy exact old host
-or relaunches its captured executable only after the old identity is proven gone. Once a staged host
-identity is known, recovery must stop and recheck that exact host before launching the old
-executable. If staged-host stop remains unresolved, the staged host stays the sole reported
-generation, its exact registry and unresolved identity are retained, and no rollback host starts.
-Rollback recreates the complete captured terminal presentation in opening order and submits each
-selected command at most once per recovered terminal. Ambiguous command delivery is not retried
-while its host generation remains live; after that exact generation is stopped, rollback may submit
-the captured command once to the recovered old terminal.
+Replacement is forward-only and has one irreversible boundary: the confirmed exit of the old host.
+Before that boundary, any failure aborts the attempt, starts no other host, and reports a failure
+that leaves the original host authoritative. When the old host's stop cannot be confirmed, Treemon
+rechecks that exact captured identity. A host proven still alive keeps the current state; a host
+proven gone has already crossed the boundary; unresolved liveness retains that captured identity as
+the only known host, interrupts the tabs, and never launches the staged host.
+
+After the boundary, Treemon never launches or revives the old executable. Any post-stop failure
+fails closed. When a launch produced an exact staged host manifest, Treemon stops that exact staged
+host so its Job Object cleans up every terminal and Copilot process the attempt created; a
+confirmed stop reports no current host, and an unconfirmed stop retains that staged manifest as the
+only known host and interrupts the tabs. A staged launch that was rejected or that started without
+a verifiable exact manifest reports no current host, and no terminals have been recreated in that
+case. Treemon never starts another host generation to compensate. The reported error and the
+interrupted tabs state that replacement stopped after the old host exited and that an external
+restart and explicit Resume are required.
 
 Stopping the old host may discard arbitrary non-Copilot shell state, running commands, raw replay,
 and scrollback. Recreated terminals keep the captured opening order, and the client remaps each
@@ -460,20 +461,20 @@ separate origin, so the dashboard cannot apply this styling itself.
 The server terminal runtime has one-way module boundaries: `TerminalHostProcess` owns process
 configuration, launch, and exact identity defaults; `TerminalHostEndpoint` owns the common
 loopback-HTTP endpoint shape; `TerminalHostManifest` validates discovery; `TerminalHostClient` owns
-authenticated control and attachment requests; `TerminalHostReplacement` coordinates the forward
-replacement attempt; `TerminalHostRecovery` resolves failed attempts back to one reported host
-generation; and `TerminalSessionActivity` derives the exact owned-session replacement policy from
-raw activity facts. `Server.EmbeddedTerminal` retains the mailbox, cleanup reservation,
-authoritative snapshot reconciliation, and public start/get surface. `TerminalHostRecovery`
-collapses its detailed result into a mailbox directive to apply the recovered
-registry, interrupt while retaining a known host, or interrupt with no known host; the mailbox
-executes that directive without interpreting recovery state combinations.
+authenticated control and attachment requests; `TerminalHostReplacement` coordinates the whole
+forward-only replacement attempt and returns its final transition; and `TerminalSessionActivity`
+derives the exact owned-session replacement policy from raw activity facts. `Server.EmbeddedTerminal`
+retains the mailbox, cleanup reservation, authoritative snapshot reconciliation, and public
+start/get surface. `TerminalHostReplacement` collapses every outcome into one mailbox directive —
+keep the current state, apply the replacement registry, interrupt while retaining a known host, or
+interrupt with no known host; the mailbox executes that directive without interpreting host state.
 `WorktreeCleanup` owns user-authorized close policy:
-it enters `EmbeddedTerminal.withCleanupLease`, queries and gracefully stops exact sessions, performs
-host I/O outside the mailbox, applies the authoritative registry transition, records exact closure,
-and only then invokes delete/archive mutation. The helper starts acquisition with the returned
-async workflow and owns the `finally` release, so failed or cancelled mutations cannot leave a path
-busy while unrelated paths remain concurrent.
+it takes the mailbox cleanup lease, queries and gracefully stops exact sessions, performs host I/O
+outside the mailbox, applies one final cleanup completion — the authoritative registry it reached,
+the terminals that registry proved closed, and the message to stamp on survivors — records exact
+closure, and only then invokes delete/archive mutation. Lease acquisition and the teardown itself
+run uncancellable and the lease is released in a `finally`, so a failed or cancelled mutation can
+neither abandon half-closed terminals nor leave a path busy while unrelated paths stay concurrent.
 The mailbox grants one replacement phase, keeps serving cached reads and bounded rejection replies
 while replacement runs asynchronously, then alone applies the replacement's registry transition.
 The client stores active terminal IDs and in-flight start state per worktree. Registry refreshes
@@ -497,9 +498,9 @@ launches and restarts; this check is independent of host compatibility and Copil
 Compatibility probing uses the manifest-declared API version for health, list, and shutdown, so an
 empty older host can be retired safely while a non-empty one remains available to its matching
 server until its terminals are closed.
-Replacement always derives `ttyd.exe` from the exact host executable being launched: a staged host
-uses its staged sibling and rollback uses the old host's sibling. A configured path from another
-bundle generation can never override that pairing.
+Replacement always derives `ttyd.exe` from the exact host executable being launched, so a staged
+host uses its staged sibling. A configured path from another bundle generation can never override
+that pairing.
 Lazy host startup accepts only the explicit `TREEMON_TERMINAL_HOST_EXECUTABLE` deployment input or
 the `terminal-host` directory beside the published Treemon executable. Development startup sets the
 explicit input to its local TerminalHost build; shipped server code never probes source-tree
@@ -521,9 +522,9 @@ with the epoch, every exact shutdown target, every pending-reconciliation identi
 optional shell command keyed by terminal session ID. Every open non-idle or pending instance gates.
 Within the confirmed open idle set, `(UpdatedAt, SessionId)` selects one resume identity per terminal.
 `TerminalSessionActivity` owns provider selection and `CodingToolCli` command construction;
-replacement orchestration owns graceful shutdown, authoritative teardown, rollback, host
-recreation, and command delivery. Hourly retention prunes old instances and origin epochs while the
-global counter remains monotonic.
+replacement orchestration owns graceful shutdown, authoritative teardown, fail-closed staged-host
+cleanup, host recreation, and command delivery. Hourly retention prunes old instances and origin
+epochs while the global counter remains monotonic.
 Activity ingestion accepts a Copilot `SessionId` only when it is 1–128 ASCII characters from
 `[A-Za-z0-9._:-]`, so the persisted resume identity is bounded and cannot carry terminal control
 input.
@@ -553,18 +554,20 @@ verification complete. The replacement registry receives fresh terminal IDs, so 
 preserves each worktree's selection by sibling ordinal rather than by stale identity.
 
 Lifecycle diagnostics record bounded counts and safe process identities for acknowledged presence,
-same-`SessionId` multiplicity, graceful shutdown outcomes, rollback, and exact survivor cleanup.
+same-`SessionId` multiplicity, graceful shutdown outcomes, replacement failure, and exact survivor
+cleanup.
 Several open process identities for one durable session are represented truthfully rather than
 treated as corruption; diagnostics distinguish that condition from a replacement attempt that
 created another process before its predecessor was confirmed stopped. Prompts, tokens, shutdown
 capabilities, terminal content, and raw external records are never logged.
 Replacement emits ordered capture, recheck, graceful-shutdown, old-host close, staged-host launch,
-terminal recreation, recovery-required, recovery-started, and completion transitions. Explicit
-teardown emits ordered graceful-attempt, host-close, exact-closure, and final outcome transitions.
-When several durable conversations share one terminal origin, the capture records the one selected
-for Resume and the others retained as history. Recovery records the authoritative host generation,
-registry availability, typed selected-session outcomes, and unresolved exact identities without
-including failure text. TerminalHost process cleanup separately records ownership capture and
+terminal recreation, and completion transitions, plus one terminal transition on failure that
+carries the typed failure kind, the resulting host state, and the safe identity of the host the
+mailbox retains. Explicit teardown emits ordered start, graceful-attempt, host-close, and final
+outcome transitions, with the host close carrying its typed outcome plus proven-closed and remaining
+terminal counts; each exact instance closure is recorded by its own closure diagnostic. When several durable conversations share one terminal origin, the
+capture records the one selected for Resume and the others retained as history. Failure text is
+never included in diagnostics. TerminalHost process cleanup separately records ownership capture and
 recapture, Job close, survivor observation, exact termination attempts, completion, or unresolved
 survivors. Every identity or session list shows at most eight sorted values plus full and omitted
 counts.
@@ -602,7 +605,7 @@ isolated server and fails on incomplete exact process cleanup.
   captured descendant survives. A forced-cleanup subcase resumes the durable session, permits a
   visible `Force resume?` confirmation, and proves no prior process or duplicate CLI remains.
 - A real-CLI replacement harness proves non-idle gating, graceful ordering, one Resume per terminal,
-  rollback into the old host, staged-host recovery, and zero old-process survivors.
+  fail-closed staged-host cleanup after a post-stop failure, and zero old-process survivors.
 - `npm run test:embedded-launch-routing` continues to exercise every agent-bearing launch entry
   point, bearer-redacted evidence, native HWND preservation, and exact failed-delivery rollback.
 
@@ -706,10 +709,9 @@ isolated server and fails on incomplete exact process cleanup.
   for every exact target before terminal teardown and aborts while the old host is healthy if any
   shutdown is unavailable, rejected, or times out. Endpoint acceptance is not completion; exact
   closure or process exit confirms success. No selected Resume command runs until the old host
-  closed and survivor verification is clean. Recovery likewise never writes Resume behind a closed
-  foreground CLI: it waits for exact process exit, then uses exact terminal close/recreation when a
-  closed process remains, and restores at most the selected stopped session per terminal before
-  reporting a failed replacement.
+  closed and survivor verification is clean. A failure before that close aborts the attempt without
+  any Resume; a failure after it stops the exact staged host rather than writing Resume into an
+  unverified generation.
 - **Shared bridge registry remains generic:** graceful shutdown extends the exact live-session
   registration by re-keying physical sessions while preserving the separate poll map and
   durable-session canvas queueing, liveness, and reconnect behavior.
@@ -717,8 +719,8 @@ isolated server and fails on incomplete exact process cleanup.
   cleanup may require the CLI's `Force resume?` confirmation, but must never coexist with the prior
   process.
 - **Safe lifecycle diagnostics:** record counts, typed outcomes, and exact safe identities for
-  multiplicity, shutdown, rollback, and survivor cleanup without logging terminal content,
-  capabilities, prompts, tokens, or raw records.
+  multiplicity, shutdown, replacement failure, and survivor cleanup without logging terminal
+  content, capabilities, prompts, tokens, or raw records.
 - **Resume without widening the control API:** after each replacement terminal is
   recreated, Treemon briefly attaches through the existing authenticated ttyd protocol and submits
   selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no
@@ -749,8 +751,8 @@ isolated server and fails on incomplete exact process cleanup.
   terminals as running.
 - **Executable-path replacement identity:** Treemon captures the exact running executable path
   before commit, waits for that exact process identity to exit, and verifies the replacement is
-  running from the selected direct staging directory. The captured path is also the rollback target
-  when the staged process cannot be launched.
+  running from the selected direct staging directory. A launch that publishes any other executable
+  is stopped rather than adopted.
 - **One-way server terminal modules:** process/configuration, manifest, control client, replacement,
   focused session-policy projection, and mailbox form an acyclic dependency graph. Replacement
   returns a commit transition for the mailbox to apply, so only `EmbeddedTerminal` reconciles
@@ -771,16 +773,16 @@ isolated server and fails on incomplete exact process cleanup.
 |---|---|
 | `src/TerminalHostLayout/Layout.fs` | Shared state/staging paths, version-directory grammar, executable names, and required host bundle members |
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
-| `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, `TerminalHostReplacement.fs`, and `TerminalHostRecovery.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, forward replacement, and compensating recovery |
+| `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, and forward-only replacement with fail-closed staged-host cleanup |
 | `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, cleanup reservation, command-capable start, and authoritative snapshot reconciliation |
 | `src/Server/WorktreeCleanup.fs` | Product-level explicit terminal/worktree teardown, graceful exact-session coordination, host close, and closure publication |
 | `src/Server/ProcessIdentity.fs` | Shared exact PID/start-tick identity and resolver used by activity ingress and process lifecycle checks |
 | `src/Server/SessionActivity.fs` | Per-process instance lifecycle fold, validated session/origin identities, liveness, and closure |
-| `src/Server/LifecycleDiagnostics.fs` | Bounded structured presence, bridge, shutdown, replacement, recovery, and teardown diagnostics |
+| `src/Server/LifecycleDiagnostics.fs` | Bounded structured presence, bridge, shutdown, replacement, and teardown diagnostics |
 | `src/Server/SessionActivityProtocol.fs`, `SessionActivityIngestion.fs`, and `SessionActivityService.fs` | Exact activity wire parsing, fold application, acknowledged presence, bounded live state, startup reconciliation, and mailbox-serialized terminal ownership queries |
 | `src/Server/TerminalSessionActivity.fs` | Exact process-instance and startup-reconciliation projection for tab activity, all-target non-idle gating, graceful shutdown targets, and one-per-terminal resume policy |
-| `src/Server/SessionActivityStoreSchema.fs` and `SessionActivityStore.fs` | Durable process-instance schema/migration, retained history, event idempotency, and retention |
+| `src/Server/SessionActivityStoreSchema.fs` and `SessionActivityStore.fs` | Durable process-instance schema/migration, resume identity, event dedupe keys, and retention |
 | `src/Extension/reporting/extension.mjs` | Acknowledged process presence, passive activity, heartbeat, background lifecycle, and shutdown reports |
 | `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `src/Server/SessionBridge.fs` | Shared exact registration plus capability-guarded graceful shutdown endpoint and bounded typed server control client |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |

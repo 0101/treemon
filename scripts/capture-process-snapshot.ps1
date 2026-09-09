@@ -5,16 +5,28 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Get-ProcessStartTicks($Process) {
+    try {
+        $runtimeProcess =
+            [Diagnostics.Process]::GetProcessById([int]$Process.ProcessId)
+
+        try {
+            return [string]([int64]$runtimeProcess.StartTime.ToUniversalTime().Ticks)
+        } finally {
+            $runtimeProcess.Dispose()
+        }
+    } catch [ArgumentException] {
+        return "0"
+    } catch [InvalidOperationException] {
+        return "0"
+    }
+}
+
 function Convert-ProcessRow($Process) {
     [pscustomobject]@{
         pid = [int]$Process.ProcessId
         parentPid = [int]$Process.ParentProcessId
-        startTicks =
-            if ($Process.CreationDate) {
-                [int64]$Process.CreationDate.ToUniversalTime().Ticks
-            } else {
-                0
-            }
+        startTicks = Get-ProcessStartTicks $Process
         name = [string]$Process.Name
         commandLine = [string]$Process.CommandLine
     }

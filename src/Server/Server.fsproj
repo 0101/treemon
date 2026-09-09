@@ -72,7 +72,6 @@
     <Compile Include="TerminalHostManifest.fs" />
     <Compile Include="TerminalHostClient.fs" />
     <Compile Include="TerminalHostReplacement.fs" />
-    <Compile Include="TerminalHostRecovery.fs" />
     <Compile Include="TerminalSessionActivity.fs" />
     <Compile Include="EmbeddedTerminal.fs" />
     <Compile Include="WorktreeCleanup.fs" />

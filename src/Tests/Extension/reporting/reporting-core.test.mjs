@@ -33,6 +33,19 @@ function map(event) {
   );
 }
 
+function expectedReport(event, kind, extra = {}) {
+  return {
+    parentProcessId: context.parentProcessId,
+    sessionId: context.sessionId,
+    worktreePath: context.worktreePath,
+    provider: context.provider,
+    eventId: event?.id ?? context.eventId,
+    occurredAt: event?.timestamp ?? context.occurredAt,
+    kind,
+    ...extra,
+  };
+}
+
 test("terminal origin is carried on every mapped report and omitted when absent", () => {
   const event = {
     id: "terminal-origin",
@@ -62,78 +75,52 @@ test("terminal origin is carried on every mapped report and omitted when absent"
 });
 
 test("metadata summary maps to title_bootstrap without a live title event", () => {
-  assert.deepEqual(buildNonBlankMessageReport(context, "title_bootstrap", "Investigate Intent Title Runtime"), {
-    parentProcessId: 4321,
-    sessionId: "session-1",
-    worktreePath: "worktree",
-    provider: "copilot_cli",
-    eventId: "event-1",
-    occurredAt: "2026-07-20T12:31:02.493Z",
-    kind: "title_bootstrap",
-    message: {
-      text: "Investigate Intent Title Runtime",
-      at: "2026-07-20T12:31:02.493Z",
-    },
-  });
+  assert.deepEqual(
+    buildNonBlankMessageReport(context, "title_bootstrap", "Investigate Intent Title Runtime"),
+    expectedReport(null, "title_bootstrap", {
+      message: { text: "Investigate Intent Title Runtime", at: context.occurredAt },
+    }),
+  );
 });
 
 test("subagent.started maps before agentId filtering", () => {
-  assert.deepEqual(map({
+  const event = {
     id: "subagent-start",
     timestamp: "2026-07-20T12:32:00.000Z",
     type: "subagent.started",
     agentId: "agent-1",
     data: { toolCallId: "tool-1" },
-  }), {
-    parentProcessId: 4321,
-    sessionId: "session-1",
-    worktreePath: "worktree",
-    provider: "copilot_cli",
-    eventId: "subagent-start",
-    occurredAt: "2026-07-20T12:32:00.000Z",
-    kind: "background_agent_started",
-    toolCallId: "tool-1",
-  });
+  };
+
+  assert.deepEqual(
+    map(event),
+    expectedReport(event, "background_agent_started", { toolCallId: "tool-1" }),
+  );
 });
 
 test("subagent.completed and subagent.failed map to terminal lifecycle reports", () => {
-  assert.deepEqual([
-    map({
-      id: "subagent-completed",
-      timestamp: "2026-07-20T12:33:00.000Z",
-      type: "subagent.completed",
-      agentId: "agent-1",
-      data: { toolCallId: "tool-1" },
-    }),
-    map({
-      id: "subagent-failed",
-      timestamp: "2026-07-20T12:34:00.000Z",
-      type: "subagent.failed",
-      agentId: "agent-2",
-      data: { toolCallId: "tool-2" },
-    }),
-  ], [
-    {
-      parentProcessId: 4321,
-      sessionId: "session-1",
-      worktreePath: "worktree",
-      provider: "copilot_cli",
-      eventId: "subagent-completed",
-      occurredAt: "2026-07-20T12:33:00.000Z",
-      kind: "background_agent_finished",
-      toolCallId: "tool-1",
-    },
-    {
-      parentProcessId: 4321,
-      sessionId: "session-1",
-      worktreePath: "worktree",
-      provider: "copilot_cli",
-      eventId: "subagent-failed",
-      occurredAt: "2026-07-20T12:34:00.000Z",
-      kind: "background_agent_finished",
-      toolCallId: "tool-2",
-    },
-  ]);
+  const completed = {
+    id: "subagent-completed",
+    timestamp: "2026-07-20T12:33:00.000Z",
+    type: "subagent.completed",
+    agentId: "agent-1",
+    data: { toolCallId: "tool-1" },
+  };
+  const failed = {
+    id: "subagent-failed",
+    timestamp: "2026-07-20T12:34:00.000Z",
+    type: "subagent.failed",
+    agentId: "agent-2",
+    data: { toolCallId: "tool-2" },
+  };
+
+  assert.deepEqual(
+    [map(completed), map(failed)],
+    [
+      expectedReport(completed, "background_agent_finished", { toolCallId: "tool-1" }),
+      expectedReport(failed, "background_agent_finished", { toolCallId: "tool-2" }),
+    ],
+  );
 });
 
 test("background lifecycle requires a nonblank data.toolCallId", () => {
@@ -273,15 +260,10 @@ test("session shutdown is reported live but never replayed into a resumed proces
     data: { shutdownType: "routine" },
   };
 
-  assert.deepEqual(reportForSdkEvent(context, shutdown), {
-    parentProcessId: 4321,
-    sessionId: "session-1",
-    worktreePath: "worktree",
-    provider: "copilot_cli",
-    eventId: "old-process-shutdown",
-    occurredAt: "2026-09-04T16:00:00.000Z",
-    kind: "session_closed",
-  });
+  assert.deepEqual(
+    reportForSdkEvent(context, shutdown),
+    expectedReport(shutdown, "session_closed"),
+  );
   assert.equal(reportForReplaySdkEvent(context, shutdown), null);
 });
 
@@ -474,19 +456,12 @@ test("message blankness is checked before the stored text is capped", () => {
 });
 
 test("live and bootstrap messages share the canonical report shape", () => {
-  assert.deepEqual(buildNonBlankMessageReport(context, "title_reported", "Live title"), {
-    parentProcessId: 4321,
-    sessionId: "session-1",
-    worktreePath: "worktree",
-    provider: "copilot_cli",
-    eventId: "event-1",
-    occurredAt: "2026-07-20T12:31:02.493Z",
-    kind: "title_reported",
-    message: {
-      text: "Live title",
-      at: "2026-07-20T12:31:02.493Z",
-    },
-  });
+  assert.deepEqual(
+    buildNonBlankMessageReport(context, "title_reported", "Live title"),
+    expectedReport(null, "title_reported", {
+      message: { text: "Live title", at: context.occurredAt },
+    }),
+  );
 });
 
 test("malformed events and non-string fields are dropped without coercion", () => {
@@ -543,20 +518,15 @@ test("the production event boundary drops malformed identities before mapping", 
     id: "event",
     type: "assistant.turn_start",
   }), null);
-  assert.deepEqual(reportForSdkEvent(baseContext, {
-    id: "event",
-    timestamp: context.occurredAt,
-    type: "assistant.turn_start",
-    data: {},
-  }), {
-    parentProcessId: context.parentProcessId,
-    sessionId: context.sessionId,
-    worktreePath: context.worktreePath,
-    provider: context.provider,
-    eventId: "event",
-    occurredAt: context.occurredAt,
-    kind: "turn_started",
-  });
+  assert.deepEqual(
+    reportForSdkEvent(baseContext, {
+      id: "event",
+      timestamp: context.occurredAt,
+      type: "assistant.turn_start",
+      data: {},
+    }),
+    expectedReport({ id: "event", timestamp: context.occurredAt }, "turn_started"),
+  );
 });
 
 test("a rejected live title produces no title report", () => {

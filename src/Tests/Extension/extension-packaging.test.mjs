@@ -44,12 +44,26 @@ test("reporting startup diagnostics expose process and inherited-origin presence
 
   assert.match(
     reporting,
-    /startup pid=\$\{process\.pid\} parentPid=\$\{parentProcessId\} terminalOrigin=\$\{terminalSessionId \? "present" : "absent"\} endpoints=\$\{activityUrls\.length\}/,
+    /startup pid=\$\{process\.pid\} parentPid=\$\{parentProcessId\} terminalOrigin=\$\{terminalSessionId \? "present" : "absent"\} endpointPort=\$\{port\}/,
   );
   assert.doesNotMatch(
     reporting,
     /startup[^`]*\$\{terminalSessionId\}/,
     "the exact terminal origin must not enter extension diagnostics",
+  );
+});
+
+test("the reporting extension targets exactly one Treemon activity endpoint", () => {
+  const reporting =
+    readFileSync(new URL("../../Extension/reporting/extension.mjs", import.meta.url), "utf8");
+
+  assert.match(
+    reporting,
+    /const port = process\.env\.TREEMON_PORT\?\.trim\(\) \|\| "5000";/,
+  );
+  assert.match(
+    reporting,
+    /const activityUrl = `http:\/\/127\.0\.0\.1:\$\{port\}\/api\/session\/activity`;/,
   );
 });
 

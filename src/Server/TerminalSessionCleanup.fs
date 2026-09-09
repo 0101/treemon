@@ -52,61 +52,55 @@ let internal terminalSessionCleanupWithDiagnostics
                 Ok()
             else
                 let observedAfter = query closedTerminalIds
+                let closedAt = DateTimeOffset.UtcNow
 
-                let sessions =
+                let acknowledgements =
                     [ captured; observedAfter ]
                     |> List.choose Result.toOption
                     |> List.collect id
                     |> List.filter (fun session ->
                         closedTerminalIds.Contains session.TerminalSessionId)
                     |> List.distinctBy _.ProcessIdentity
+                    |> List.map (fun session ->
+                        session, service.CloseProcess(session.ProcessIdentity, closedAt))
 
-                let closedAt = DateTimeOffset.UtcNow
+                acknowledgements
+                |> List.iter (fun (session, acknowledgement) ->
+                    let outcome =
+                        match acknowledgement with
+                        | ClosureAcknowledge.Closed ->
+                            LifecycleDiagnostics.ExactClosureOutcome.Recorded
+                        | ClosureAcknowledge.Missing ->
+                            LifecycleDiagnostics.ExactClosureOutcome.Missing
+                        | ClosureAcknowledge.Failed _ ->
+                            LifecycleDiagnostics.ExactClosureOutcome.Failed
+
+                    diagnostics (
+                        LifecycleDiagnostics.Diagnostic.ExactClosure
+                            { ProcessIdentity = session.ProcessIdentity
+                              SessionId = session.CopilotSessionId
+                              TerminalSessionId = session.TerminalSessionId
+                              Outcome = outcome }
+                    ))
+
+                let reconcileError =
+                    match observedAfter with
+                    | Error error ->
+                        [ $"Could not reconcile exact terminal sessions: {error}" ]
+                    | Ok _ -> []
 
                 let closureErrors =
-                    sessions
-                    |> List.map (fun session ->
-                        let acknowledgement =
-                            service.CloseProcess(
-                                session.ProcessIdentity,
-                                closedAt
-                            )
-
-                        let outcome =
-                            match acknowledgement with
-                            | ClosureAcknowledge.Closed ->
-                                LifecycleDiagnostics.ExactClosureOutcome.Recorded
-                            | ClosureAcknowledge.Missing ->
-                                LifecycleDiagnostics.ExactClosureOutcome.Missing
-                            | ClosureAcknowledge.Failed _ ->
-                                LifecycleDiagnostics.ExactClosureOutcome.Failed
-
-                        diagnostics (
-                            LifecycleDiagnostics.Diagnostic.ExactClosure
-                                { ProcessIdentity =
-                                    session.ProcessIdentity
-                                  SessionId =
-                                    session.CopilotSessionId
-                                  TerminalSessionId =
-                                    session.TerminalSessionId
-                                  Outcome = outcome }
-                        )
-
+                    acknowledgements
+                    |> List.choose (fun (_, acknowledgement) ->
                         match acknowledgement with
                         | ClosureAcknowledge.Closed -> None
                         | ClosureAcknowledge.Missing ->
                             Some "an exact session closure target was not found"
                         | ClosureAcknowledge.Failed error -> Some error)
-                    |> List.choose id
 
-                match observedAfter, closureErrors with
-                | Error error, [] ->
-                    Error $"Could not reconcile exact terminal sessions: {error}"
-                | Error error, failures ->
-                    let failureText = String.concat "; " failures
-                    Error $"Could not reconcile exact terminal sessions: {error}; {failureText}"
-                | Ok _, [] -> Ok()
-                | Ok _, failures -> Error(String.concat "; " failures)
+                match reconcileError @ closureErrors with
+                | [] -> Ok()
+                | errors -> Error(String.concat "; " errors)
 
         { BeforeHostClose = beforeHostClose
           AfterHostClose = afterHostClose }
