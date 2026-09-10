@@ -29,54 +29,12 @@ dotnet test src/Tests/Tests.fsproj --filter "Category=Unit" # unit tests only
 - Do not spend repository-local time or tokens on PR prose polishing, previews, or adversarial-review
   ceremony. Mandatory higher-priority publication and encoding rules still apply.
 
-## F# Style Guide
+## F# Development
 
-This project uses strict functional F# style. These rules are non-negotiable.
-
-**Critical requirements:**
-- **NEVER use loops to build or accumulate values** — use recursion or higher-order functions (`List.map`, `List.filter`, `List.fold`, `Array.map`, `Seq.map`, etc.). Iterating *purely* for side effects (`for ... do` or `List.iter`) is fine; keep transformation and effects separate — transform cleanly first, then iterate for effects (minimizing side effects is a separate concern).
-- Prefer immutable state. If mutation is required by an impure boundary such as a timer, subscription, mailbox, or NUnit lifecycle, confine it to the smallest scope as `let mutable` and add one inline comment explaining why an immutable solution does not fit. Do not use `ref` as a workaround; it is the same mutation with worse ergonomics.
-- **NEVER pass collections into methods to be mutated** — return new collections instead
-
-**Patterns:**
-- **Pipe-forward** `|>` for data transformations
-- **Pattern matching** over if/else chains — but use `if/then/else` for simple booleans
-- **Tuple matching** — flatten nested `match` into `match a, b with` tuple patterns
-- **Discriminated unions** for domain modeling — make illegal states unrepresentable and preserve existing DUs through function boundaries; avoid opaque booleans, magic string sentinels, and same-typed primitive parameters that can be swapped
-- **Option types** instead of null
-- **Module organization** — group functions in modules, avoid classes
-- **Module cohesion** — put code in the module named for its concept, not the first consumer that needed it; shared code belongs in a concept-specific module, not a generic `Utils` or `Helpers` module
-- **Computation expressions** — `async`, `seq`, `result`, `asyncResult` for workflows
-- **F# 9 shorthand lambdas** — `_.Property`, `_.Method(arg)`, chained `_.Trim().ToUpper()`, nested `_.Value.Name` instead of `fun x -> ...`. No wrapping parens needed: `List.exists _.StartsWith("x")`. Only works with `.` member access — not operators or indexers.
-- **Type inference** — only annotate when needed for clarity
-- **Immutable collections** — use F# `list`, `Map`, `Set` instead of `Dictionary<>`, `ResizeArray`, `List<T>` (mutable .NET types)
-- **String interpolation** — `$"text {x}"` instead of `sprintf "text %s" x`
-- **Modern indexing** — `collection[0]` not `collection.[0]` (dot-bracket obsolete since F# 6)
-- **Nested record copy-and-update** — collapse hand-nested updates with F# 7+ dotted syntax: `{ x with A.B = v }`, and multi-field `{ x with A.B = v1; A.C = v2 }`, instead of `{ x with A = { x.A with B = v } }`. Only applies when the inner record copies the *same* field of the *same* source (`x.A`); it does **not** apply inside a full record literal such as `{ A = { x.A with B = v }; C = ... }` (no outer `with`). Fable 5.0 supports this syntax.
-- **CSS over inline styles** — use `prop.className` with CSS classes, not `style.*` in Feliz views (inline styles bypass the theme)
-- **`Path.Combine()`** for paths, **`Environment.NewLine`** for line endings
-
-**FsToolkit.ErrorHandling** (currently referenced in Server project, add to Client/Shared if needed):
-- Use `asyncResult { }` instead of nesting `match ... with Ok/Error` inside `async { }` — it short-circuits on Error
-- `let!` binds `Async<Result<_,_>>`, plain `Async<_>`, or `Result<_,_>` — no manual lifting needed
-- `if ... then return! Error "msg"` for early exits (no `Result.requireTrue` needed)
-- `do!` with `AsyncResult.ignore` to discard Ok values (e.g. `runGitResult` returns stdout you don't need)
-- `AsyncResult.orElseWith` for fallback/recovery on Error
-- `AsyncResult.mapError` to transform error messages
-- `Result.requireSome "msg"` to convert `Option` → `Result`
-- Extract complex recovery logic into helpers returning `Async<Result<_,_>>`, then `let!`/`do!` them from the CE
-
-**Code style:**
-- Concise, readable code — optimize for clarity, not premature performance
-- Choose the simplest complete implementation — avoid one-call helpers, impossible-state guards, hypothetical feature flags, and unsupported compatibility shims. Durable stores may use the smallest bounded, idempotent, tested migration needed to prevent startup failure or data loss.
-- Files over roughly 1,000 lines warrant a cohesion check. Split only when they own distinct responsibilities with a clear module boundary, not solely to reduce line count.
-- Single responsibility per function/module
-- Expression-oriented — prefer expressions over statements
-- Comments explain non-obvious algorithms or critical edge cases. Do not add TODOs, change-history comments, restatements, or section-divider comments in production code; extract a named function instead.
-
-## Before Writing New Code
-
-Before implementing a helper, utility, or any non-trivial logic, **search the codebase** for the underlying command, operation, or concept — not just the function name you have in mind. Reuse an existing function when possible. If reusable logic is embedded in business logic, extract it into the module that owns the concept. Otherwise, consider extending or parameterizing a cohesive existing function, including with a projection or operation function. Generalize only when this creates one clear source of truth without coupling distinct domain behavior, and choose the destination module by responsibility rather than by the first call site.
+Before writing, changing, reviewing, or testing F# code, load and follow the globally installed
+[`writing-fsharp` skill](https://github.com/0101/agent-skills). It is the source of truth for general
+F# coding guidance; keep this file limited to Treemon-specific constraints. Rules in this file and
+scoped `.github/instructions/` files take precedence where they are more specific.
 
 ## Before Finishing a Change
 
