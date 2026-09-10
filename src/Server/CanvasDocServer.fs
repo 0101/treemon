@@ -68,8 +68,7 @@ let internal tryFindDiffComparisonContext
         repoId,
         ({ WorktreePath = PathUtils.normalizePath selectedWorktreePath
            UpstreamRemote = repo.UpstreamRemote
-           BaseBranch = repo.BaseBranch
-           Target = WorktreeDiff.DiffComparisonTarget.ConfiguredBase }
+           BaseBranch = repo.BaseBranch }
          : WorktreeDiff.DiffComparisonContext))
 
 /// The repository root and comparison context behind one diff request, resolved from a single

@@ -214,6 +214,15 @@ let withDiffServer
         newIdentity
         action
 
+let defaultComparisonTargets: WorktreeDiff.DiffComparisonTargets =
+    { ConfiguredBase =
+        WorktreeDiff.ConfiguredDiffComparison.Remote
+            "origin/main"
+      LocalBranches = [] }
+
+let getDefaultComparisonTargets _ _ =
+    async.Return(Ok defaultComparisonTargets)
+
 let fakeService
     (summary:
         Result<
@@ -238,8 +247,9 @@ let fakeService
               LocalCount = Error error
               UntrackedCount = Error error }
 
-    { GetSummary = fun _ _ _ -> async.Return summary
-      GetLayerCounts = fun _ _ -> async.Return counts
+    { GetComparisonTargets = getDefaultComparisonTargets
+      GetSummary = fun _ _ _ _ -> async.Return summary
+      GetLayerCounts = fun _ _ _ -> async.Return counts
       GetFile = fun _ _ _ _ entry -> async.Return(file entry) }
 
 let summaryIdentity
@@ -322,8 +332,7 @@ let fileSummary
 let private diffContext worktreePath : WorktreeDiff.DiffComparisonContext =
     { WorktreePath = worktreePath
       UpstreamRemote = "origin"
-      BaseBranch = "main"
-      Target = WorktreeDiff.DiffComparisonTarget.ConfiguredBase }
+      BaseBranch = "main" }
 
 /// Sends one request through a diff handler in-process, so a summary can be classified against a
 /// configuration value directly. The canvas server resolves that value from the repository root per

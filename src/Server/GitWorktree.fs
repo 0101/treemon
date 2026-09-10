@@ -489,6 +489,44 @@ let branchSortKey (baseBranch: string) (name: string) =
     | n when n.StartsWith("dev") -> (3, name)
     | _ -> (4, name)
 
+let internal hasUnsafeComparisonCharacters (value: string) =
+    value
+    |> Seq.exists (fun character ->
+        Char.IsControl character
+        || Char.GetUnicodeCategory(character)
+           = Globalization.UnicodeCategory.Format)
+
+let internal isSafeComparisonBranch (branchName: string) =
+    not (String.IsNullOrWhiteSpace branchName)
+    && not (hasUnsafeComparisonCharacters branchName)
+
+let internal parseLocalBranches
+    (baseBranch: string)
+    : string -> string list =
+    _.Split(
+        [| '\r'; '\n' |],
+        StringSplitOptions.RemoveEmptyEntries
+    )
+    >> Array.toList
+    >> List.filter isSafeComparisonBranch
+    >> List.distinct
+    >> List.sortBy (branchSortKey baseBranch)
+
+let internal canonicalLocalBranchName configuredName localBranches =
+    localBranches
+    |> List.tryFind ((=) configuredName)
+    |> Option.orElseWith (fun () ->
+        localBranches
+        |> List.filter (fun branch ->
+            String.Equals(
+                branch,
+                configuredName,
+                StringComparison.OrdinalIgnoreCase
+            ))
+        |> function
+            | [ branch ] -> Some branch
+            | _ -> None)
+
 let private validBranchNamePattern = System.Text.RegularExpressions.Regex(@"^[a-zA-Z0-9][a-zA-Z0-9._/-]*$")
 
 let validateBranchName (branchName: string) =

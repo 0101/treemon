@@ -28,8 +28,7 @@ let private layers committed local untracked : WorktreeDiffLayers =
 let private comparisonContext worktreePath : DiffComparisonContext =
     { WorktreePath = worktreePath
       UpstreamRemote = "origin"
-      BaseBranch = "main"
-      Target = DiffComparisonTarget.ConfiguredBase }
+      BaseBranch = "main" }
 
 let private assertSummaryOk result =
     match result with
@@ -1084,6 +1083,7 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "branch"; "zeta" ]
         gitOk repoDir [ "branch"; "dev-topic" ]
         gitOk repoDir [ "branch"; "feature/topic&mode=100%" ]
+        gitOk repoDir [ "tag"; "feature/topic&mode=100%" ]
 
         let targets =
             getDiffComparisonTargets (comparisonContext repoDir)
@@ -1094,7 +1094,7 @@ type WorktreeDiffIntegrationTests() =
             Assert.That(
                 targets.ConfiguredBase,
                 Is.EqualTo(
-                    ConfiguredDiffComparison.Available
+                    ConfiguredDiffComparison.Remote
                         "origin/main"
                 )
             )
@@ -1113,6 +1113,7 @@ type WorktreeDiffIntegrationTests() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
         gitOk repoDir [ "branch"; "feature" ]
+        gitOk repoDir [ "tag"; "main" ]
 
         let targets =
             getDiffComparisonTargets (comparisonContext repoDir)
@@ -1123,11 +1124,53 @@ type WorktreeDiffIntegrationTests() =
             Assert.That(
                 targets.ConfiguredBase,
                 Is.EqualTo(
-                    ConfiguredDiffComparison.Available
+                    ConfiguredDiffComparison.Local
                         "main"
                 )
             )
             Assert.That(targets.LocalBranches, Is.EqualTo([ "feature" ])))
+
+    [<Test>]
+    member _.``comparison targets omit deceptive Unicode branch names``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        let deceptive = "ma\u200Bin"
+        gitOk repoDir [ "branch"; deceptive ]
+        gitOk repoDir [ "branch"; "feature/žluťoučký" ]
+
+        let targets =
+            getDiffComparisonTargets (comparisonContext repoDir)
+            |> TestUtils.runAsync
+            |> assertComparisonTargetsOk
+
+        Assert.Multiple(fun () ->
+            Assert.That(targets.LocalBranches, Does.Not.Contain(deceptive))
+            Assert.That(
+                targets.LocalBranches,
+                Does.Contain("feature/žluťoučký")
+            ))
+
+    [<Test>]
+    member _.``local configured base uses canonical Windows ref casing``() =
+        if not (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) then
+            Assert.Ignore("Git ref casing behavior is Windows-specific")
+
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+
+        let targets =
+            getDiffComparisonTargets
+                { comparisonContext repoDir with
+                    BaseBranch = "MAIN" }
+            |> TestUtils.runAsync
+            |> assertComparisonTargetsOk
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                targets.ConfiguredBase,
+                Is.EqualTo(ConfiguredDiffComparison.Local "main")
+            )
+            Assert.That(targets.LocalBranches, Is.Empty))
 
     [<Test>]
     member _.``missing configured base keeps local alternatives available``() =
@@ -1164,11 +1207,12 @@ type WorktreeDiffIntegrationTests() =
         writeText repoDir "feature.txt" "feature"
         gitOk repoDir [ "add"; "--"; "feature.txt" ]
         gitOk repoDir [ "commit"; "-m"; "feature" ]
+        gitOk repoDir [ "tag"; "target" ]
 
         let summary =
-            getWorktreeDiffSummary
-                { comparisonContext repoDir with
-                    Target = DiffComparisonTarget.LocalBranch "target" }
+            getWorktreeDiffSummaryForTarget
+                (comparisonContext repoDir)
+                (DiffComparisonTarget.LocalBranch "target")
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -1196,11 +1240,9 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "branch"; "target" ]
 
         let result =
-            getWorktreeDiffSummary
-                { comparisonContext repoDir with
-                    Target =
-                        DiffComparisonTarget.LocalBranch
-                            "target^{}" }
+            getWorktreeDiffSummaryForTarget
+                (comparisonContext repoDir)
+                (DiffComparisonTarget.LocalBranch "target^{}")
             |> TestUtils.runAsync
 
         match result with
@@ -1208,6 +1250,22 @@ type WorktreeDiffIntegrationTests() =
             Assert.That(branch, Is.EqualTo("target^{}"))
         | _ ->
             Assert.Fail($"Expected exact-ref rejection, got {result}")
+
+    [<Test>]
+    member _.``selected local branch probe failures identify target resolution``() =
+        let nonRepo = Path.Combine(tempDir, "not-a-repo")
+        Directory.CreateDirectory(nonRepo) |> ignore
+
+        let result =
+            getWorktreeDiffSummaryForTarget
+                (comparisonContext nonRepo)
+                (DiffComparisonTarget.LocalBranch "target")
+            |> TestUtils.runAsync
+
+        match result with
+        | Error(GitFailed(ResolveComparisonTarget, _)) -> ()
+        | _ ->
+            Assert.Fail($"Expected target-resolution failure, got {result}")
 
     [<Test>]
     member _.``missing scheduler-resolved base is a typed summary error``() =
@@ -1288,7 +1346,7 @@ type WorktreeDiffIntegrationTests() =
         | _ -> Assert.Fail($"Expected typed Git failure, got {result}")
 
     [<Test>]
-    member _.``unrelated base history returns a typed merge-base failure``() =
+    member _.``unrelated base history returns a typed no-common-ancestor error``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
         gitOk repoDir [ "checkout"; "--orphan"; "feature" ]
@@ -1299,8 +1357,8 @@ type WorktreeDiffIntegrationTests() =
             |> TestUtils.runAsync
 
         match result with
-        | Error(GitFailed(ResolveMergeBase, 1)) -> ()
-        | _ -> Assert.Fail($"Expected merge-base failure, got {result}")
+        | Error(NoCommonAncestor "main") -> ()
+        | _ -> Assert.Fail($"Expected no common ancestor, got {result}")
 
     [<Test>]
     member _.``rename and delete preserve paths and match direct Git patches``() =

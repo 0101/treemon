@@ -54,6 +54,9 @@ var state = {
     comparisonReady: false,
     comparisonRequest: 0,
     comparisonNotice: '',
+    comparisonWarning: '',
+    comparisonStatus: '',
+    refreshPromise: null,
     fileRequest: 0,
     fileAbort: null,
     summaryRequest: 0,
@@ -118,7 +121,16 @@ function updateFilterInputs() {
 }
 
 function setComparisonStatus(message) {
-    document.getElementById('comparison-status').textContent = message || '';
+    state.comparisonStatus = message || '';
+    document.getElementById('comparison-status').textContent =
+        [state.comparisonWarning, state.comparisonStatus]
+            .filter(Boolean)
+            .join(' · ');
+}
+
+function setComparisonWarning(message) {
+    state.comparisonWarning = message || '';
+    setComparisonStatus(state.comparisonStatus);
 }
 
 function comparisonScopeStatus() {
@@ -172,11 +184,11 @@ function showComparisonUnavailable(reason) {
         select.value = '';
     }
 
-    state.comparisonNotice = reason + (
+    setComparisonWarning(reason + (
         keepsCurrent
             ? '; keeping the current comparison.'
             : '; using configured base.'
-    );
+    ));
     updateComparisonControl();
 }
 
@@ -187,6 +199,10 @@ function isComparisonMetadata(metadata) {
         metadata.configuredBase &&
         typeof metadata.configuredBase.label === 'string' &&
         typeof metadata.configuredBase.available === 'boolean' &&
+        (
+            metadata.configuredBase.localBranch === null ||
+            typeof metadata.configuredBase.localBranch === 'string'
+        ) &&
         Array.isArray(metadata.localBranches) &&
         metadata.localBranches.every(function(branch) {
             return typeof branch === 'string' && branch.length > 0;
@@ -197,8 +213,16 @@ function isComparisonMetadata(metadata) {
 function showComparisonTargets(metadata) {
     var select = document.getElementById('comparison-target');
     var preferred = state.targetBranch || readStorage(TARGET_KEY);
-    var hasPreferred = preferred && metadata.localBranches.includes(preferred);
-    var base = comparisonOption('', metadata.configuredBase.label);
+    var preferredUsesBase =
+        preferred &&
+        metadata.configuredBase.localBranch === preferred;
+    var hasPreferred =
+        preferredUsesBase ||
+        (preferred && metadata.localBranches.includes(preferred));
+    var base = comparisonOption(
+        preferredUsesBase ? preferred : '',
+        metadata.configuredBase.label
+    );
 
     if (!metadata.configuredBase.available) {
         base.title = 'Configured base is unavailable.';
@@ -232,6 +256,7 @@ function showComparisonTargets(metadata) {
     select.value = state.targetBranch || '';
     select.removeAttribute('aria-busy');
     state.comparisonReady = true;
+    setComparisonWarning('');
     updateComparisonControl();
 }
 
@@ -261,7 +286,27 @@ async function loadComparisons() {
 }
 
 async function refreshComparisonsAndSummary() {
-    if (await loadComparisons()) loadSummary();
+    if (state.refreshPromise) return state.refreshPromise;
+
+    var refresh = document.getElementById('refresh');
+    var savedTarget = state.targetBranch || readStorage(TARGET_KEY);
+    refresh.disabled = true;
+    refresh.setAttribute('aria-busy', 'true');
+
+    var operation =
+        savedTarget
+            ? loadComparisons().then(function(current) {
+                if (current) return loadSummary();
+            })
+            : Promise.all([loadComparisons(), loadSummary()]);
+
+    state.refreshPromise = operation.finally(function() {
+        state.refreshPromise = null;
+        refresh.disabled = false;
+        refresh.removeAttribute('aria-busy');
+    });
+
+    return state.refreshPromise;
 }
 
 function comparisonChanged() {
@@ -281,6 +326,9 @@ function layerCountPresentation(result) {
     }
     if (result.status === 'base-error') {
         return { text: 'unavailable', title: 'File count unavailable because the comparison base could not be resolved.' };
+    }
+    if (result.status === 'no-common-ancestor') {
+        return { text: 'unavailable', title: 'File count unavailable because the selected branch does not share history with HEAD.' };
     }
     if (result.status === 'timeout') {
         return { text: 'unavailable', title: 'File count unavailable because Git timed out.' };
@@ -1304,6 +1352,15 @@ function renderSummaryState(summary) {
                 state.targetBranch
                     ? 'The selected local branch no longer exists. Use Refresh or choose another branch.'
                     : 'Treemon could not resolve the configured base branch.',
+                false
+            );
+            break;
+        case 'no-common-ancestor':
+            setComparisonStatus('No shared history');
+            renderState(
+                'no-common-ancestor',
+                'Branches do not share history',
+                'Choose a comparison branch that shares history with HEAD.',
                 false
             );
             break;

@@ -175,6 +175,11 @@ select { font: inherit; }
     opacity: 1;
 }
 
+.refresh-button:disabled {
+    cursor: default;
+    opacity: .35;
+}
+
 .view-toggle button:focus-visible,
 .refresh-button:focus-visible,
 .file-actions-button:focus-visible {

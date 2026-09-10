@@ -149,6 +149,20 @@ let private summaryStateJson status =
                files = Array.empty<obj>
                layerCounts = layerCounts |}
         )
+    | "no-common-ancestor" ->
+        JsonSerializer.Serialize(
+            {| status = "no-common-ancestor"
+               layerCounts =
+                {| committed =
+                    {| status = "no-common-ancestor"
+                       fileCount = (None: int option) |}
+                   local =
+                    {| status = "ready"
+                       fileCount = Some 0 |}
+                   untracked =
+                    {| status = "ready"
+                       fileCount = Some 0 |} |} |}
+        )
     | "too-many-files" ->
         JsonSerializer.Serialize(
             {| status = "too-many-files"
@@ -935,6 +949,256 @@ type DiffViewerE2ETests() =
                        "?committed=true&local=true&untracked=false" |]
                 )
             )
+        }
+
+    [<Test>]
+    member this.``deduplicated local base preserves an explicit saved target``() =
+        task {
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        localStorage.setItem(
+                            'treemon.diff.target:/e2e-diff-worktree',
+                            'main'
+                        );
+                        window.__summaryQueries = [];
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            if (url.includes('diff-summary')) {
+                                window.__summaryQueries.push(new URL(url, location.href).search);
+                            }
+                            return originalFetch.apply(this, arguments);
+                        };
+                    })()"""
+                )
+            do!
+                this.RouteComparisonResponses(
+                    [| comparisonTargetsJson
+                           "origin/main"
+                           true
+                           [| "main"; "feature" |];
+                       comparisonTargetsJsonWithLocalBranch
+                           "main"
+                           true
+                           (Some "main")
+                           [| "feature" |];
+                       comparisonTargetsJson
+                           "origin/main"
+                           true
+                           [| "main"; "feature" |] |]
+                )
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.Goto()
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+
+            do! this.Page.Locator("#refresh").ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__summaryQueries.length === 2"
+                )
+
+            let! localFallback =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.getElementById('comparison-target').value,
+                        document.getElementById('comparison-target').options[0].value,
+                        localStorage.getItem('treemon.diff.target:/e2e-diff-worktree'),
+                        window.__summaryQueries.at(-1)
+                    ]"""
+                )
+
+            do! this.Page.Locator("#refresh").ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__summaryQueries.length === 3"
+                )
+
+            let! remoteRestored =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.getElementById('comparison-target').value,
+                        localStorage.getItem('treemon.diff.target:/e2e-diff-worktree'),
+                        window.__summaryQueries.at(-1)
+                    ]"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    localFallback,
+                    Is.EqualTo(
+                        [| "main"
+                           "main"
+                           "main"
+                           "?committed=true&local=true&untracked=false&branch=main" |]
+                    )
+                )
+                Assert.That(
+                    remoteRestored,
+                    Is.EqualTo(
+                        [| "main"
+                           "main"
+                           "?committed=true&local=true&untracked=false&branch=main" |]
+                    )
+                ))
+        }
+
+    [<Test>]
+    member this.``default summary renders while branch metadata is still loading``() =
+        task {
+            let comparisonRequested =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let releaseComparison =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-comparisons",
+                    Func<IRoute, Task>(fun route ->
+                        (task {
+                            comparisonRequested.TrySetResult(true) |> ignore
+                            let! _ = releaseComparison.Task
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = defaultComparisonTargetsJson
+                                    )
+                                )
+                        } :> Task))
+                )
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.Goto()
+            let! _ = comparisonRequested.Task
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+
+            let! whilePending =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.getElementById('comparison-target').textContent.trim(),
+                        String(document.getElementById('comparison-target').disabled),
+                        String(document.querySelectorAll('.file-entry').length)
+                    ]"""
+                )
+
+            releaseComparison.TrySetResult(true) |> ignore
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => !document.getElementById('comparison-target').disabled"
+                )
+
+            Assert.That(
+                whilePending,
+                Is.EqualTo([| "origin/main"; "true"; "1" |])
+            )
+        }
+
+    [<Test>]
+    member this.``failed branch refresh warning survives selection and summary states``() =
+        task {
+            do!
+                this.RouteSummaries(
+                    [| readySummaryJson [| firstFile |]
+                       readySummaryJson [| firstFile |]
+                       readySummaryJson [| firstFile |]
+                       readySummaryJson [| firstFile |]
+                       summaryStateJson "filtered-empty" |]
+                )
+            do! this.Goto()
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+            do!
+                this.RouteComparisons(
+                    JsonSerializer.Serialize {| status = "git-error" |}
+                )
+
+            do! this.Page.Locator("#refresh").ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.getElementById('comparison-status').textContent.includes('Branch list unavailable')"
+                )
+
+            let! _ =
+                this.Page.EvaluateAsync<obj>(
+                    """() => {
+                        const select = document.getElementById('comparison-target');
+                        select.value = 'main';
+                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                    }"""
+                )
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+            do! this.Page.Locator("#filter-committed").UncheckAsync()
+            do! this.Page.Locator("#filter-local").UncheckAsync()
+            do! this.Page.Locator("[data-state='filtered-empty']").WaitForAsync()
+
+            let! warning =
+                this.Page.Locator("#comparison-status").TextContentAsync()
+
+            Assert.That(warning, Does.Contain("Branch list unavailable"))
+            Assert.That(warning, Does.Contain("All change layers hidden"))
+        }
+
+    [<Test>]
+    member this.``overlapping refresh requests share one branch scan``() =
+        task {
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.Goto()
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+
+            let requested =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let release =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let mutable requests = 0 // Playwright route callbacks require one shared request count.
+
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-comparisons",
+                    Func<IRoute, Task>(fun route ->
+                        (task {
+                            requests <- requests + 1
+                            requested.TrySetResult(true) |> ignore
+                            let! _ = release.Task
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = defaultComparisonTargetsJson
+                                    )
+                                )
+                        } :> Task))
+                )
+
+            let! _ =
+                this.Page.EvaluateAsync<obj>(
+                    "() => { refreshComparisonsAndSummary(); refreshComparisonsAndSummary(); }"
+                )
+            let! _ = requested.Task
+
+            let! disabled =
+                this.Page.Locator("#refresh").IsDisabledAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(requests, Is.EqualTo(1))
+                Assert.That(disabled, Is.True))
+
+            release.TrySetResult(true) |> ignore
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => !document.getElementById('refresh').disabled"
+                )
+
+            ()
         }
 
     [<Test>]
@@ -2839,6 +3103,7 @@ type DiffViewerE2ETests() =
     [<TestCase("clean", "No changes")>]
     [<TestCase("filtered-empty", "No change layers selected")>]
     [<TestCase("base-error", "Comparison base unavailable")>]
+    [<TestCase("no-common-ancestor", "Branches do not share history")>]
     [<TestCase("timeout", "Diff timed out")>]
     [<TestCase("git-error", "Diff unavailable")>]
     [<TestCase("too-many-files", "Too many changed files")>]

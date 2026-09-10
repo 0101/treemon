@@ -5,9 +5,19 @@ open System.Text.Json
 open Shared
 
 type internal Service =
-    { GetSummary:
+    { GetComparisonTargets:
         ProcessRunner.ResponseDeadline
             -> WorktreeDiff.DiffComparisonContext
+            -> Async<
+                Result<
+                    WorktreeDiff.DiffComparisonTargets,
+                    WorktreeDiff.WorktreeDiffError
+                 >
+             >
+      GetSummary:
+        ProcessRunner.ResponseDeadline
+            -> WorktreeDiff.DiffComparisonContext
+            -> WorktreeDiff.DiffComparisonTarget
             -> WorktreeDiff.WorktreeDiffLayers
             -> Async<
                 Result<
@@ -18,6 +28,7 @@ type internal Service =
       GetLayerCounts:
         ProcessRunner.ResponseDeadline
             -> WorktreeDiff.DiffComparisonContext
+            -> WorktreeDiff.DiffComparisonTarget
             -> Async<WorktreeDiff.WorktreeDiffLayerCounts>
       GetFile:
         ProcessRunner.ResponseDeadline
@@ -449,9 +460,12 @@ let prune knownWorktrees =
     defaultIdentityStore.Value.Prune(knownWorktrees)
 
 let internal liveService =
-    { GetSummary = WorktreeDiff.getWorktreeDiffSummaryWithinDeadline
+    { GetComparisonTargets =
+        WorktreeDiff.getDiffComparisonTargetsWithinDeadline
+      GetSummary =
+        WorktreeDiff.getWorktreeDiffSummaryForTargetWithinDeadline
       GetLayerCounts =
-        WorktreeDiff.getWorktreeDiffLayerCountsWithinDeadline
+        WorktreeDiff.getWorktreeDiffLayerCountsForTargetWithinDeadline
       GetFile = WorktreeDiff.getWorktreeDiffFileWithinDeadline }
 
 let internal newOpaqueIdentity (_: WorktreeDiff.WorktreeDiffEntry) =
@@ -515,6 +529,8 @@ let private layerCountResult =
     | Error(WorktreeDiff.BaseNotFound _)
     | Error(WorktreeDiff.ComparisonTargetNotFound _) ->
         DiffLayerCountResult.BaseError
+    | Error(WorktreeDiff.NoCommonAncestor _) ->
+        DiffLayerCountResult.NoCommonAncestor
     | Error(WorktreeDiff.GitTimedOut _) -> DiffLayerCountResult.TimedOut
     | Error _ -> DiffLayerCountResult.GitError
 
@@ -530,6 +546,9 @@ let private layerCountJson =
            fileCount = Some count |}
     | DiffLayerCountResult.BaseError ->
         {| status = "base-error"
+           fileCount = None |}
+    | DiffLayerCountResult.NoCommonAncestor ->
+        {| status = "no-common-ancestor"
            fileCount = None |}
     | DiffLayerCountResult.TimedOut ->
         {| status = "timeout"
@@ -579,6 +598,10 @@ let internal serializeSummaryResult counts categorization =
         JsonSerializer.Serialize
             {| status = "base-error"
                layerCounts = countsJson |}
+    | DiffSummaryResult.NoCommonAncestor ->
+        JsonSerializer.Serialize
+            {| status = "no-common-ancestor"
+               layerCounts = countsJson |}
     | DiffSummaryResult.TimedOut ->
         JsonSerializer.Serialize
             {| status = "timeout"
@@ -603,18 +626,21 @@ let internal serializeComparisonTargetsResult
     =
     match result with
     | Ok targets ->
-        let baseLabel, baseAvailable =
+        let baseLabel, baseAvailable, localBranch =
             match targets.ConfiguredBase with
-            | WorktreeDiff.ConfiguredDiffComparison.Available label ->
-                label, true
+            | WorktreeDiff.ConfiguredDiffComparison.Remote label ->
+                label, true, None
+            | WorktreeDiff.ConfiguredDiffComparison.Local branch ->
+                branch, true, Some branch
             | WorktreeDiff.ConfiguredDiffComparison.Missing label ->
-                label, false
+                label, false, None
 
         JsonSerializer.Serialize(
             {| status = "ready"
                configuredBase =
                 {| label = baseLabel
-                   available = baseAvailable |}
+                   available = baseAvailable
+                   localBranch = localBranch |}
                localBranches = targets.LocalBranches |}
         )
     | Error(WorktreeDiff.GitTimedOut _) ->
@@ -698,6 +724,8 @@ let private summaryErrorResult =
     | WorktreeDiff.BaseNotFound _
     | WorktreeDiff.ComparisonTargetNotFound _ ->
         DiffSummaryResult.BaseError
+    | WorktreeDiff.NoCommonAncestor _ ->
+        DiffSummaryResult.NoCommonAncestor
     | WorktreeDiff.GitTimedOut _ -> DiffSummaryResult.TimedOut
     | WorktreeDiff.TooManyFiles minimumCount ->
         DiffSummaryResult.TooManyFiles minimumCount
@@ -839,10 +867,6 @@ let private queryBoolean
         | "false" -> Some false
         | _ -> None
 
-type private DiffSummaryRequest =
-    { Layers: WorktreeDiff.WorktreeDiffLayers
-      Target: WorktreeDiff.DiffComparisonTarget }
-
 let private summaryTarget (ctx: HttpContext) =
     if not (ctx.Request.Query.ContainsKey("branch")) then
         Some WorktreeDiff.DiffComparisonTarget.ConfiguredBase
@@ -851,17 +875,31 @@ let private summaryTarget (ctx: HttpContext) =
 
         if
             values.Count <> 1
-            || System.String.IsNullOrWhiteSpace(values[0])
+            || not (GitWorktree.isSafeComparisonBranch values[0])
         then
             None
         else
             Some(WorktreeDiff.DiffComparisonTarget.LocalBranch values[0])
 
 let private summaryRequest (ctx: HttpContext) =
-    if ctx.Request.Query.Count = 0 then
+    let rawQuery = ctx.Request.QueryString.Value
+    let hasUnsafeEncodedValue =
+        if System.String.IsNullOrEmpty rawQuery then
+            false
+        else
+            try
+                rawQuery
+                |> System.Uri.UnescapeDataString
+                |> GitWorktree.hasUnsafeComparisonCharacters
+            with :? System.UriFormatException ->
+                true
+
+    if hasUnsafeEncodedValue then
+        None
+    elif ctx.Request.Query.Count = 0 then
         Some
-            { Layers = WorktreeDiff.allWorktreeDiffLayers
-              Target = WorktreeDiff.DiffComparisonTarget.ConfiguredBase }
+            {| Layers = WorktreeDiff.allWorktreeDiffLayers
+               Target = WorktreeDiff.DiffComparisonTarget.ConfiguredBase |}
     else
         let hasBranch = ctx.Request.Query.ContainsKey("branch")
         let expectedCount = if hasBranch then 4 else 3
@@ -882,11 +920,11 @@ let private summaryRequest (ctx: HttpContext) =
             with
             | Some committed, Some local, Some untracked, Some target ->
                 Some
-                    { Layers =
+                    {| Layers =
                         { AlreadyCommitted = committed
                           LocalChanges = local
                           Untracked = untracked }
-                      Target = target }
+                       Target = target |}
             | _ -> None
 
 let private viewerInstance (ctx: HttpContext) =
@@ -900,6 +938,7 @@ let private viewerInstance (ctx: HttpContext) =
         | false, _ -> None
 
 let private handleComparisons
+    (service: Service)
     deadline
     (comparisonContext: WorktreeDiff.DiffComparisonContext option)
     (ctx: HttpContext)
@@ -918,9 +957,7 @@ let private handleComparisons
             do! writeError deadline ctx 400 "Invalid diff-comparisons query"
         | Some comparison, Some _, _ ->
             let! result =
-                WorktreeDiff.getDiffComparisonTargetsWithinDeadline
-                    deadline
-                    comparison
+                service.GetComparisonTargets deadline comparison
                 |> Async.StartAsTask
 
             do!
@@ -948,48 +985,9 @@ let private handleSummary
                 do! writeError deadline ctx 400 "Invalid diff viewer"
             | Some _, None ->
                 do! writeError deadline ctx 400 "Invalid diff-summary query"
-            | Some viewer, Some { Layers = layers
-                                  Target = comparisonTarget }
-                when
-                    not layers.AlreadyCommitted
-                    && not layers.LocalChanges
-                    && not layers.Untracked
-                ->
-                let comparisonContext =
-                    { comparisonContext with
-                        Target = comparisonTarget }
-
-                let worktreePath = comparisonContext.WorktreePath
-
-                let! generation =
-                    store.BeginSummary(worktreePath, viewer)
-                    |> Async.StartAsTask
-
-                let! counts =
-                    service.GetLayerCounts deadline comparisonContext
-                    |> Async.StartAsTask
-
-                let! isCurrent =
-                    store.ClearCurrent(
-                        worktreePath,
-                        viewer,
-                        generation
-                    )
-                    |> Async.StartAsTask
-
-                do!
-                    DiffSummaryResult.FilteredEmpty
-                    |> summaryResultIfCurrent isCurrent
-                    |> serializeSummaryResult
-                        (layerCounts counts)
-                        categorization
-                    |> writeJson deadline ctx
-            | Some viewer, Some { Layers = layers
-                                  Target = comparisonTarget } ->
-                let comparisonContext =
-                    { comparisonContext with
-                        Target = comparisonTarget }
-
+            | Some viewer, Some request ->
+                let layers = request.Layers
+                let comparisonTarget = request.Target
                 let worktreePath = comparisonContext.WorktreePath
 
                 let! generation =
@@ -997,102 +995,132 @@ let private handleSummary
                     |> Async.StartAsTask
 
                 let countsTask =
-                    service.GetLayerCounts deadline comparisonContext
+                    service.GetLayerCounts
+                        deadline
+                        comparisonContext
+                        comparisonTarget
                     |> Async.StartAsTask
 
-                let summaryTask =
-                    service.GetSummary deadline comparisonContext layers
-                    |> Async.StartAsTask
+                if
+                    not layers.AlreadyCommitted
+                    && not layers.LocalChanges
+                    && not layers.Untracked
+                then
+                    let! counts = countsTask
 
-                let! result = summaryTask
-                let! counts = countsTask
+                    let! isCurrent =
+                        store.ClearCurrent(
+                            worktreePath,
+                            viewer,
+                            generation
+                        )
+                        |> Async.StartAsTask
 
-                let! response =
-                    async {
-                        match result with
-                        | Ok summary
-                            when summary.Files.Length
-                                 > WorktreeDiff.maxWorktreeDiffFiles ->
-                            let! isCurrent =
-                                store.ClearCurrent(
-                                    worktreePath,
-                                    viewer,
-                                    generation
-                                )
+                    do!
+                        DiffSummaryResult.FilteredEmpty
+                        |> summaryResultIfCurrent isCurrent
+                        |> serializeSummaryResult
+                            (layerCounts counts)
+                            categorization
+                        |> writeJson deadline ctx
+                else
+                    let summaryTask =
+                        service.GetSummary
+                            deadline
+                            comparisonContext
+                            comparisonTarget
+                            layers
+                        |> Async.StartAsTask
 
-                            return
-                                DiffSummaryResult.TooManyFiles
-                                    summary.Files.Length
-                                |> summaryResultIfCurrent isCurrent
-                        | Ok summary when summary.Files.IsEmpty ->
-                            let! isCurrent =
-                                store.ClearCurrent(
-                                    worktreePath,
-                                    viewer,
-                                    generation
-                                )
+                    let! result = summaryTask
+                    let! counts = countsTask
 
-                            return
-                                DiffSummaryResult.Clean summary.BaseRef
-                                |> summaryResultIfCurrent isCurrent
-                        | Ok summary ->
-                            let entryPaths
-                                (entry: WorktreeDiff.WorktreeDiffEntry)
-                                =
-                                entry.Path, entry.OldPath
+                    let! response =
+                        async {
+                            match result with
+                            | Ok summary
+                                when summary.Files.Length
+                                     > WorktreeDiff.maxWorktreeDiffFiles ->
+                                let! isCurrent =
+                                    store.ClearCurrent(
+                                        worktreePath,
+                                        viewer,
+                                        generation
+                                    )
 
-                            // Classified before identities are issued, so the stored snapshot and
-                            // the browser agree on both file order and grouping.
-                            let issued =
-                                summary.Files
-                                |> DiffCategories.classifyAndOrder
-                                    categorization
-                                    entryPaths
-                                |> List.map (fun (entry, categoryPath) ->
-                                    issueFile
-                                        newIdentity
-                                        categoryPath
-                                        entry,
-                                    entry)
+                                return
+                                    DiffSummaryResult.TooManyFiles
+                                        summary.Files.Length
+                                    |> summaryResultIfCurrent isCurrent
+                            | Ok summary when summary.Files.IsEmpty ->
+                                let! isCurrent =
+                                    store.ClearCurrent(
+                                        worktreePath,
+                                        viewer,
+                                        generation
+                                    )
 
-                            let! isCurrent =
-                                store.ReplaceCurrent(
-                                    worktreePath,
-                                    viewer,
-                                    generation,
-                                    summary.MergeBase,
-                                    layers,
-                                    issued
-                                )
+                                return
+                                    DiffSummaryResult.Clean summary.BaseRef
+                                    |> summaryResultIfCurrent isCurrent
+                            | Ok summary ->
+                                let entryPaths
+                                    (entry: WorktreeDiff.WorktreeDiffEntry)
+                                    =
+                                    entry.Path, entry.OldPath
 
-                            let files = issued |> List.map fst
+                                // Classified before identities are issued, so the stored snapshot
+                                // and browser agree on both file order and grouping.
+                                let issued =
+                                    summary.Files
+                                    |> DiffCategories.classifyAndOrder
+                                        categorization
+                                        entryPaths
+                                    |> List.map (fun (entry, categoryPath) ->
+                                        issueFile
+                                            newIdentity
+                                            categoryPath
+                                            entry,
+                                        entry)
 
-                            return
-                                DiffSummaryResult.Ready
-                                    { BaseRef = summary.BaseRef
-                                      FileCount = files.Length
-                                      Files = files }
-                                |> summaryResultIfCurrent isCurrent
-                        | Error error ->
-                            let! isCurrent =
-                                store.ClearCurrent(
-                                    worktreePath,
-                                    viewer,
-                                    generation
-                                )
+                                let! isCurrent =
+                                    store.ReplaceCurrent(
+                                        worktreePath,
+                                        viewer,
+                                        generation,
+                                        summary.MergeBase,
+                                        layers,
+                                        issued
+                                    )
 
-                            return
-                                summaryErrorResult error
-                                |> summaryResultIfCurrent isCurrent
-                    }
-                    |> Async.StartAsTask
+                                let files = issued |> List.map fst
 
-                do!
-                    response
-                    |> serializeSummaryResult
-                        (layerCounts counts)
-                        categorization
-                    |> writeJson deadline ctx
+                                return
+                                    DiffSummaryResult.Ready
+                                        { BaseRef = summary.BaseRef
+                                          FileCount = files.Length
+                                          Files = files }
+                                    |> summaryResultIfCurrent isCurrent
+                            | Error error ->
+                                let! isCurrent =
+                                    store.ClearCurrent(
+                                        worktreePath,
+                                        viewer,
+                                        generation
+                                    )
+
+                                return
+                                    summaryErrorResult error
+                                    |> summaryResultIfCurrent isCurrent
+                        }
+                        |> Async.StartAsTask
+
+                    do!
+                        response
+                        |> serializeSummaryResult
+                            (layerCounts counts)
+                            categorization
+                        |> writeJson deadline ctx
     }
 
 let private handleFile
@@ -1169,7 +1197,7 @@ let internal createHandlersWithStore
     (service: Service)
     newIdentity
     =
-    { Comparisons = handleComparisons
+    { Comparisons = handleComparisons service
       Summary = handleSummary service store newIdentity
       File = handleFile service store
       Categorization = handleCategorization }

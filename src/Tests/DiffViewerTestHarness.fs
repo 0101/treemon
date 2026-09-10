@@ -84,14 +84,27 @@ let categorizationJsonAt status reason revision =
 let categorizationBody status reason revision =
     JsonSerializer.Serialize(categorizationJsonAt status reason revision)
 
-let comparisonTargetsJson baseLabel available localBranches =
+let comparisonTargetsJsonWithLocalBranch
+    baseLabel
+    available
+    localBranch
+    localBranches
+    =
     JsonSerializer.Serialize(
         {| status = "ready"
            configuredBase =
             {| label = baseLabel
-               available = available |}
+               available = available
+               localBranch = (localBranch: string option) |}
            localBranches = (localBranches: string array) |}
     )
+
+let comparisonTargetsJson baseLabel available localBranches =
+    comparisonTargetsJsonWithLocalBranch
+        baseLabel
+        available
+        None
+        localBranches
 
 let defaultComparisonTargetsJson =
     comparisonTargetsJson "origin/main" true [| "main"; "feature" |]
