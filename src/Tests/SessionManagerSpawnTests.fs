@@ -93,7 +93,7 @@ type SessionManagerSpawnTests() =
         Assert.That(Server.Win32.isWindowValid hwnd2, Is.True, "Re-spawned HWND should be valid")
 
     [<Test>]
-    member _.``focus and new tab preserve the tracked native window``() =
+    member _.``focus preserves the tracked native window``() =
         let testEnvironment = environment.Value
         let a = testEnvironment.Agent
         let testPath = testEnvironment.WorktreePath
@@ -132,14 +132,5 @@ type SessionManagerSpawnTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(windowsAfterFocus, Is.EqualTo(windowsBeforeFocus))
-            Assert.That(shellsAfterFocus, Is.EqualTo(shellsBeforeFocus)))
-
-        openNewTab a testPath
-        |> runAsync
-        |> fun result -> assertOk result "openNewTab should return Ok"
-
-        let sessionsAfter = runAsync (getActiveSessions a)
-
-        Assert.Multiple(fun () ->
-            Assert.That(sessionsAfter[testPathStr], Is.EqualTo(hwnd))
+            Assert.That(shellsAfterFocus, Is.EqualTo(shellsBeforeFocus))
             Assert.That(Server.Win32.isWindowValid hwnd, Is.True))

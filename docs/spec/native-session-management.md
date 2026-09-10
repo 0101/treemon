@@ -3,7 +3,7 @@
 ## Goals
 
 - Keep one explicitly opened Windows Terminal window per worktree, tracked by HWND.
-- Focus, add a tab to, or close the exact tracked window.
+- Focus or close the exact tracked window.
 - Restore still-valid tracked windows after a Treemon server restart.
 - Keep prompted and automatic agent launches in the embedded-terminal subsystem.
 
@@ -19,12 +19,13 @@ With no tracked window, Treemon starts:
 The decoded PowerShell script only changes directory to the worktree. With a valid tracked HWND,
 the same action focuses that window instead of starting another one.
 
-The card's `+` action is available only for a valid tracked window. It focuses that window and runs:
+The card has no native new-tab action. Its always-visible, icon-only robot-head Agent action and the
+focused-card `a` or `A` shortcut start a fresh embedded terminal and submit exactly
+`copilot --yolo`. This action neither requires nor changes a tracked native HWND; see
+`docs/spec/embedded-terminal.md` for exact-terminal selection and delivery-failure cleanup.
 
-`wt.exe -w 0 new-tab -- pwsh -NoExit -EncodedCommand <base64>`
-
-Resume, contextual actions, Canvas launches, create-worktree prompts, AutoSync fallback, and
-`tm launch` use embedded terminals instead.
+The Agent action, Resume, contextual actions, Canvas launches, create-worktree prompts, AutoSync
+fallback, and `tm launch` use embedded terminals instead.
 
 ### Focus, close, and persistence
 
@@ -52,21 +53,21 @@ thread attachment, and `WM_CLOSE`.
 ## Decisions
 
 - **One tracked window per worktree:** HWNDs are reliable window identities; tab identities are not.
-- **Directory through encoded PowerShell:** neither native launch passes `-d`. A quoted
+- **Directory through encoded PowerShell:** the native launch does not pass `-d`. A quoted
   `Set-Location` script avoids Windows Terminal argument ambiguity for worktree paths.
 - **WM_CLOSE instead of process termination:** all Windows Terminal windows can share one process.
 - **Mailbox-owned persistence:** one serialized state owner is sufficient for the small map.
-- **Explicit native scope:** only the card terminal and native new-tab actions use this subsystem.
+- **Explicit native scope:** only the card terminal action uses this subsystem.
 
 ## Key Files
 
 | File | Purpose |
 |---|---|
-| `src/Server/SessionManager.fs` | Native spawn, HWND tracking, focus, tab creation, close, and persistence |
+| `src/Server/SessionManager.fs` | Native spawn, HWND tracking, focus, close, and persistence |
 | `src/Server/Win32.fs` | Windows window-management P/Invoke boundary |
 | `src/Server/TerminalLaunch.fs` | Typed native-versus-embedded launch boundary |
 | `src/Server/WorktreeApi.fs` | Native API wiring and `HasActiveSession` population |
-| `src/Client/CardViews.fs` | Card terminal and native new-tab controls |
+| `src/Client/CardViews.fs` | Explicit native card-terminal control |
 
 ## Related Specs
 

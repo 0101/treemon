@@ -51,6 +51,7 @@ let readOnlyApi
       openTerminal = fun _ -> async { return () }
       startEmbeddedTerminal =
         fun _ -> async { return Error $"Embedded terminal is not available in {modeName}" }
+      startAgent = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       getEmbeddedTerminals = fun () -> async { return EmbeddedTerminalSnapshot.empty }
       closeEmbeddedTerminal = fun _ -> async { return Ok EmbeddedTerminalSnapshot.empty }
       openEditor = fun _ -> async { return () }
@@ -63,7 +64,6 @@ let readOnlyApi
       unarchiveWorktree = fun _ -> async { return Error $"Archive is not available in {modeName}" }
       getBranches = fun _ -> async { return [] }
       createWorktree = fun _ -> async { return Error $"Create is not available in {modeName}" }
-      openNewTab = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
@@ -806,6 +806,19 @@ let internal worktreeApiWithLaunch
                 terminalLaunch.StartEmbeddedTerminal wtPath
                 |> terminalStart)
 
+    let startAgent wtPath =
+        withValidatedPath
+            wtPath
+            "startAgent"
+            (fun () ->
+                let command =
+                    CodingToolCli.build
+                        (Some CodingToolProvider.CopilotCli)
+                        CodingToolCli.Start
+
+                startEmbeddedCommand wtPath command.AsShellString
+                |> terminalStart)
+
     let getEmbeddedTerminals () =
         async {
             let! snapshot = EmbeddedTerminal.get embeddedTerminal
@@ -832,6 +845,7 @@ let internal worktreeApiWithLaunch
         { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath terminalLaunch.OpenNativeTerminal
           startEmbeddedTerminal = startEmbeddedTerminal
+          startAgent = startAgent
           getEmbeddedTerminals = getEmbeddedTerminals
           closeEmbeddedTerminal = closeEmbeddedTerminal
           openEditor = openEditor validatePath
@@ -1033,9 +1047,6 @@ let internal worktreeApiWithLaunch
 
                   return fork.Warnings
               }
-          openNewTab = fun wtPath ->
-              withValidatedPath wtPath "openNewTab" (fun () ->
-                  terminalLaunch.OpenNativeTab wtPath)
           launchAction = fun req ->
               withValidatedPath req.Path "launchAction" (fun () ->
                   async {

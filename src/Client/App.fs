@@ -253,8 +253,8 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     match focused, key with
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
     | Card scopedKey, "t" -> findWorktree scopedKey model |> Option.map (_.Path >> OpenEmbeddedTerminal)
+    | Card scopedKey, ("a" | "A") -> findWorktree scopedKey model |> Option.map (_.Path >> StartAgent)
     | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (_.Path >> ToggleAutoSync)
-    | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "r" -> findWorktree scopedKey model |> Option.bind (fun wt -> if canResumeSession wt then Some (ResumeSession wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
     | Card scopedKey, "c" -> Some ToggleCanvasPane
@@ -544,6 +544,17 @@ let update msg model =
             launchEmbeddedTerminalCmd
                 path
                 (fun () -> worktreeApi.Value.startEmbeddedTerminal path)
+    | StartAgent path ->
+        let updated, alreadyStarting =
+            beginFocusedEmbeddedTerminalStart path model
+
+        updated,
+        if alreadyStarting then
+            saveTerminalPaneOpenCmd true
+        else
+            launchEmbeddedTerminalCmd
+                path
+                (fun () -> worktreeApi.Value.startAgent path)
     | EmbeddedTerminalSnapshotChanged snapshot ->
         { model with
             EmbeddedTerminals = snapshot
@@ -822,9 +833,6 @@ let update msg model =
 
     | FocusSession path ->
         model, Cmd.OfAsync.perform worktreeApi.Value.focusSession path SessionResult
-
-    | OpenNewTab path ->
-        model, Cmd.OfAsync.perform worktreeApi.Value.openNewTab path SessionResult
 
     | ResumeSession path ->
         let updated, alreadyStarting =
@@ -1421,8 +1429,8 @@ let view model dispatch =
           CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
           OpenTerminal = fun wt -> dispatch (if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path)
           OpenEmbeddedTerminal = fun wt -> dispatch (OpenEmbeddedTerminal wt.Path)
+          StartAgent = fun wt -> dispatch (StartAgent wt.Path)
           OpenEditor = fun wt -> dispatch (OpenEditor wt.Path)
-          OpenNewTab = fun wt -> dispatch (OpenNewTab wt.Path)
           ResumeSession = fun wt -> dispatch (ResumeSession wt.Path)
           DeleteWorktree = fun key -> dispatch (ConfirmDeleteWorktree key)
           ArchiveWorktree = fun key -> dispatch (ConfirmArchiveWorktree key)

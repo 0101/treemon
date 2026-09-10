@@ -1455,6 +1455,30 @@ let private runScenario client fixture server api port =
                 manifest
                 fixture.RecorderPath
                 server
+                "startAgent"
+                fixture.RoutesWorktree
+                [ "--yolo" ]
+                (fun () ->
+                    async {
+                        let! result =
+                            api.startAgent
+                                (WorktreePath fixture.RoutesWorktree)
+
+                        return
+                            Some(
+                                startResultId
+                                    "startAgent"
+                                    result
+                            )
+                    })
+            |> Async.Ignore
+
+        do!
+            runRoute
+                client
+                manifest
+                fixture.RecorderPath
+                server
                 "tm-launch"
                 fixture.CliWorktree
                 [ "--yolo"; "-i"; Cli.Program.metaPrompt ]

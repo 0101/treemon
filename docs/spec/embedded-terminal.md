@@ -18,7 +18,7 @@
 - Preserve terminal tabs across a host update by resuming only the Copilot session owned by each
   exact terminal.
 - Route every prompted or automatic agent launch through the embedded host while retaining Windows
-  Terminal only for the card's explicit `>` / Enter and tracked-window `+` actions.
+  Terminal only for the card's explicit `>` / Enter action.
 - Make server-created terminals discoverable from an initially empty browser snapshot without
   stealing dashboard focus.
 - Apply host updates at naturally idle Copilot boundaries without draining work, blocking new work,
@@ -80,15 +80,17 @@ close button.
 
 ### Launch routing and command startup
 
-The card's `>` / Enter action remains the explicit native Windows Terminal choice, and its `+`
-action opens another tab in that tracked native window. The dedicated embedded-terminal action and
-`T` shortcut reuse that worktree's remembered embedded terminal when one exists and otherwise start
-a plain embedded PowerShell terminal. The terminal pane's **New** action always starts another one.
+The card's `>` / Enter action remains the explicit native Windows Terminal choice. The always-visible
+robot-head Agent action and focused-card `a` / `A` shortcut always start a fresh embedded terminal,
+submit exactly `copilot --yolo`, open the terminal pane, and select the exact returned terminal. The
+dedicated embedded-terminal action and `T` shortcut reuse that worktree's remembered embedded
+terminal when one exists and otherwise start a plain embedded PowerShell terminal. The terminal
+pane's **New** action always starts another one.
 
-Every agent-bearing process launch uses an embedded terminal: Resume, contextual card actions,
-explicit Canvas session launch, create-worktree prompt launch, AutoSync fallback, queued Canvas
-fallback, and `tm launch`. A browser need not be open for a CLI or background launch; the host owns
-the terminal until a dashboard attaches later.
+Every agent-bearing process launch uses an embedded terminal: the robot-head Agent card action,
+Resume, contextual card actions, explicit Canvas session launch, create-worktree prompt launch,
+AutoSync fallback, queued Canvas fallback, and `tm launch`. A browser need not be open for a CLI or
+background launch; the host owns the terminal until a dashboard attaches later.
 
 Direct dashboard actions that start an agent open and target the terminal pane, selecting the exact
 returned terminal. Resume first joins its durable target session ID to the authoritative running
@@ -259,8 +261,8 @@ by name or broad ancestry.
 
 `TerminalLaunch` is the single server-side boundary for starting user terminals.
 `SessionManager` and `EmbeddedTerminal` are backend implementations, not policy call sites.
-It exposes separately typed native open/new-tab and embedded plain/command operations, preserving
-each backend's result type for callers: native operations use `SessionManager`; embedded operations
+It exposes separately typed native-open and embedded plain/command operations, preserving each
+backend's result type for callers: the native operation uses `SessionManager`; embedded operations
 use `EmbeddedTerminal`. Browser headers, `HttpContext`, and `TREEMON_TERMINAL_SESSION_ID` do not
 participate in this decision.
 
@@ -607,6 +609,5 @@ ports, and state.
 
 - `docs/spec/session-status-push.md` — authoritative per-session Copilot activity and terminal-origin
   reporting.
-- `docs/spec/native-session-management.md` — explicit card `>` / Enter and tracked-window `+`
-  Windows Terminal behavior.
+- `docs/spec/native-session-management.md` — explicit card `>` / Enter Windows Terminal behavior.
 - `docs/spec/worktree-monitor.md` — worktree lifecycle and dashboard integration.

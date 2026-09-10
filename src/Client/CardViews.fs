@@ -148,8 +148,9 @@ type CardCallbacks =
       OpenTerminal: WorktreeStatus -> unit
       /// Opens the pane on this worktree's selected embedded terminal, starting one only when none exists.
       OpenEmbeddedTerminal: WorktreeStatus -> unit
+      /// Starts a fresh embedded terminal running the Copilot CLI.
+      StartAgent: WorktreeStatus -> unit
       OpenEditor: WorktreeStatus -> unit
-      OpenNewTab: WorktreeStatus -> unit
       ResumeSession: WorktreeStatus -> unit
       /// Raises the delete *confirmation* (ConfirmDeleteWorktree), not an immediate delete.
       DeleteWorktree: string -> unit
@@ -409,6 +410,40 @@ let embeddedTerminalButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
         prop.children [ embeddedTerminalIcon ]
     ]
 
+let agentIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "1.8")
+        svg.custom ("strokeLinecap", "round")
+        svg.custom ("strokeLinejoin", "round")
+        svg.custom ("aria-hidden", "true")
+        svg.custom ("focusable", "false")
+        svg.children [
+            Svg.path [ svg.d "M12 8V4H8" ]
+            Svg.rect [
+                svg.x 4
+                svg.y 8
+                svg.width 16
+                svg.height 12
+                svg.rx 2
+            ]
+            Svg.path [ svg.d "M2 14h2M20 14h2M9 13v2M15 13v2" ]
+        ]
+    ]
+
+let agentButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "agent-btn"
+        prop.custom ("aria-label", "Start Copilot agent")
+        prop.title "Start Copilot agent (A)"
+        yield! noFocusProps
+        prop.onClick (fun e -> e.stopPropagation(); callbacks.StartAgent wt)
+        prop.children [ agentIcon ]
+    ]
+
 let editorIcon () =
     Svg.svg [
         svg.className "btn-icon"
@@ -428,15 +463,6 @@ let editorButton (callbacks: CardCallbacks) editorName (wt: WorktreeStatus) =
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); callbacks.OpenEditor wt)
         prop.children [ editorIcon () ]
-    ]
-
-let newTabButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
-    Html.button [
-        prop.className "new-tab-btn"
-        prop.title "Open new tab in tracked window (+)"
-        yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); callbacks.OpenNewTab wt)
-        prop.text "+"
     ]
 
 let resumeIcon () =
@@ -724,7 +750,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
                     terminalButton callbacks wt
                     embeddedTerminalButton callbacks wt
-                    if wt.HasActiveSession then newTabButton callbacks wt
+                    agentButton callbacks wt
                     if canResumeSession wt then resumeButton callbacks wt
                     editorButton callbacks props.EditorName wt
                     archiveButton callbacks scopedKey wt
@@ -775,7 +801,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                             ]
                             terminalButton callbacks wt
                             embeddedTerminalButton callbacks wt
-                            if wt.HasActiveSession then newTabButton callbacks wt
+                            agentButton callbacks wt
                             if canResumeSession wt then resumeButton callbacks wt
                             editorButton callbacks props.EditorName wt
                             archiveButton callbacks scopedKey wt

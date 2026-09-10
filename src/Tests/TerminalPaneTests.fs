@@ -409,6 +409,17 @@ type TerminalFocusTests() =
             Is.EqualTo(Some(OpenEmbeddedTerminal first))
         )
 
+    [<TestCase("a")>]
+    [<TestCase("A")>]
+    member _.``Agent key starts a fresh Copilot terminal for the focused card``(key: string) =
+        Assert.That(
+            App.keyBinding
+                (Card (WorktreePath.value first))
+                key
+                focusModel,
+            Is.EqualTo(Some(StartAgent first))
+        )
+
     [<Test>]
     member _.``Cycle message updates the current worktree terminal only``() =
         let updated, cmd =
