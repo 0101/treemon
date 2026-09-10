@@ -604,8 +604,15 @@ isolated server and fails on incomplete exact process cleanup.
   close remains authoritative on graceful failure, card state refreshes immediately, and no
   captured descendant survives. A forced-cleanup subcase resumes the durable session, permits a
   visible `Force resume?` confirmation, and proves no prior process or duplicate CLI remains.
-- A real-CLI replacement harness proves non-idle gating, graceful ordering, one Resume per terminal,
-  fail-closed staged-host cleanup after a post-stop failure, and zero old-process survivors.
+- A real-CLI replacement harness invokes the Windows Apps loader with
+  `--prefer-version 1.0.84-3` inside an isolated `COPILOT_HOME`. The pin is verifier-only, and the
+  harness clears `COPILOT_CLI_ENABLED_FEATURE_FLAGS` so it exercises the CLI's default synchronous
+  extension bootstrap rather than a forced experiment path. Both extensions read `TREEMON_PORT`,
+  so the isolated bridge listener also proxies `/api/session/activity` to the isolated Treemon
+  server. Every scenario requires the CLI to report two installed native extensions and both
+  `canvas-bridge` and `treemon-reporting` ready before it proves non-idle gating, graceful ordering,
+  one Resume per terminal, fail-closed staged-host cleanup after a post-stop failure, and zero
+  old-process survivors.
 - `npm run test:embedded-launch-routing` continues to exercise every agent-bearing launch entry
   point, bearer-redacted evidence, native HWND preservation, and exact failed-delivery rollback.
 
