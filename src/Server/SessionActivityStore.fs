@@ -2,9 +2,11 @@ module Server.SessionActivityStore
 
 open System
 open System.Buffers
+open System.Globalization
 open System.IO
 open System.Text
 open System.Text.Json
+open FsToolkit.ErrorHandling
 open Microsoft.Data.Sqlite
 open Shared
 open Server.SessionActivity
@@ -71,6 +73,52 @@ type ActivityEventRow =
       EventId: EventId
       Ts: DateTimeOffset }
 
+[<RequireQualifiedAccess>]
+type private PersistedDataError =
+    | InvalidProcessIdentity of reason: string
+    | InvalidSessionId of reason: string
+    | InvalidTerminalSessionId of reason: string
+    | UnknownStatus of value: string
+    | UnknownProvider of value: string
+    | InvalidTimestamp of field: string
+    | IncompleteMessage of field: string
+    | IncompleteContextUsage
+    | MalformedBackgroundAgentClocks of reason: string
+    | MissingPersistedInstance
+
+let private persistedDataErrorMessage =
+    function
+    | PersistedDataError.InvalidProcessIdentity reason ->
+        $"invalid persisted process identity: {reason}"
+    | PersistedDataError.InvalidSessionId reason ->
+        $"invalid persisted session id: {reason}"
+    | PersistedDataError.InvalidTerminalSessionId reason ->
+        $"invalid persisted terminal session id: {reason}"
+    | PersistedDataError.UnknownStatus value ->
+        $"{nameof SessionLevelStatus}: unknown status text '{value}'"
+    | PersistedDataError.UnknownProvider value ->
+        $"{nameof CodingToolProvider}: unknown provider text '{value}'"
+    | PersistedDataError.InvalidTimestamp field ->
+        $"invalid persisted {field} timestamp"
+    | PersistedDataError.IncompleteMessage field ->
+        $"incomplete persisted {field}"
+    | PersistedDataError.IncompleteContextUsage ->
+        $"incomplete persisted {nameof ContextUsage}"
+    | PersistedDataError.MalformedBackgroundAgentClocks reason ->
+        $"malformed background-agent clocks: {reason}"
+    | PersistedDataError.MissingPersistedInstance ->
+        $"{nameof StoredInstance}: persisted instance row missing"
+
+let private raisePersistedDataError error =
+    error
+    |> persistedDataErrorMessage
+    |> fun message ->
+        raise (InvalidDataException($"SessionActivityStore: {message}"))
+
+let private persistedValue result =
+    result
+    |> Result.defaultWith raisePersistedDataError
+
 // --- Serialization ----------------------------------------------------------------------------
 
 let private statusText =
@@ -81,10 +129,10 @@ let private statusText =
 
 let private parseStatus =
     function
-    | "working" -> SessionLevelStatus.Working
-    | "waiting_for_user" -> SessionLevelStatus.WaitingForUser
-    | "idle" -> SessionLevelStatus.Idle
-    | other -> failwith $"{nameof SessionLevelStatus}: unknown status text '{other}'"
+    | "working" -> Ok SessionLevelStatus.Working
+    | "waiting_for_user" -> Ok SessionLevelStatus.WaitingForUser
+    | "idle" -> Ok SessionLevelStatus.Idle
+    | other -> Error(PersistedDataError.UnknownStatus other)
 
 let private providerText =
     function
@@ -92,8 +140,8 @@ let private providerText =
 
 let private parseProvider =
     function
-    | "copilot_cli" -> CopilotCli
-    | other -> failwith $"{nameof CodingToolProvider}: unknown provider text '{other}'"
+    | "copilot_cli" -> Ok CopilotCli
+    | other -> Error(PersistedDataError.UnknownProvider other)
 
 let private optToDb =
     Option.map box >> Option.defaultValue (box DBNull.Value)
@@ -121,31 +169,49 @@ let private readOptStr (reader: SqliteDataReader) index =
 
 let private persistedSessionId value =
     SessionId.create value
-    |> Result.defaultWith (fun error ->
-        invalidOp $"SessionActivityStore: invalid persisted session id: {error}")
+    |> Result.mapError PersistedDataError.InvalidSessionId
 
 let private persistedTerminalSessionId value =
     TerminalSessionId.create value
-    |> Result.defaultWith (fun error ->
-        invalidOp $"SessionActivityStore: invalid persisted terminal session id: {error}")
+    |> Result.mapError PersistedDataError.InvalidTerminalSessionId
+
+let private parseTimestamp (field: string) (value: string) =
+    match
+        DateTimeOffset.TryParse(
+            value,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind
+        )
+    with
+    | true, timestamp -> Ok timestamp
+    | false, _ -> Error(PersistedDataError.InvalidTimestamp field)
 
 let private readOptTimestamp
+    field
     (reader: SqliteDataReader)
     index
     =
-    readOptStr reader index |> Option.map parseIso
+    match readOptStr reader index with
+    | None -> Ok None
+    | Some value ->
+        parseTimestamp field value
+        |> Result.map Some
 
 let private readOptMessage
+    field
     (reader: SqliteDataReader)
     textIndex
     timestampIndex
     =
     match readOptStr reader textIndex, readOptStr reader timestampIndex with
+    | None, None -> Ok None
     | Some text, Some timestamp ->
-        Some
-            { Text = text
-              At = parseIso timestamp }
-    | _ -> None
+        parseTimestamp $"{field}_at" timestamp
+        |> Result.map (fun at ->
+            Some
+                { Text = text
+                  At = at })
+    | _ -> Error(PersistedDataError.IncompleteMessage field)
 
 let private readContextUsage
     (reader: SqliteDataReader)
@@ -158,13 +224,15 @@ let private readContextUsage
         reader.IsDBNull limitIndex,
         reader.IsDBNull timestampIndex
     with
-    | true, true, true -> None, None
+    | true, true, true -> Ok(None, None)
     | false, false, false ->
-        Some
-            { CurrentTokens = reader.GetInt32 currentIndex
-              TokenLimit = reader.GetInt32 limitIndex },
-        Some(parseIso (reader.GetString timestampIndex))
-    | _ -> failwith $"{nameof StoredInstance}: incomplete persisted context usage"
+        parseTimestamp "context_usage_at" (reader.GetString timestampIndex)
+        |> Result.map (fun timestamp ->
+            Some
+                { CurrentTokens = reader.GetInt32 currentIndex
+                  TokenLimit = reader.GetInt32 limitIndex },
+            Some timestamp)
+    | _ -> Error PersistedDataError.IncompleteContextUsage
 
 let private writeTimestampProperty
     (writer: Utf8JsonWriter)
@@ -205,92 +273,219 @@ let private parseOptionalJsonTimestamp
     (element: JsonElement)
     (propertyName: string)
     =
-    let property = element.GetProperty propertyName
+    match element.TryGetProperty propertyName with
+    | false, _ ->
+        Error(
+            PersistedDataError.MalformedBackgroundAgentClocks(
+                $"missing {propertyName}"
+            )
+        )
+    | true, property ->
+        match property.ValueKind with
+        | JsonValueKind.Null -> Ok None
+        | JsonValueKind.String ->
+            match property.GetString() |> Option.ofObj with
+            | None ->
+                Error(
+                    PersistedDataError.MalformedBackgroundAgentClocks(
+                        $"null {propertyName}"
+                    )
+                )
+            | Some value ->
+                parseTimestamp $"background_agent_clocks.{propertyName}" value
+                |> Result.mapError (fun _ ->
+                    PersistedDataError.MalformedBackgroundAgentClocks(
+                        $"invalid {propertyName}"
+                    ))
+                |> Result.map Some
+        | _ ->
+            Error(
+                PersistedDataError.MalformedBackgroundAgentClocks(
+                    $"invalid {propertyName}"
+                )
+            )
 
-    match property.ValueKind with
-    | JsonValueKind.Null -> None
-    | JsonValueKind.String ->
-        property.GetString()
-        |> Option.ofObj
-        |> Option.map parseIso
-    | _ ->
-        failwith
-            $"{nameof StoredInstance}: malformed background-agent timestamp"
+let private parseBackgroundAgentClock (element: JsonElement) =
+    result {
+        if element.ValueKind <> JsonValueKind.Object then
+            return!
+                Error(
+                    PersistedDataError.MalformedBackgroundAgentClocks(
+                        "entry is not an object"
+                    )
+                )
+
+        let! toolCallId =
+            match element.TryGetProperty "toolCallId" with
+            | true, property when property.ValueKind = JsonValueKind.String ->
+                property.GetString()
+                |> Option.ofObj
+                |> Option.filter (String.IsNullOrWhiteSpace >> not)
+                |> Result.requireSome (
+                    PersistedDataError.MalformedBackgroundAgentClocks(
+                        "missing toolCallId"
+                    )
+                )
+            | _ ->
+                Error(
+                    PersistedDataError.MalformedBackgroundAgentClocks(
+                        "missing toolCallId"
+                    )
+                )
+
+        let! startedAt =
+            parseOptionalJsonTimestamp element "startedAt"
+
+        let! finishedAt =
+            parseOptionalJsonTimestamp element "finishedAt"
+
+        return
+            toolCallId,
+            { StartedAt = startedAt
+              FinishedAt = finishedAt }
+    }
 
 let private parseBackgroundAgentClocks (json: string) =
-    use document = JsonDocument.Parse json
+    try
+        use document = JsonDocument.Parse json
 
-    if document.RootElement.ValueKind <> JsonValueKind.Array then
-        failwith $"{nameof StoredInstance}: malformed background-agent clocks"
-
-    document.RootElement.EnumerateArray()
-    |> Seq.map (fun element ->
-        let toolCallId =
-            element.GetProperty("toolCallId").GetString()
-            |> Option.ofObj
-            |> Option.filter (String.IsNullOrWhiteSpace >> not)
-            |> Option.defaultWith (fun () ->
-                failwith
-                    $"{nameof StoredInstance}: malformed background-agent tool-call identity")
-
-        toolCallId,
-        { StartedAt = parseOptionalJsonTimestamp element "startedAt"
-          FinishedAt = parseOptionalJsonTimestamp element "finishedAt" })
-    |> Map.ofSeq
+        if document.RootElement.ValueKind <> JsonValueKind.Array then
+            Error(
+                PersistedDataError.MalformedBackgroundAgentClocks(
+                    "root is not an array"
+                )
+            )
+        else
+            document.RootElement.EnumerateArray()
+            |> Seq.toList
+            |> List.traverseResultM parseBackgroundAgentClock
+            |> Result.map Map.ofList
+    with :? JsonException ->
+        Error(
+            PersistedDataError.MalformedBackgroundAgentClocks(
+                "invalid JSON"
+            )
+        )
 
 let private readInstance (reader: SqliteDataReader) =
-    let identity =
-        ProcessIdentity.create (reader.GetInt32 0) (reader.GetInt64 1)
-        |> Result.defaultWith invalidOp
+    result {
+        let! identity =
+            ProcessIdentity.create
+                (reader.GetInt32 0)
+                (reader.GetInt64 1)
+            |> Result.mapError PersistedDataError.InvalidProcessIdentity
 
-    let contextUsage, contextUsageAt =
-        readContextUsage reader 18 19 20
+        let! sessionId =
+            reader.GetString 2
+            |> persistedSessionId
 
-    { ProcessIdentity = identity
-      SessionId = reader.GetString 2 |> persistedSessionId
-      TerminalSessionId =
-        readOptStr reader 23
-        |> Option.map persistedTerminalSessionId
-      WorktreePath = WorktreePath(reader.GetString 3)
-      Provider = parseProvider (reader.GetString 4)
-      Status =
-        { Status = parseStatus (reader.GetString 5)
-          Skill = readOptStr reader 6
-          LastUserMessage = readOptMessage reader 7 8
-          LastAssistantMessage = readOptMessage reader 9 10
-          Intent = readOptMessage reader 11 12
-          Title = readOptMessage reader 13 14
-          ContextUsage = contextUsage
-          AwaitingUserSince = readOptTimestamp reader 21
-          UserInputCompletedAt = readOptTimestamp reader 22
-          BackgroundAgentClocks =
-            reader.GetString 24 |> parseBackgroundAgentClocks }
-      UpdatedAt = parseIso (reader.GetString 15)
-      LifecycleAt = readOptTimestamp reader 16
-      LastSeen = parseIso (reader.GetString 17)
-      ContextUsageAt = contextUsageAt
-      ClosedAt = readOptTimestamp reader 25 }
+        let! terminalSessionId =
+            match readOptStr reader 23 with
+            | None -> Ok None
+            | Some value ->
+                persistedTerminalSessionId value
+                |> Result.map Some
+
+        let! provider = parseProvider (reader.GetString 4)
+        let! status = parseStatus (reader.GetString 5)
+        let! lastUserMessage = readOptMessage "last_user_message" reader 7 8
+        let! lastAssistantMessage =
+            readOptMessage "last_assistant_message" reader 9 10
+        let! intent = readOptMessage "intent" reader 11 12
+        let! title = readOptMessage "title" reader 13 14
+        let! contextUsage, contextUsageAt =
+            readContextUsage reader 18 19 20
+        let! awaitingUserSince =
+            readOptTimestamp "awaiting_user_since" reader 21
+        let! userInputCompletedAt =
+            readOptTimestamp "user_input_completed_at" reader 22
+        let! backgroundAgentClocks =
+            reader.GetString 24
+            |> parseBackgroundAgentClocks
+        let! updatedAt = parseTimestamp "updated_at" (reader.GetString 15)
+        let! lifecycleAt = readOptTimestamp "lifecycle_at" reader 16
+        let! lastSeen = parseTimestamp "last_seen" (reader.GetString 17)
+        let! closedAt = readOptTimestamp "closed_at" reader 25
+
+        return
+            { ProcessIdentity = identity
+              SessionId = sessionId
+              TerminalSessionId = terminalSessionId
+              WorktreePath = WorktreePath(reader.GetString 3)
+              Provider = provider
+              Status =
+                { Status = status
+                  Skill = readOptStr reader 6
+                  LastUserMessage = lastUserMessage
+                  LastAssistantMessage = lastAssistantMessage
+                  Intent = intent
+                  Title = title
+                  ContextUsage = contextUsage
+                  AwaitingUserSince = awaitingUserSince
+                  UserInputCompletedAt = userInputCompletedAt
+                  BackgroundAgentClocks = backgroundAgentClocks }
+              UpdatedAt = updatedAt
+              LifecycleAt = lifecycleAt
+              LastSeen = lastSeen
+              ContextUsageAt = contextUsageAt
+              ClosedAt = closedAt }
+    }
 
 let private readRetainedSession (reader: SqliteDataReader) =
-    let contextUsage, contextUsageAt =
-        readContextUsage reader 14 15 16
+    result {
+        let! sessionId =
+            reader.GetString 0
+            |> persistedSessionId
 
-    { SessionId = reader.GetString 0 |> persistedSessionId
-      WorktreePath = WorktreePath(reader.GetString 1)
-      Provider = parseProvider (reader.GetString 2)
-      Status =
-        { Status = parseStatus (reader.GetString 3)
-          Skill = readOptStr reader 4
-          LastUserMessage = readOptMessage reader 5 6
-          LastAssistantMessage = readOptMessage reader 7 8
-          Intent = readOptMessage reader 9 10
-          Title = readOptMessage reader 11 12
-          ContextUsage = contextUsage
-          AwaitingUserSince = readOptTimestamp reader 17
-          UserInputCompletedAt = readOptTimestamp reader 18
-          BackgroundAgentClocks = Map.empty }
-      UpdatedAt = parseIso (reader.GetString 13)
-      ContextUsageAt = contextUsageAt }
+        let! provider = parseProvider (reader.GetString 2)
+        let! status = parseStatus (reader.GetString 3)
+        let! lastUserMessage = readOptMessage "last_user_message" reader 5 6
+        let! lastAssistantMessage =
+            readOptMessage "last_assistant_message" reader 7 8
+        let! intent = readOptMessage "intent" reader 9 10
+        let! title = readOptMessage "title" reader 11 12
+        let! contextUsage, contextUsageAt =
+            readContextUsage reader 14 15 16
+        let! awaitingUserSince =
+            readOptTimestamp "awaiting_user_since" reader 17
+        let! userInputCompletedAt =
+            readOptTimestamp "user_input_completed_at" reader 18
+        let! updatedAt = parseTimestamp "updated_at" (reader.GetString 13)
+
+        return
+            { SessionId = sessionId
+              WorktreePath = WorktreePath(reader.GetString 1)
+              Provider = provider
+              Status =
+                { Status = status
+                  Skill = readOptStr reader 4
+                  LastUserMessage = lastUserMessage
+                  LastAssistantMessage = lastAssistantMessage
+                  Intent = intent
+                  Title = title
+                  ContextUsage = contextUsage
+                  AwaitingUserSince = awaitingUserSince
+                  UserInputCompletedAt = userInputCompletedAt
+                  BackgroundAgentClocks = Map.empty }
+              UpdatedAt = updatedAt
+              ContextUsageAt = contextUsageAt }
+    }
+
+let rec private readPersistedRows
+    (reader: SqliteDataReader)
+    read
+    accumulated
+    =
+    if reader.Read() then
+        match read reader with
+        | Ok row ->
+            readPersistedRows
+                reader
+                read
+                (row :: accumulated)
+        | Error error -> Error error
+    else
+        Ok(List.rev accumulated)
 
 // --- SQL --------------------------------------------------------------------------------------
 
@@ -530,7 +725,11 @@ let private readInstanceByIdentity
     command.CommandText <- instanceByIdentitySql
     bindIdentity command identity
     use reader = command.ExecuteReader()
-    if reader.Read() then Some(readInstance reader) else None
+    if reader.Read() then
+        readInstance reader
+        |> Result.map Some
+    else
+        Ok None
 
 let private upsertInstance
     (connection: SqliteConnection)
@@ -603,8 +802,10 @@ type SessionActivityStore
                 connection
                 (Some transaction)
                 stored.ProcessIdentity
+            |> persistedValue
             |> Option.defaultWith (fun () ->
-                failwith $"{nameof StoredInstance}: persisted instance row missing")
+                raisePersistedDataError
+                    PersistedDataError.MissingPersistedInstance)
 
         transaction.Commit()
         persisted
@@ -630,6 +831,7 @@ type SessionActivityStore
                     connection
                     (Some transaction)
                     stored.ProcessIdentity
+                |> persistedValue
             else
                 None
 
@@ -663,6 +865,7 @@ type SessionActivityStore
         let persisted =
             if updated then
                 readInstanceByIdentity connection (Some transaction) identity
+                |> persistedValue
             else
                 None
 
@@ -672,6 +875,7 @@ type SessionActivityStore
     member _.InstanceByIdentity(identity: ProcessIdentity) =
         use connection = openConnection ()
         readInstanceByIdentity connection None identity
+        |> persistedValue
 
     member _.InstancesBySession(sessionId: SessionId) =
         use connection = openConnection ()
@@ -679,7 +883,8 @@ type SessionActivityStore
         command.CommandText <- instancesBySessionSql
         command.Parameters.AddWithValue("$sessionId", SessionId.value sessionId) |> ignore
         use reader = command.ExecuteReader()
-        readRows reader readInstance []
+        readPersistedRows reader readInstance []
+        |> persistedValue
 
     /// Restart rebuild: exact rows whose receipt-time liveness is still within the in-memory window.
     member _.LoadRecentInstances(now: DateTimeOffset) =
@@ -688,7 +893,8 @@ type SessionActivityStore
         command.CommandText <- loadRecentInstancesSql
         command.Parameters.AddWithValue("$cutoff", isoUtc (now - idleWindow)) |> ignore
         use reader = command.ExecuteReader()
-        readRows reader readInstance []
+        readPersistedRows reader readInstance []
+        |> persistedValue
 
     /// One durable footer representative per worktree, ranked directly from exact instances. The
     /// read returns at most one row per worktree instead of the 60-day process-instance history.
@@ -698,7 +904,8 @@ type SessionActivityStore
         command.CommandText <- retainedByWorktreeSql
         use reader = command.ExecuteReader()
 
-        readRows reader readRetainedSession []
+        readPersistedRows reader readRetainedSession []
+        |> persistedValue
         |> List.map (fun status ->
             WorktreePath.value status.WorktreePath, status)
         |> Map.ofList
@@ -716,7 +923,8 @@ type SessionActivityStore
         if reader.Read() then
             reader.GetString 0
             |> persistedSessionId
-            |> Some
+            |> Result.map Some
+            |> persistedValue
         else
             None
 
@@ -726,9 +934,13 @@ type SessionActivityStore
         command.CommandText <- retainedTerminalSessionIdsSql
         use reader = command.ExecuteReader()
 
-        readRows reader (fun row ->
-            row.GetString 0
-            |> persistedTerminalSessionId) []
+        readPersistedRows
+            reader
+            (fun row ->
+                row.GetString 0
+                |> persistedTerminalSessionId)
+            []
+        |> persistedValue
         |> Set.ofList
 
     member _.PruneOld(cutoff: DateTimeOffset) =

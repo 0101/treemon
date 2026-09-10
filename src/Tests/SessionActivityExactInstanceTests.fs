@@ -576,5 +576,5 @@ type ExactFoldAndWireTests() =
     [<Test>]
     member _.``wire rejects PID-less reporters``() =
         match parseReport (ts "2026-09-04T10:01:00Z") (wireRequest 0 "session_present") with
-        | Error "missing or invalid parentProcessId" -> ()
+        | Error ProtocolError.InvalidParentProcessId -> ()
         | outcome -> Assert.Fail $"Expected PID-less rejection, got {outcome}"

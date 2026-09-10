@@ -468,7 +468,7 @@ type LatestSessionIdForWorktreeTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type PersistedIdentityValidationTests() =
+type PersistedDataValidationTests() =
 
     static member CorruptionCases: obj array seq =
         seq {
@@ -476,10 +476,16 @@ type PersistedIdentityValidationTests() =
                      box "invalid persisted session id" |]
             yield [| box "UPDATE session_instances SET terminal_session_id = 'invalid';"
                      box "invalid persisted terminal session id" |]
+            yield [| box "UPDATE session_instances SET status = 'unknown';"
+                     box "unknown status text" |]
+            yield [| box "UPDATE session_instances SET last_user_msg = 'partial', last_user_ts = NULL;"
+                     box "incomplete persisted last_user_message" |]
+            yield [| box "UPDATE session_instances SET background_agent_clocks = '{}';"
+                     box "malformed background-agent clocks" |]
         }
 
     [<TestCaseSource("CorruptionCases")>]
-    member _.``An invalid persisted identity fails instead of entering typed state``
+    member _.``Invalid persisted data fails instead of entering typed state``
         (corruption: string, expectedFragment: string)
         =
         withStoreAndPath (fun dbPath store ->
@@ -490,7 +496,7 @@ type PersistedIdentityValidationTests() =
             SqliteTestDatabase.execute dbPath corruption
 
             let failure =
-                Assert.Throws<InvalidOperationException>(fun () ->
+                Assert.Throws<InvalidDataException>(fun () ->
                     store.LoadRecentInstances(ts "2026-03-01T12:00:00Z") |> ignore)
 
             Assert.That(failure.Message, Does.Contain expectedFragment))

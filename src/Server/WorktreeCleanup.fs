@@ -93,7 +93,13 @@ let private originPaths (lease: CleanupLease) records =
 
 let private preparePlan prepare paths =
     try Ok(prepare paths)
-    with _ -> Error "Could not prepare exact session cleanup"
+    with error ->
+        Log.logException
+            "Lifecycle"
+            "Could not prepare exact session cleanup"
+            error
+
+        Error "Could not prepare exact session cleanup"
 
 /// A graceful attempt is best effort: its failure never authorizes claiming closure and never
 /// prevents the host close of this user-authorized teardown.
@@ -102,11 +108,17 @@ let private gracefulShutdown prepared terminalIds =
     | Error _ -> async.Return()
     | Ok(plan: SessionClosePlan) ->
         async {
-            let! _ =
+            let! outcome =
                 plan.BeforeHostClose(terminalSessionIds terminalIds)
                 |> Async.Catch
 
-            return ()
+            match outcome with
+            | Choice1Of2 () -> ()
+            | Choice2Of2 error ->
+                Log.logException
+                    "Lifecycle"
+                    "Graceful exact-session shutdown failed"
+                    error
         }
 
 let private exactClosure prepared closedIds =
@@ -114,17 +126,13 @@ let private exactClosure prepared closedIds =
     | Error error -> Error error
     | Ok(plan: SessionClosePlan) ->
         try plan.AfterHostClose(terminalSessionIds closedIds)
-        with _ -> Error "Could not record exact session closure"
+        with error ->
+            Log.logException
+                "Lifecycle"
+                "Could not record exact session closure"
+                error
 
-let private safeWithoutHealthyHost config lastHost = function
-    | DeadHost error -> Ok $"{error}. Its terminals were interrupted."
-    | MissingHost ->
-        validateMissingHostGone config lastHost
-        |> Result.map (fun () ->
-            "TerminalHost is not running; no live terminal remains to close.")
-    | IncompatibleHost(_, error)
-    | UnusableHost error -> Error error
-    | HealthyHost _ -> failwith "unreachable"
+            Error "Could not record exact session closure"
 
 let rec private closeTarget config connection latest failures = function
     | [] ->
@@ -202,11 +210,12 @@ let private closeHealthy diagnostics prepare manager (lease: CleanupLease) conne
     async {
         let records = targetRecords lease registry
 
-        let prepared =
-            records |> Result.defaultValue [] |> originPaths lease |> preparePlan prepare
-
         match records with
         | Error error ->
+            let prepared =
+                originPaths lease []
+                |> preparePlan prepare
+
             // The trust boundary rejects the close before any host request is made.
             return!
                 finish diagnostics manager prepared
@@ -217,6 +226,10 @@ let private closeHealthy diagnostics prepare manager (lease: CleanupLease) conne
                       Interruption = None
                       Failure = Some error }
         | Ok records ->
+            let prepared =
+                originPaths lease records
+                |> preparePlan prepare
+
             let activeIds =
                 records |> List.map (_.SessionId >> EmbeddedTerminalId) |> Set.ofList
 
@@ -270,24 +283,32 @@ let private closeReserved diagnostics prepare manager (lease: CleanupLease) =
         let unusable error =
             finish diagnostics manager (Ok(noSessionClose ())) (hostUnusable lease error)
 
+        let unavailable reason =
+            finish diagnostics manager (originPaths lease [] |> preparePlan prepare)
+                { Outcome = HostOutcome.Unavailable
+                  Registry = None
+                  ConfirmedClosed = lease.CachedTerminalIds
+                  RemainingOnFailure = 0
+                  Interruption = Some reason
+                  Failure = None }
+
         match! discoverHost config with
         | HealthyHost connection ->
             match! listTerminals config connection with
             | Ok registry ->
                 return! closeHealthy diagnostics prepare manager lease connection registry
             | Error error -> return! unusable error
-        | discovery ->
-            match safeWithoutHealthyHost config lease.LastHost discovery with
-            | Error error -> return! unusable error
-            | Ok reason ->
+        | DeadHost error ->
+            return! unavailable $"{error}. Its terminals were interrupted."
+        | MissingHost ->
+            match validateMissingHostGone config lease.LastHost with
+            | Ok () ->
                 return!
-                    finish diagnostics manager (originPaths lease [] |> preparePlan prepare)
-                        { Outcome = HostOutcome.Unavailable
-                          Registry = None
-                          ConfirmedClosed = lease.CachedTerminalIds
-                          RemainingOnFailure = 0
-                          Interruption = Some reason
-                          Failure = None }
+                    unavailable
+                        "TerminalHost is not running; no live terminal remains to close."
+            | Error error -> return! unusable error
+        | IncompatibleHost(_, error)
+        | UnusableHost error -> return! unusable error
     }
 
 let private asTask cancellation workflow =

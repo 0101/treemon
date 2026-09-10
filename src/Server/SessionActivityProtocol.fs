@@ -2,6 +2,7 @@ module Server.SessionActivityProtocol
 
 open System
 open System.Globalization
+open FsToolkit.ErrorHandling
 open Server.SessionActivity
 open Shared
 
@@ -26,16 +27,72 @@ type SessionActivityRequest =
       currentTokens: int
       tokenLimit: int }
 
+[<RequireQualifiedAccess>]
+type ProtocolError =
+    | MissingBody
+    | InvalidParentProcessId
+    | MissingWorktreePath
+    | MissingEventId
+    | MissingOccurredAt
+    | MissingKind
+    | InvalidSessionId of reason: string
+    | InvalidTerminalSessionId of reason: string
+    | UnknownProvider of provider: string
+    | MalformedTimestamp of value: string
+    | MissingMessage
+    | MissingMessageText
+    | MissingToolCallId of kind: string
+    | ToolCallIdTooLong of kind: string * maximum: int
+    | SkillNameRequired
+    | InvalidTokenLimit
+    | UnknownKind of kind: string
+    | InvalidWorktreePath
+
+let errorMessage =
+    function
+    | ProtocolError.MissingBody -> "missing body"
+    | ProtocolError.InvalidParentProcessId ->
+        "missing or invalid parentProcessId"
+    | ProtocolError.MissingWorktreePath -> "missing worktreePath"
+    | ProtocolError.MissingEventId -> "missing eventId"
+    | ProtocolError.MissingOccurredAt -> "missing occurredAt"
+    | ProtocolError.MissingKind -> "missing kind"
+    | ProtocolError.InvalidSessionId reason
+    | ProtocolError.InvalidTerminalSessionId reason -> reason
+    | ProtocolError.UnknownProvider provider ->
+        $"unknown provider '{provider}'"
+    | ProtocolError.MalformedTimestamp value ->
+        $"malformed timestamp '{value}'"
+    | ProtocolError.MissingMessage -> "missing message"
+    | ProtocolError.MissingMessageText -> "missing message text"
+    | ProtocolError.MissingToolCallId kind ->
+        $"{kind} requires toolCallId"
+    | ProtocolError.ToolCallIdTooLong(kind, maximum) ->
+        $"{kind} toolCallId exceeds {maximum} characters"
+    | ProtocolError.SkillNameRequired ->
+        "skill_invoked requires skillName"
+    | ProtocolError.InvalidTokenLimit ->
+        "usage_info requires tokenLimit > 0"
+    | ProtocolError.UnknownKind kind -> $"unknown kind '{kind}'"
+    | ProtocolError.InvalidWorktreePath -> "invalid worktreePath"
+
 let private parseProvider =
     function
     | "copilot_cli" -> Ok CopilotCli
-    | other -> Error $"unknown provider '{other}'"
+    | other ->
+        other
+        |> Option.ofObj
+        |> Option.defaultValue ""
+        |> ProtocolError.UnknownProvider
+        |> Error
 
 let private parseTerminalSessionId value =
     match value |> Option.filter (String.IsNullOrWhiteSpace >> not) with
     | None -> Ok None
     | Some raw ->
-        TerminalSessionId.create raw |> Result.map Some
+        TerminalSessionId.create raw
+        |> Result.map Some
+        |> Result.mapError ProtocolError.InvalidTerminalSessionId
 
 let internal maxSessionIdLength = SessionId.maxLength
 
@@ -48,7 +105,12 @@ let private tryParseTimestamp (value: string) =
         )
     with
     | true, timestamp -> Ok timestamp
-    | false, _ -> Error $"malformed timestamp '{value}'"
+        | false, _ ->
+            value
+            |> Option.ofObj
+            |> Option.defaultValue ""
+            |> ProtocolError.MalformedTimestamp
+            |> Error
 
 let internal maxTextLength = 8192
 
@@ -62,10 +124,9 @@ let internal maxToolCallIdLength = 512
 
 let private parseToolCallId kind (toolCallId: string) =
     if String.IsNullOrWhiteSpace toolCallId then
-        Error $"{kind} requires toolCallId"
+        Error(ProtocolError.MissingToolCallId kind)
     elif toolCallId.Length > maxToolCallIdLength then
-        Error
-            $"{kind} toolCallId exceeds {maxToolCallIdLength} characters"
+        Error(ProtocolError.ToolCallIdTooLong(kind, maxToolCallIdLength))
     else
         Ok toolCallId
 
@@ -79,9 +140,9 @@ let internal clampFutureTimestamp
 
 let private parseMessage =
     function
-    | None -> Error "missing message"
+    | None -> Error ProtocolError.MissingMessage
     | Some dto when String.IsNullOrWhiteSpace dto.text ->
-        Error "missing message text"
+        Error ProtocolError.MissingMessageText
     | Some dto ->
         tryParseTimestamp dto.at
         |> Result.map (fun timestamp ->
@@ -124,7 +185,7 @@ let internal parseEvent
             BackgroundAgentFinished(identity, occurredAt))
     | "skill_invoked" ->
         if String.IsNullOrWhiteSpace skillName then
-            Error "skill_invoked requires skillName"
+            Error ProtocolError.SkillNameRequired
         else
             Ok(SkillInvoked(capText skillName))
     | "awaiting_user_input" ->
@@ -143,10 +204,15 @@ let internal parseEvent
                 ))
     | "usage_info" ->
         if tokenLimit <= 0 then
-            Error "usage_info requires tokenLimit > 0"
+            Error ProtocolError.InvalidTokenLimit
         else
             Ok(UsageInfo(max 0 currentTokens, tokenLimit))
-    | other -> Error $"unknown kind '{other}'"
+    | other ->
+        other
+        |> Option.ofObj
+        |> Option.defaultValue ""
+        |> ProtocolError.UnknownKind
+        |> Error
 
 let private withMessageTimestamp timestamp =
     function
@@ -178,55 +244,65 @@ let private parseWorktreePath path =
     | :? NotSupportedException
     | :? System.IO.IOException
     | :? System.Security.SecurityException ->
-        Error "invalid worktreePath"
+        Error ProtocolError.InvalidWorktreePath
 
 let parseReport
     (now: DateTimeOffset)
     (request: SessionActivityRequest)
     =
     match Option.ofObj request with
-    | None -> Error "missing body"
+    | None -> Error ProtocolError.MissingBody
     | Some request ->
         let message = Option.ofObj request.message
 
-        if request.parentProcessId <= 0 then
-            Error "missing or invalid parentProcessId"
-        elif String.IsNullOrWhiteSpace request.worktreePath then
-            Error "missing worktreePath"
-        elif String.IsNullOrWhiteSpace request.eventId then
-            Error "missing eventId"
-        elif String.IsNullOrWhiteSpace request.occurredAt then
-            Error "missing occurredAt"
-        elif String.IsNullOrWhiteSpace request.kind then
-            Error "missing kind"
-        else
-            SessionId.create request.sessionId
-            |> Result.bind (fun sessionId ->
-                parseProvider request.provider
-                |> Result.bind (fun provider ->
-                    parseWorktreePath request.worktreePath
-                    |> Result.bind (fun worktreePath ->
-                        parseTerminalSessionId (Option.ofObj request.terminalSessionId)
-                        |> Result.bind (fun terminalSessionId ->
-                            tryParseTimestamp request.occurredAt
-                            |> Result.bind (fun rawOccurredAt ->
-                                let occurredAt =
-                                    clampFutureTimestamp now rawOccurredAt
+        result {
+            if request.parentProcessId <= 0 then
+                return! Error ProtocolError.InvalidParentProcessId
 
-                                parseEvent
-                                    occurredAt
-                                    request.kind
-                                    message
-                                    request.skillName
-                                    request.toolCallId
-                                    request.currentTokens
-                                    request.tokenLimit
-                                |> Result.map (fun event ->
-                                    { ParentProcessId = request.parentProcessId
-                                      SessionId = sessionId
-                                      TerminalSessionId = terminalSessionId
-                                      WorktreePath = worktreePath
-                                      Provider = provider
-                                      EventId = EventId request.eventId
-                                      OccurredAt = occurredAt
-                                      Event = withMessageTimestamp occurredAt event }))))))
+            if String.IsNullOrWhiteSpace request.worktreePath then
+                return! Error ProtocolError.MissingWorktreePath
+
+            if String.IsNullOrWhiteSpace request.eventId then
+                return! Error ProtocolError.MissingEventId
+
+            if String.IsNullOrWhiteSpace request.occurredAt then
+                return! Error ProtocolError.MissingOccurredAt
+
+            if String.IsNullOrWhiteSpace request.kind then
+                return! Error ProtocolError.MissingKind
+
+            let! sessionId =
+                SessionId.create request.sessionId
+                |> Result.mapError ProtocolError.InvalidSessionId
+
+            let! provider = parseProvider request.provider
+            let! worktreePath = parseWorktreePath request.worktreePath
+
+            let! terminalSessionId =
+                request.terminalSessionId
+                |> Option.ofObj
+                |> parseTerminalSessionId
+
+            let! rawOccurredAt = tryParseTimestamp request.occurredAt
+            let occurredAt = clampFutureTimestamp now rawOccurredAt
+
+            let! event =
+                parseEvent
+                    occurredAt
+                    request.kind
+                    message
+                    request.skillName
+                    request.toolCallId
+                    request.currentTokens
+                    request.tokenLimit
+
+            return
+                { ParentProcessId = request.parentProcessId
+                  SessionId = sessionId
+                  TerminalSessionId = terminalSessionId
+                  WorktreePath = worktreePath
+                  Provider = provider
+                  EventId = EventId request.eventId
+                  OccurredAt = occurredAt
+                  Event = withMessageTimestamp occurredAt event }
+        }

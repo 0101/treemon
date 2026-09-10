@@ -22,13 +22,9 @@ let private uniqueSid prefix =
     let id = Guid.NewGuid().ToString("N")[..7]
     $"{prefix}-{id}"
 
-// The production registry is keyed by exact Copilot process identity. Tests keep the convenient
-// three-argument registration shape while assigning each synthetic physical process a unique key.
-let mutable private nextBridgeProcessId = 93000
-
 let private freshProcessIdentity () =
-    Interlocked.Increment(&nextBridgeProcessId)
-    |> syntheticProcessIdentityForProcessId
+    Guid.NewGuid().ToString("N")
+    |> collisionResistantProcessIdentityForSessionId
 
 let private registerSessionWithIdentity path injectUrl sessionId =
     let identity = freshProcessIdentity ()

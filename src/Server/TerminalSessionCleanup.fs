@@ -19,32 +19,43 @@ let internal terminalSessionCleanupWithDiagnostics
             |> Result.map _.OpenSessions
 
         let captured =
-            originPaths |> Map.keys |> Set.ofSeq |> query
+            originPaths
+            |> Map.keys
+            |> Set.ofSeq
+            |> query
+            |> Result.mapError (fun error ->
+                Log.log
+                    "Lifecycle"
+                    $"Could not capture exact sessions for {originPaths.Count} terminal(s): {error}"
+
+                error)
 
         let beforeHostClose (activeTerminalIds: Set<TerminalSessionId>) =
             async {
-                let targets =
-                    captured
-                    |> Result.defaultValue []
-                    |> List.filter (fun session ->
-                        activeTerminalIds.Contains session.TerminalSessionId)
-                    |> List.choose (fun session ->
-                        originPaths
-                        |> Map.tryFind session.TerminalSessionId
-                        |> Option.map (fun worktreePath ->
-                            ({ WorktreePath =
-                                WorktreePath.value worktreePath
-                               ProcessIdentity =
-                                session.ProcessIdentity }
-                             : SessionBridge.ShutdownTarget)))
+                match captured with
+                | Error _ -> return ()
+                | Ok sessions ->
+                    let targets =
+                        sessions
+                        |> List.filter (fun session ->
+                            activeTerminalIds.Contains session.TerminalSessionId)
+                        |> List.choose (fun session ->
+                            originPaths
+                            |> Map.tryFind session.TerminalSessionId
+                            |> Option.map (fun worktreePath ->
+                                ({ WorktreePath =
+                                    WorktreePath.value worktreePath
+                                   ProcessIdentity =
+                                    session.ProcessIdentity }
+                                 : SessionBridge.ShutdownTarget)))
 
-                let! _ =
-                    SessionBridge.shutdownExactBatchUsing
-                        diagnostics
-                        service.ClosedProcessSnapshot
-                        targets
+                    let! _ =
+                        SessionBridge.shutdownExactBatchUsing
+                            diagnostics
+                            service.ClosedProcessSnapshot
+                            targets
 
-                return ()
+                    return ()
             }
 
         let afterHostClose (closedTerminalIds: Set<TerminalSessionId>) =
@@ -54,10 +65,22 @@ let internal terminalSessionCleanupWithDiagnostics
                 let observedAfter = query closedTerminalIds
                 let closedAt = DateTimeOffset.UtcNow
 
+                let sessions, queryErrors =
+                    match captured, observedAfter with
+                    | Ok capturedSessions, Ok observedSessions ->
+                        capturedSessions @ observedSessions, []
+                    | Error _, Ok observedSessions ->
+                        observedSessions, []
+                    | Ok capturedSessions, Error error ->
+                        capturedSessions,
+                        [ $"Could not reconcile exact terminal sessions: {error}" ]
+                    | Error captureError, Error reconcileError ->
+                        [],
+                        [ $"Could not capture exact terminal sessions: {captureError}"
+                          $"Could not reconcile exact terminal sessions: {reconcileError}" ]
+
                 let acknowledgements =
-                    [ captured; observedAfter ]
-                    |> List.choose Result.toOption
-                    |> List.collect id
+                    sessions
                     |> List.filter (fun session ->
                         closedTerminalIds.Contains session.TerminalSessionId)
                     |> List.distinctBy _.ProcessIdentity
@@ -83,12 +106,6 @@ let internal terminalSessionCleanupWithDiagnostics
                               Outcome = outcome }
                     ))
 
-                let reconcileError =
-                    match observedAfter with
-                    | Error error ->
-                        [ $"Could not reconcile exact terminal sessions: {error}" ]
-                    | Ok _ -> []
-
                 let closureErrors =
                     acknowledgements
                     |> List.choose (fun (_, acknowledgement) ->
@@ -98,7 +115,7 @@ let internal terminalSessionCleanupWithDiagnostics
                             Some "an exact session closure target was not found"
                         | ClosureAcknowledge.Failed error -> Some error)
 
-                match reconcileError @ closureErrors with
+                match queryErrors @ closureErrors with
                 | [] -> Ok()
                 | errors -> Error(String.concat "; " errors)
 

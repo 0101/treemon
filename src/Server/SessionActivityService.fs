@@ -55,7 +55,7 @@ let tryAcceptReport
     =
     async {
         match parseReport DateTimeOffset.UtcNow request with
-        | Error reason -> return Rejected reason
+        | Error error -> return Rejected(errorMessage error)
         | Ok report ->
             let path = WorktreePath.value report.WorktreePath
             let! known = isKnownWorktree scheduler path
@@ -248,9 +248,10 @@ type SessionActivityService internal
 
                                     state
                             with error ->
-                                Log.log
+                                Log.logException
                                     "Activity"
-                                    $"Ingest failed (report dropped, mailbox kept alive): {error.Message}"
+                                    "Ingest failed; report dropped and mailbox kept alive"
+                                    error
 
                                 state
 
@@ -294,9 +295,10 @@ type SessionActivityService internal
 
                                 return! loop state
                         with error ->
-                            Log.log
+                            Log.logException
                                 "Activity"
-                                $"Exact presence persistence failed: {error.Message}"
+                                "Exact presence persistence failed"
+                                error
 
                             reply.Reply(
                                 PresenceAcknowledge.NotRecorded(
@@ -343,9 +345,10 @@ type SessionActivityService internal
                                     return!
                                         loop next
                         with error ->
-                            Log.log
+                            Log.logException
                                 "Activity"
-                                $"Exact closure persistence failed: {error.Message}"
+                                "Exact closure persistence failed"
+                                error
 
                             reply.Reply(
                                 ClosureAcknowledge.Failed
@@ -500,9 +503,10 @@ type SessionActivityService internal
                         "session activity service is stopped"
                     )
                 | error ->
-                    Log.log
+                    Log.logException
                         "Activity"
-                        $"Presence mailbox request failed: {error.Message}"
+                        "Presence mailbox request failed"
+                        error
 
                     PresenceAcknowledge.NotRecorded(
                         true,
@@ -527,9 +531,10 @@ type SessionActivityService internal
                     "Activity"
                     $"Retention: pruned {deleted} old activity row(s)"
         with error ->
-            Log.log
+            Log.logException
                 "Activity"
-                $"Retention prune failed: {error.Message}"
+                "Retention prune failed"
+                error
 
     let pruneTimer =
         new Timer(
@@ -555,13 +560,14 @@ type SessionActivityService internal
 
                 match bound with
                 | Error error ->
-                    Log.log
+                    Log.logException
                         "Activity"
-                        $"Report failed: malformed JSON — {error.Message}"
+                        "Report failed: malformed JSON"
+                        error
 
                     return!
                         RequestErrors.BAD_REQUEST
-                            $"malformed JSON: {error.Message}"
+                            "malformed JSON"
                             next
                             context
                 | Ok body ->
@@ -667,9 +673,10 @@ type SessionActivityService internal
                                                 next
                                                 context
                     with error ->
-                        Log.log
+                        Log.logException
                             "Activity"
-                            $"Session activity processing failed: {error.Message}"
+                            "Session activity processing failed"
+                            error
 
                         context.Response.StatusCode <-
                             StatusCodes.Status500InternalServerError
@@ -717,9 +724,10 @@ type SessionActivityService internal
                     timeout = acknowledgedWriteTimeout
                 )
             with error ->
-                Log.log
+                Log.logException
                     "Activity"
-                    $"Exact closure mailbox request failed: {error.Message}"
+                    "Exact closure mailbox request failed"
+                    error
 
                 ClosureAcknowledge.Failed
                     "exact session closure failed"
@@ -737,7 +745,12 @@ type SessionActivityService internal
                             timeout = acknowledgedWriteTimeout
                         )
                         |> Ok
-                with _ ->
+                with error ->
+                    Log.logException
+                        "Activity"
+                        "Exact session closure state could not be read"
+                        error
+
                     return
                         Error
                             "exact session closure state could not be read"
@@ -792,7 +805,12 @@ type SessionActivityService internal
                     timeout = acknowledgedWriteTimeout
                 )
             with error ->
-                Error error.Message
+                Log.logException
+                    "Activity"
+                    "Exact terminal activity query failed"
+                    error
+
+                Error "exact terminal activity query failed"
 
     member this.QueryTerminalActivity terminalSessionIds =
         this.QueryTerminalActivityAt(

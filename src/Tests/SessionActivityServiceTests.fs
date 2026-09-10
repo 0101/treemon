@@ -53,7 +53,7 @@ let private parseOk req =
     match parseReport refNow req with
     | Ok r -> r
     | Error e ->
-        Assert.Fail $"expected Ok, got Error: {e}"
+        Assert.Fail $"expected Ok, got Error: {errorMessage e}"
         failwith "unreachable"
 
 let private parseErr req =
@@ -61,7 +61,7 @@ let private parseErr req =
     | Ok _ ->
         Assert.Fail "expected Error, got Ok"
         failwith "unreachable"
-    | Error e -> e
+    | Error e -> errorMessage e
 
 let private queryOwnedOk
     (service: SessionActivityService)
@@ -726,6 +726,22 @@ type TryAcceptReportTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type HandlerTests() =
+
+    [<Test>]
+    member _.``malformed JSON response does not expose binder exception details``() =
+        withService "C:/wt/a" (fun (service, _, _) ->
+            let statusCode, body =
+                handlerResponse service.Handler "{"
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    statusCode,
+                    Is.EqualTo StatusCodes.Status400BadRequest
+                )
+                Assert.That(
+                    JsonSerializer.Deserialize<string> body,
+                    Is.EqualTo "malformed JSON"
+                )))
 
     [<Test>]
     member _.``valid JSON with an invalid worktree path is rejected without blaming JSON binding``() =

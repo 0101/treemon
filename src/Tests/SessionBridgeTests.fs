@@ -30,13 +30,9 @@ let private registrationAged processId ageSeconds sessionId =
       TerminalSessionId = None
       RegisteredAt = clock - TimeSpan.FromSeconds(float ageSeconds) }
 
-// Tests share the module-level bridge registry, so each synthetic physical process needs a unique
-// exact identity even when several tests intentionally reuse one durable SessionId.
-let mutable private nextProcessId = 92000
-
 let private nextIdentity () =
-    let processId = Interlocked.Increment(&nextProcessId)
-    ProcessIdentity.create processId (int64 processId * 1000L + 1L) |> Result.defaultWith invalidOp
+    Guid.NewGuid().ToString("N")
+    |> collisionResistantProcessIdentityForSessionId
 
 let private reusedIdentity identity =
     ProcessIdentity.create
