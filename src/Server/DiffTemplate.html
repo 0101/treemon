@@ -15,7 +15,13 @@
     <header class="toolbar">
         <div class="title">
             <strong>Worktree diff</strong>
-            <span id="base-label">Loading comparison…</span>
+            <label class="comparison-picker">
+                <span>Compare to</span>
+                <select id="comparison-target" aria-describedby="comparison-status" disabled>
+                    <option>Loading branches…</option>
+                </select>
+            </label>
+            <span id="comparison-status" class="comparison-status" role="status" aria-live="polite"></span>
         </div>
         <div class="view-toggle" role="group" aria-label="Diff layout">
             <button id="unified-view" type="button" aria-label="Unified view" title="Unified view" aria-pressed="true">

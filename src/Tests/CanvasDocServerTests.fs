@@ -656,7 +656,8 @@ type DiffComparisonContextTests() =
                         PathUtils.toRepoId repoRoot,
                         ({ WorktreePath = path
                            UpstreamRemote = "upstream"
-                           BaseBranch = "dev" }
+                           BaseBranch = "dev"
+                           Target = WorktreeDiff.DiffComparisonTarget.ConfiguredBase }
                          : WorktreeDiff.DiffComparisonContext)
                     )
                 )
@@ -706,7 +707,8 @@ type DiffComparisonContextTests() =
                         repoId,
                         ({ WorktreePath = linked
                            UpstreamRemote = "upstream"
-                           BaseBranch = "develop" }
+                           BaseBranch = "develop"
+                           Target = WorktreeDiff.DiffComparisonTarget.ConfiguredBase }
                          : WorktreeDiff.DiffComparisonContext)
                     )
                 )

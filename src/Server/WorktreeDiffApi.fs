@@ -40,7 +40,12 @@ type internal DiffSummaryTarget =
       Categorization: DiffCategories.Configuration }
 
 type internal Handlers =
-    { Summary:
+    { Comparisons:
+        ProcessRunner.ResponseDeadline
+            -> WorktreeDiff.DiffComparisonContext option
+            -> HttpContext
+            -> System.Threading.Tasks.Task<unit>
+      Summary:
         ProcessRunner.ResponseDeadline
             -> DiffSummaryTarget option
             -> HttpContext
@@ -507,7 +512,9 @@ let private diffReplacementName =
 let private layerCountResult =
     function
     | Ok count -> DiffLayerCountResult.Available count
-    | Error(WorktreeDiff.BaseNotFound _) -> DiffLayerCountResult.BaseError
+    | Error(WorktreeDiff.BaseNotFound _)
+    | Error(WorktreeDiff.ComparisonTargetNotFound _) ->
+        DiffLayerCountResult.BaseError
     | Error(WorktreeDiff.GitTimedOut _) -> DiffLayerCountResult.TimedOut
     | Error _ -> DiffLayerCountResult.GitError
 
@@ -587,6 +594,34 @@ let internal serializeSummaryResult counts categorization =
                layerCounts = countsJson |}
         )
 
+let internal serializeComparisonTargetsResult
+    (result:
+        Result<
+            WorktreeDiff.DiffComparisonTargets,
+            WorktreeDiff.WorktreeDiffError
+         >)
+    =
+    match result with
+    | Ok targets ->
+        let baseLabel, baseAvailable =
+            match targets.ConfiguredBase with
+            | WorktreeDiff.ConfiguredDiffComparison.Available label ->
+                label, true
+            | WorktreeDiff.ConfiguredDiffComparison.Missing label ->
+                label, false
+
+        JsonSerializer.Serialize(
+            {| status = "ready"
+               configuredBase =
+                {| label = baseLabel
+                   available = baseAvailable |}
+               localBranches = targets.LocalBranches |}
+        )
+    | Error(WorktreeDiff.GitTimedOut _) ->
+        JsonSerializer.Serialize {| status = "timeout" |}
+    | Error _ ->
+        JsonSerializer.Serialize {| status = "git-error" |}
+
 let internal serializeFileResult =
     function
     | DiffFileResult.Text (file, patch) ->
@@ -660,7 +695,9 @@ let private issueFile
 
 let private summaryErrorResult =
     function
-    | WorktreeDiff.BaseNotFound _ -> DiffSummaryResult.BaseError
+    | WorktreeDiff.BaseNotFound _
+    | WorktreeDiff.ComparisonTargetNotFound _ ->
+        DiffSummaryResult.BaseError
     | WorktreeDiff.GitTimedOut _ -> DiffSummaryResult.TimedOut
     | WorktreeDiff.TooManyFiles minimumCount ->
         DiffSummaryResult.TooManyFiles minimumCount
@@ -802,29 +839,55 @@ let private queryBoolean
         | "false" -> Some false
         | _ -> None
 
-let private summaryLayers (ctx: HttpContext) =
-    if ctx.Request.Query.Count = 0 then
-        Some WorktreeDiff.allWorktreeDiffLayers
-    elif
-        ctx.Request.Query.Count <> 3
-        || not (ctx.Request.Query.ContainsKey("committed"))
-        || not (ctx.Request.Query.ContainsKey("local"))
-        || not (ctx.Request.Query.ContainsKey("untracked"))
-    then
-        None
+type private DiffSummaryRequest =
+    { Layers: WorktreeDiff.WorktreeDiffLayers
+      Target: WorktreeDiff.DiffComparisonTarget }
+
+let private summaryTarget (ctx: HttpContext) =
+    if not (ctx.Request.Query.ContainsKey("branch")) then
+        Some WorktreeDiff.DiffComparisonTarget.ConfiguredBase
     else
-        match
-            queryBoolean ctx "committed",
-            queryBoolean ctx "local",
-            queryBoolean ctx "untracked"
-        with
-        | Some committed, Some local, Some untracked ->
-            Some
-                ({ AlreadyCommitted = committed
-                   LocalChanges = local
-                   Untracked = untracked }
-                 : WorktreeDiff.WorktreeDiffLayers)
-        | _ -> None
+        let values = ctx.Request.Query["branch"]
+
+        if
+            values.Count <> 1
+            || System.String.IsNullOrWhiteSpace(values[0])
+        then
+            None
+        else
+            Some(WorktreeDiff.DiffComparisonTarget.LocalBranch values[0])
+
+let private summaryRequest (ctx: HttpContext) =
+    if ctx.Request.Query.Count = 0 then
+        Some
+            { Layers = WorktreeDiff.allWorktreeDiffLayers
+              Target = WorktreeDiff.DiffComparisonTarget.ConfiguredBase }
+    else
+        let hasBranch = ctx.Request.Query.ContainsKey("branch")
+        let expectedCount = if hasBranch then 4 else 3
+
+        if
+            ctx.Request.Query.Count <> expectedCount
+            || not (ctx.Request.Query.ContainsKey("committed"))
+            || not (ctx.Request.Query.ContainsKey("local"))
+            || not (ctx.Request.Query.ContainsKey("untracked"))
+        then
+            None
+        else
+            match
+                queryBoolean ctx "committed",
+                queryBoolean ctx "local",
+                queryBoolean ctx "untracked",
+                summaryTarget ctx
+            with
+            | Some committed, Some local, Some untracked, Some target ->
+                Some
+                    { Layers =
+                        { AlreadyCommitted = committed
+                          LocalChanges = local
+                          Untracked = untracked }
+                      Target = target }
+            | _ -> None
 
 let private viewerInstance (ctx: HttpContext) =
     let values = ctx.Request.Headers[viewerHeaderName]
@@ -835,6 +898,36 @@ let private viewerInstance (ctx: HttpContext) =
         match System.Guid.TryParseExact(values[0], "D") with
         | true, viewer -> Some viewer
         | false, _ -> None
+
+let private handleComparisons
+    deadline
+    (comparisonContext: WorktreeDiff.DiffComparisonContext option)
+    (ctx: HttpContext)
+    =
+    task {
+        match
+            comparisonContext,
+            viewerInstance ctx,
+            ctx.Request.Query.Count
+        with
+        | None, _, _ ->
+            do! writeError deadline ctx 404 "Unknown worktree"
+        | Some _, None, _ ->
+            do! writeError deadline ctx 400 "Invalid diff viewer"
+        | Some _, Some _, count when count <> 0 ->
+            do! writeError deadline ctx 400 "Invalid diff-comparisons query"
+        | Some comparison, Some _, _ ->
+            let! result =
+                WorktreeDiff.getDiffComparisonTargetsWithinDeadline
+                    deadline
+                    comparison
+                |> Async.StartAsTask
+
+            do!
+                result
+                |> serializeComparisonTargetsResult
+                |> writeJson deadline ctx
+    }
 
 let private handleSummary
     (service: Service)
@@ -850,19 +943,24 @@ let private handleSummary
             do! writeError deadline ctx 404 "Unknown worktree"
         | Some { Comparison = comparisonContext
                  Categorization = categorization } ->
-            let worktreePath = comparisonContext.WorktreePath
-
-            match viewerInstance ctx, summaryLayers ctx with
+            match viewerInstance ctx, summaryRequest ctx with
             | None, _ ->
                 do! writeError deadline ctx 400 "Invalid diff viewer"
             | Some _, None ->
                 do! writeError deadline ctx 400 "Invalid diff-summary query"
-            | Some viewer, Some layers
+            | Some viewer, Some { Layers = layers
+                                  Target = comparisonTarget }
                 when
                     not layers.AlreadyCommitted
                     && not layers.LocalChanges
                     && not layers.Untracked
                 ->
+                let comparisonContext =
+                    { comparisonContext with
+                        Target = comparisonTarget }
+
+                let worktreePath = comparisonContext.WorktreePath
+
                 let! generation =
                     store.BeginSummary(worktreePath, viewer)
                     |> Async.StartAsTask
@@ -886,7 +984,14 @@ let private handleSummary
                         (layerCounts counts)
                         categorization
                     |> writeJson deadline ctx
-            | Some viewer, Some layers ->
+            | Some viewer, Some { Layers = layers
+                                  Target = comparisonTarget } ->
+                let comparisonContext =
+                    { comparisonContext with
+                        Target = comparisonTarget }
+
+                let worktreePath = comparisonContext.WorktreePath
+
                 let! generation =
                     store.BeginSummary(worktreePath, viewer)
                     |> Async.StartAsTask
@@ -1064,7 +1169,8 @@ let internal createHandlersWithStore
     (service: Service)
     newIdentity
     =
-    { Summary = handleSummary service store newIdentity
+    { Comparisons = handleComparisons
+      Summary = handleSummary service store newIdentity
       File = handleFile service store
       Categorization = handleCategorization }
 

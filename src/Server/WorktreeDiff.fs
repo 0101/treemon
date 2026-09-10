@@ -39,10 +39,25 @@ type WorktreeDiffLayers =
       LocalChanges: bool
       Untracked: bool }
 
+[<RequireQualifiedAccess>]
+type internal DiffComparisonTarget =
+    | ConfiguredBase
+    | LocalBranch of string
+
 type internal DiffComparisonContext =
     { WorktreePath: string
       UpstreamRemote: string
-      BaseBranch: string }
+      BaseBranch: string
+      Target: DiffComparisonTarget }
+
+[<RequireQualifiedAccess>]
+type internal ConfiguredDiffComparison =
+    | Available of label: string
+    | Missing of label: string
+
+type internal DiffComparisonTargets =
+    { ConfiguredBase: ConfiguredDiffComparison
+      LocalBranches: string list }
 
 type WorktreeDiffSummary =
     { BaseRef: string
@@ -52,12 +67,14 @@ type WorktreeDiffSummary =
 type WorktreeDiffOperation =
     | ResolveBase
     | ResolveMergeBase
+    | EnumerateBranches
     | EnumerateTracked
     | EnumerateUntracked
     | LoadFile
 
 type WorktreeDiffError =
     | BaseNotFound of baseBranch: string * remoteRef: string
+    | ComparisonTargetNotFound of branch: string
     | GitStartFailed of WorktreeDiffOperation
     | GitTimedOut of WorktreeDiffOperation
     | GitFailed of WorktreeDiffOperation * exitCode: int
@@ -184,10 +201,10 @@ let private trimSingleLine
         | [| line |] -> Ok line
         | _ -> Error(InvalidGitOutput operation))
 
-let private runRefExists
+let private runRefProbe
     (deadline: ProcessRunner.ResponseDeadline)
     (repoRoot: string)
-    (gitRef: string)
+    (arguments: string list)
     =
     async {
         let! result =
@@ -195,12 +212,7 @@ let private runRefExists
                 { diffGit with
                     Limits = ProcessRunner.CaptureLimits.small
                     Deadline = ProcessRunner.SharedDeadline deadline }
-                [ "-C"
-                  repoRoot
-                  "rev-parse"
-                  "--verify"
-                  "--quiet"
-                  gitRef ]
+                ("-C" :: repoRoot :: arguments)
 
         return
             match result with
@@ -214,6 +226,18 @@ let private runRefExists
 
                 Error(GitFailed(ResolveBase, output.ExitCode))
     }
+
+let private runRefExists deadline repoRoot gitRef =
+    runRefProbe
+        deadline
+        repoRoot
+        [ "rev-parse"; "--verify"; "--quiet"; gitRef ]
+
+let private runExactRefExists deadline repoRoot gitRef =
+    runRefProbe
+        deadline
+        repoRoot
+        [ "show-ref"; "--verify"; "--quiet"; gitRef ]
 
 let private resolveDiffBaseRef
     (deadline: ProcessRunner.ResponseDeadline)
@@ -252,6 +276,37 @@ let private resolveDiffBaseRef
                         localExists
                     |> Result.requireSome (BaseNotFound(baseBranch, remoteRef))
     }
+
+let private resolveComparisonRef
+    (deadline: ProcessRunner.ResponseDeadline)
+    (context: DiffComparisonContext)
+    =
+    match context.Target with
+    | DiffComparisonTarget.ConfiguredBase ->
+        async {
+            let! result =
+                resolveDiffBaseRef
+                    deadline
+                    context.WorktreePath
+                    context.UpstreamRemote
+                    context.BaseBranch
+
+            return result |> Result.map (fun baseRef -> baseRef, baseRef)
+        }
+    | DiffComparisonTarget.LocalBranch branch ->
+        asyncResult {
+            let branchRef = $"refs/heads/{branch}"
+            let! exists =
+                runExactRefExists
+                    deadline
+                    context.WorktreePath
+                    branchRef
+
+            if not exists then
+                return! Error(ComparisonTargetNotFound branch)
+
+            return branch, branchRef
+        }
 
 let private parseNulTokens
     (operation: WorktreeDiffOperation)
@@ -544,6 +599,79 @@ let private untrackedEnumerationArguments =
 
 let private trackedFileEnumerationArguments = [ "ls-files"; "-z"; "--" ]
 
+let private localBranchEnumerationArguments =
+    [ "for-each-ref"
+      "--format=%(refname:short)"
+      "refs/heads" ]
+
+let private parseLocalBranches baseBranch bytes =
+    decodeGitOutput EnumerateBranches bytes
+    |> Result.map (fun output ->
+        output.Split(
+            [| '\r'; '\n' |],
+            StringSplitOptions.RemoveEmptyEntries
+        )
+        |> Array.toList
+        |> List.distinct
+        |> List.sortBy (GitWorktree.branchSortKey baseBranch))
+
+let private resolveConfiguredComparison
+    (deadline: ProcessRunner.ResponseDeadline)
+    (context: DiffComparisonContext)
+    =
+    async {
+        let! result =
+            resolveDiffBaseRef
+                deadline
+                context.WorktreePath
+                context.UpstreamRemote
+                context.BaseBranch
+
+        return
+            match result with
+            | Ok baseRef ->
+                Ok(ConfiguredDiffComparison.Available baseRef)
+            | Error(BaseNotFound (_, remoteRef)) ->
+                Ok(ConfiguredDiffComparison.Missing remoteRef)
+            | Error error -> Error error
+    }
+
+let internal getDiffComparisonTargetsWithinDeadline
+    (deadline: ProcessRunner.ResponseDeadline)
+    (context: DiffComparisonContext)
+    : Async<Result<DiffComparisonTargets, WorktreeDiffError>> =
+    asyncResult {
+        let! bytes =
+            runDiffGit
+                deadline
+                EnumerateBranches
+                ProcessRunner.CaptureLimits.data
+                context.WorktreePath
+                localBranchEnumerationArguments
+
+        let! localBranches = parseLocalBranches context.BaseBranch bytes
+        let! configuredBase =
+            resolveConfiguredComparison deadline context
+
+        let selectableLocalBranches =
+            match configuredBase with
+            | ConfiguredDiffComparison.Available label
+                when label = context.BaseBranch ->
+                localBranches
+                |> List.filter ((<>) label)
+            | _ -> localBranches
+
+        return
+            { ConfiguredBase = configuredBase
+              LocalBranches = selectableLocalBranches }
+    }
+
+let internal getDiffComparisonTargets (context: DiffComparisonContext) =
+    getDiffComparisonTargetsWithinDeadline
+        (ProcessRunner.createResponseDeadline
+            ProcessRunner.argumentListResponseDeadlineMs)
+        context
+
 /// Every path Git tracks in the repository, independent of any comparison. This is the file set a
 /// repository's categorization is measured against, so coverage does not depend on there being an
 /// interesting diff to classify.
@@ -576,12 +704,8 @@ let private resolveComparison
                 else
                     "working tree", "HEAD"
         else
-            let! baseRef =
-                resolveDiffBaseRef
-                    deadline
-                    context.WorktreePath
-                    context.UpstreamRemote
-                    context.BaseBranch
+            let! baseRef, comparisonRef =
+                resolveComparisonRef deadline context
 
             let! mergeBaseBytes =
                 runDiffGit
@@ -589,7 +713,7 @@ let private resolveComparison
                     ResolveMergeBase
                     ProcessRunner.CaptureLimits.small
                     context.WorktreePath
-                    [ "merge-base"; "HEAD"; baseRef ]
+                    [ "merge-base"; "HEAD"; comparisonRef ]
 
             let! mergeBase = trimSingleLine ResolveMergeBase mergeBaseBytes
             return baseRef, mergeBase

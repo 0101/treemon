@@ -68,7 +68,8 @@ let internal tryFindDiffComparisonContext
         repoId,
         ({ WorktreePath = PathUtils.normalizePath selectedWorktreePath
            UpstreamRemote = repo.UpstreamRemote
-           BaseBranch = repo.BaseBranch }
+           BaseBranch = repo.BaseBranch
+           Target = WorktreeDiff.DiffComparisonTarget.ConfiguredBase }
          : WorktreeDiff.DiffComparisonContext))
 
 /// The repository root and comparison context behind one diff request, resolved from a single
@@ -491,7 +492,9 @@ let private handleCanvasRequest
         let comparisonContext = diffTarget |> Option.map snd
         let isKnown = diffTarget |> Option.isSome
 
-        if filename = "diff-summary" then
+        if filename = "diff-comparisons" then
+            do! diffHandlers.Comparisons diffDeadline comparisonContext ctx
+        elif filename = "diff-summary" then
             // Read and validate the repository's categorization on *every* summary request rather
             // than caching it in scheduler state: Refresh must show an edited or agent-written
             // `.treemon.json` immediately instead of at the next scheduler cycle. The read is keyed

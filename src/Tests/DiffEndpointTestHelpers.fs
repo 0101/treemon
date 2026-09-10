@@ -41,6 +41,8 @@ let private withCategorizationDefaults (json: string) =
     root["file"] :: fileNodes |> List.iter withEmptyCategoryPath
 
     let isReadySummary =
+        root.ContainsKey("files")
+        &&
         match root["status"] with
         | :? JsonValue as status -> status.GetValue<string>() = "ready"
         | _ -> false
@@ -320,7 +322,8 @@ let fileSummary
 let private diffContext worktreePath : WorktreeDiff.DiffComparisonContext =
     { WorktreePath = worktreePath
       UpstreamRemote = "origin"
-      BaseBranch = "main" }
+      BaseBranch = "main"
+      Target = WorktreeDiff.DiffComparisonTarget.ConfiguredBase }
 
 /// Sends one request through a diff handler in-process, so a summary can be classified against a
 /// configuration value directly. The canvas server resolves that value from the repository root per

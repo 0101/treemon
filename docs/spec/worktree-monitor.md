@@ -249,7 +249,7 @@ Each repo can configure which branch is considered the "base" for ahead/behind c
 
 - **Resolution**: `.treemon.json` `"baseBranch"` field → default `"main"`
 - **Affects**: committed `git rev-list`/`git diff --shortstat` metrics use the remote-tracking ref when available and otherwise the local branch. Behind count and auto-sync target use only the remote-tracking ref; a local fallback or missing base reports zero behind. Missing-base refreshes retain last-commit, upstream, tracked-dirty, and local/untracked diff data while omitting committed metrics.
-- **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh. The dashboard and generated diff viewer therefore expose the same base branch, including for linked worktrees without their own `.treemon.json`.
+- **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh. The dashboard and generated diff viewer therefore share the same default base, including for linked worktrees without their own `.treemon.json`; the diff viewer may override that default for one worktree page by selecting an exact local branch without changing dashboard metrics or sync behavior.
 - **Config example**: `{ "baseBranch": "dev" }` in `.treemon.json` at repo root
 
 ### Diff Categories

@@ -731,6 +731,213 @@ type DiffViewerE2ETests() =
         }
 
     [<Test>]
+    member this.``comparison selector lists the base first and persists a local branch per worktree``() =
+        task {
+            do! this.Page.SetViewportSizeAsync(480, 800)
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        window.__summaryQueries = [];
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            if (url.includes('diff-summary')) {
+                                window.__summaryQueries.push(new URL(url, location.href).search);
+                            }
+                            return originalFetch.apply(this, arguments);
+                        };
+                    })()"""
+                )
+            do!
+                this.RouteComparisons(
+                    comparisonTargetsJson
+                        "origin/main"
+                        true
+                        [| "main"; "feature/topic&mode=100%"; "zeta" |]
+                )
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.Goto()
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+
+            let! presentation =
+                this.Page.EvaluateAsync<string array array>(
+                    """() => {
+                        const select = document.getElementById('comparison-target');
+                        return [
+                            [
+                                document.querySelector('.comparison-picker > span').textContent,
+                                select.getAttribute('aria-describedby'),
+                                select.title,
+                                String(select.disabled)
+                            ],
+                            ...[...select.options].map(option => [
+                                option.value,
+                                option.textContent,
+                                option.parentElement.tagName
+                            ])
+                        ];
+                    }"""
+                )
+
+            Assert.That(
+                presentation,
+                Is.EqualTo(
+                    [| [| "Compare to";
+                           "comparison-status";
+                           "Branch used for committed changes.";
+                           "false" |]
+                       [| ""; "origin/main"; "SELECT" |]
+                       [| "main"; "main"; "OPTGROUP" |]
+                       [| "feature/topic&mode=100%"; "feature/topic&mode=100%"; "OPTGROUP" |]
+                       [| "zeta"; "zeta"; "OPTGROUP" |] |]
+                )
+            )
+
+            let expectedBranchQuery =
+                "?committed=true&local=true&untracked=false&branch=feature%2Ftopic%26mode%3D100%25"
+
+            let! _ =
+                this.Page.EvaluateAsync<obj>(
+                    """branch => {
+                        const select = document.getElementById('comparison-target');
+                        select.value = branch;
+                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    "feature/topic&mode=100%"
+                )
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "expected => window.__summaryQueries.at(-1) === expected",
+                    expectedBranchQuery
+                )
+
+            let! stored =
+                this.Page.EvaluateAsync<string>(
+                    "() => localStorage.getItem('treemon.diff.target:/e2e-diff-worktree')"
+                )
+
+            Assert.That(stored, Is.EqualTo("feature/topic&mode=100%"))
+
+            let! _ = this.Page.ReloadAsync()
+            do!
+                this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    """expected =>
+                        document.getElementById('comparison-target').value === 'feature/topic&mode=100%' &&
+                        window.__summaryQueries.at(-1) === expected""",
+                    expectedBranchQuery
+                )
+
+            let! narrowGeometry =
+                this.Page.EvaluateAsync<bool array>(
+                    """() => {
+                        const toolbar = document.querySelector('.toolbar');
+                        const select = document.getElementById('comparison-target');
+                        const rect = select.getBoundingClientRect();
+                        return [
+                            toolbar.scrollWidth <= toolbar.clientWidth,
+                            rect.left >= 0,
+                            rect.right <= window.innerWidth
+                        ];
+                    }"""
+                )
+
+            Assert.That(narrowGeometry, Is.EqualTo([| true; true; true |]))
+        }
+
+    [<Test>]
+    member this.``missing persisted branch stays explicit then refresh falls back to the base``() =
+        task {
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        localStorage.setItem(
+                            'treemon.diff.target:/e2e-diff-worktree',
+                            'feature/gone'
+                        );
+                        window.__summaryQueries = [];
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            if (url.includes('diff-summary')) {
+                                window.__summaryQueries.push(new URL(url, location.href).search);
+                            }
+                            return originalFetch.apply(this, arguments);
+                        };
+                    })()"""
+                )
+            do!
+                this.RouteComparisonResponses(
+                    [| comparisonTargetsJson
+                           "origin/main"
+                           true
+                           [| "main"; "feature/gone" |];
+                       comparisonTargetsJson
+                           "origin/main"
+                           true
+                           [| "main" |] |]
+                )
+            do!
+                this.RouteSummaries(
+                    [| summaryStateJson "base-error";
+                       readySummaryJson [| firstFile |] |]
+                )
+            do! this.Goto()
+            do! this.Page.Locator("[data-state='base-error']").WaitForAsync()
+
+            let! unavailable =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.getElementById('comparison-target').value,
+                        document.getElementById('comparison-status').textContent,
+                        document.querySelector('.state-card').textContent,
+                        localStorage.getItem('treemon.diff.target:/e2e-diff-worktree'),
+                        window.__summaryQueries.at(-1)
+                    ]"""
+                )
+
+            Assert.That(
+                unavailable,
+                Is.EqualTo(
+                    [| "feature/gone";
+                       "Comparison unavailable";
+                       "Selected branch unavailableThe selected local branch no longer exists. Use Refresh or choose another branch.";
+                       "feature/gone";
+                       "?committed=true&local=true&untracked=false&branch=feature%2Fgone" |]
+                )
+            )
+
+            do! this.Page.Locator("#refresh").ClickAsync()
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+
+            let! fallback =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.getElementById('comparison-target').value,
+                        document.getElementById('comparison-status').textContent,
+                        String(
+                            localStorage.getItem(
+                                'treemon.diff.target:/e2e-diff-worktree'
+                            ) === null
+                        ),
+                        window.__summaryQueries.at(-1)
+                    ]"""
+                )
+
+            Assert.That(
+                fallback,
+                Is.EqualTo(
+                    [| "";
+                       "Saved branch no longer exists; using configured base.";
+                       "true";
+                       "?committed=true&local=true&untracked=false" |]
+                )
+            )
+        }
+
+    [<Test>]
     member this.``canvas server serves the exact immutable pinned renderer asset``() =
         task {
             use client = new HttpClient()
@@ -1896,7 +2103,7 @@ type DiffViewerE2ETests() =
                             style('.view-toggle').borderTopWidth,
                             style('body').fontSize,
                             style('.title strong').fontSize,
-                            style('.title span').fontSize,
+                            style('.comparison-picker select').fontSize,
                             style('.layer-filter').fontSize,
                             style('.layer-count').fontSize,
                             style('.change-summary').fontSize,
@@ -2903,6 +3110,20 @@ type DiffViewerE2ETests() =
                     ])"""
                 )
 
+            let! comparisonControl =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const select = document.getElementById('comparison-target');
+                        return [
+                            document.querySelector('.comparison-picker > span').textContent,
+                            select.id,
+                            select.getAttribute('aria-describedby'),
+                            select.title,
+                            String(select.disabled)
+                        ];
+                    }"""
+                )
+
             let! renamePaths =
                 this.Page.EvaluateAsync<string array>(
                     """() => {
@@ -2924,6 +3145,16 @@ type DiffViewerE2ETests() =
                         [| [| "unified-view"; "Unified view"; "Unified view"; "true"; "svg"; "true"; "1"; "" |]
                            [| "split-view"; "Split view"; "Split view"; "false"; "svg"; "true"; "1"; "" |]
                            [| "refresh"; "Refresh diff"; "Refresh diff"; ""; "svg"; "true"; "1"; "" |] |]
+                    )
+                )
+                Assert.That(
+                    comparisonControl,
+                    Is.EqualTo(
+                        [| "Compare to";
+                           "comparison-target";
+                           "comparison-status";
+                           "Branch used for committed changes.";
+                           "false" |]
                     )
                 )
                 Assert.That(

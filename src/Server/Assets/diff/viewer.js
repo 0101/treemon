@@ -1,6 +1,7 @@
 var VIEW_KEY = 'treemon.diff.view';
 var SELECTION_KEY = 'treemon.diff.selection:' + location.pathname.replace(/\/diff\.html$/, '');
 var FILTER_KEY = 'treemon.diff.layers:' + location.pathname.replace(/\/diff\.html$/, '');
+var TARGET_KEY = 'treemon.diff.target:' + location.pathname.replace(/\/diff\.html$/, '');
 var HIGHLIGHTER_URL = '/assets/diff2html/3.4.52/diff2html-ui-slim.min.js';
 var OTHER_CATEGORY = 'Other';
 // Joins the names of a flattened single-child chain into one label, matching how `tm categories`
@@ -49,6 +50,10 @@ var state = {
     currentPatch: null,
     view: readViewPreference(),
     filters: readFilterPreference(),
+    targetBranch: null,
+    comparisonReady: false,
+    comparisonRequest: 0,
+    comparisonNotice: '',
     fileRequest: 0,
     fileAbort: null,
     summaryRequest: 0,
@@ -112,6 +117,164 @@ function updateFilterInputs() {
     document.getElementById('filter-untracked').checked = state.filters.untracked;
 }
 
+function setComparisonStatus(message) {
+    document.getElementById('comparison-status').textContent = message || '';
+}
+
+function comparisonScopeStatus() {
+    if (state.comparisonNotice) return state.comparisonNotice;
+    if (state.filters.committed) return '';
+    if (state.filters.local) return 'Local changes from HEAD';
+    if (state.filters.untracked) return 'Untracked files';
+    return 'All change layers hidden';
+}
+
+function updateComparisonControl() {
+    var select = document.getElementById('comparison-target');
+    select.disabled = !state.comparisonReady || !state.filters.committed;
+
+    if (!state.comparisonReady) {
+        select.title = 'Local branches are unavailable.';
+    } else if (!state.filters.committed) {
+        select.title = 'Select Already committed to compare with a branch.';
+    } else {
+        select.title = 'Branch used for committed changes.';
+    }
+}
+
+function comparisonOption(value, label) {
+    var option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    return option;
+}
+
+function showComparisonLoading() {
+    var select = document.getElementById('comparison-target');
+    select.setAttribute('aria-busy', 'true');
+
+    if (!state.comparisonReady) {
+        select.replaceChildren(comparisonOption('', 'Loading branches…'));
+    }
+
+    select.disabled = true;
+    setComparisonStatus(state.comparisonReady ? 'Refreshing branches…' : '');
+}
+
+function showComparisonUnavailable(reason) {
+    var select = document.getElementById('comparison-target');
+    var keepsCurrent = state.comparisonReady;
+    select.removeAttribute('aria-busy');
+
+    if (!keepsCurrent) {
+        state.targetBranch = null;
+        select.replaceChildren(comparisonOption('', 'Configured base'));
+        select.value = '';
+    }
+
+    state.comparisonNotice = reason + (
+        keepsCurrent
+            ? '; keeping the current comparison.'
+            : '; using configured base.'
+    );
+    updateComparisonControl();
+}
+
+function isComparisonMetadata(metadata) {
+    return Boolean(
+        metadata &&
+        metadata.status === 'ready' &&
+        metadata.configuredBase &&
+        typeof metadata.configuredBase.label === 'string' &&
+        typeof metadata.configuredBase.available === 'boolean' &&
+        Array.isArray(metadata.localBranches) &&
+        metadata.localBranches.every(function(branch) {
+            return typeof branch === 'string' && branch.length > 0;
+        })
+    );
+}
+
+function showComparisonTargets(metadata) {
+    var select = document.getElementById('comparison-target');
+    var preferred = state.targetBranch || readStorage(TARGET_KEY);
+    var hasPreferred = preferred && metadata.localBranches.includes(preferred);
+    var base = comparisonOption('', metadata.configuredBase.label);
+
+    if (!metadata.configuredBase.available) {
+        base.title = 'Configured base is unavailable.';
+    }
+
+    select.replaceChildren(base);
+
+    if (metadata.localBranches.length) {
+        var group = document.createElement('optgroup');
+        group.label = 'Local branches';
+        metadata.localBranches.forEach(function(branch) {
+            group.appendChild(
+                comparisonOption(
+                    branch,
+                    branch === metadata.configuredBase.label
+                        ? branch + ' (local)'
+                        : branch
+                )
+            );
+        });
+        select.appendChild(group);
+    }
+
+    state.targetBranch = hasPreferred ? preferred : null;
+    state.comparisonNotice = preferred && !hasPreferred
+        ? 'Saved branch no longer exists; using configured base.'
+        : '';
+
+    if (preferred && !hasPreferred) removeStorage(TARGET_KEY);
+
+    select.value = state.targetBranch || '';
+    select.removeAttribute('aria-busy');
+    state.comparisonReady = true;
+    updateComparisonControl();
+}
+
+async function loadComparisons() {
+    var request = ++state.comparisonRequest;
+    showComparisonLoading();
+
+    try {
+        var metadata = await fetchJson('diff-comparisons', { cache: 'no-store' });
+        if (request !== state.comparisonRequest) return false;
+
+        if (isComparisonMetadata(metadata)) {
+            showComparisonTargets(metadata);
+        } else {
+            showComparisonUnavailable(
+                metadata && metadata.status === 'timeout'
+                    ? 'Branch refresh timed out'
+                    : 'Branch list unavailable'
+            );
+        }
+    } catch (_) {
+        if (request !== state.comparisonRequest) return false;
+        showComparisonUnavailable('Branch list unavailable');
+    }
+
+    return true;
+}
+
+async function refreshComparisonsAndSummary() {
+    if (await loadComparisons()) loadSummary();
+}
+
+function comparisonChanged() {
+    var branch = document.getElementById('comparison-target').value;
+    state.targetBranch = branch || null;
+    state.comparisonNotice = '';
+
+    if (state.targetBranch) writeStorage(TARGET_KEY, state.targetBranch);
+    else removeStorage(TARGET_KEY);
+
+    loadSummary();
+}
+
 function layerCountPresentation(result) {
     if (!result || result.status === 'git-error') {
         return { text: 'unavailable', title: 'File count unavailable because Git failed.' };
@@ -150,6 +313,9 @@ function summaryUrl() {
         local: String(state.filters.local),
         untracked: String(state.filters.untracked)
     });
+
+    if (state.targetBranch) query.set('branch', state.targetBranch);
+
     return 'diff-summary?' + query.toString();
 }
 
@@ -160,6 +326,7 @@ function filtersChanged() {
         untracked: document.getElementById('filter-untracked').checked
     };
     writeStorage(FILTER_KEY, JSON.stringify(state.filters));
+    updateComparisonControl();
     loadSummary();
 }
 
@@ -1095,17 +1262,18 @@ async function loadFile(file) {
     }
 }
 
-function comparisonLabel(baseRef) {
-    if (state.filters.committed) return 'Compared with ' + baseRef;
-    if (state.filters.local) return 'Local changes from HEAD';
-    return 'Untracked files';
+function updateFallbackBaseLabel(baseRef) {
+    if (state.comparisonReady || !baseRef) return;
+    var option = document.getElementById('comparison-target').options[0];
+    if (option) option.textContent = baseRef;
 }
 
 function renderSummaryState(summary) {
     clearNavigator();
     switch (summary.status) {
         case 'clean':
-            document.getElementById('base-label').textContent = comparisonLabel(summary.baseRef);
+            updateFallbackBaseLabel(summary.baseRef);
+            setComparisonStatus(comparisonScopeStatus());
             renderState(
                 'clean',
                 'No changes',
@@ -1116,7 +1284,7 @@ function renderSummaryState(summary) {
             );
             break;
         case 'filtered-empty':
-            document.getElementById('base-label').textContent = 'All change layers hidden';
+            setComparisonStatus('All change layers hidden');
             renderState(
                 'filtered-empty',
                 'No change layers selected',
@@ -1125,15 +1293,22 @@ function renderSummaryState(summary) {
             );
             break;
         case 'stale':
-            document.getElementById('base-label').textContent = 'Comparison superseded';
+            setComparisonStatus('Comparison superseded');
             renderState('stale', 'Newer comparison available', 'A newer refresh replaced this summary.', false);
             break;
         case 'base-error':
-            document.getElementById('base-label').textContent = 'Comparison unavailable';
-            renderState('base-error', 'Comparison base unavailable', 'Treemon could not resolve the configured base branch.', false);
+            setComparisonStatus('Comparison unavailable');
+            renderState(
+                'base-error',
+                state.targetBranch ? 'Selected branch unavailable' : 'Comparison base unavailable',
+                state.targetBranch
+                    ? 'The selected local branch no longer exists. Use Refresh or choose another branch.'
+                    : 'Treemon could not resolve the configured base branch.',
+                false
+            );
             break;
         case 'too-many-files':
-            document.getElementById('base-label').textContent = 'Comparison stopped';
+            setComparisonStatus('Comparison stopped');
             renderState(
                 'too-many-files',
                 'Too many changed files',
@@ -1142,7 +1317,7 @@ function renderSummaryState(summary) {
             );
             break;
         case 'timeout':
-            document.getElementById('base-label').textContent = 'Comparison timed out';
+            setComparisonStatus('Comparison timed out');
             renderState(
                 'timeout',
                 'Diff timed out',
@@ -1152,7 +1327,7 @@ function renderSummaryState(summary) {
             break;
         case 'git-error':
         default:
-            document.getElementById('base-label').textContent = 'Comparison failed';
+            setComparisonStatus('Comparison failed');
             renderState('git-error', 'Diff unavailable', 'Git could not produce a worktree summary.', false);
             break;
     }
@@ -1167,7 +1342,8 @@ function renderReadySummary(summary) {
 
     clearNavigator();
     state.summary = summary;
-    document.getElementById('base-label').textContent = comparisonLabel(summary.baseRef);
+    updateFallbackBaseLabel(summary.baseRef);
+    setComparisonStatus(comparisonScopeStatus());
     renderChangeSummary(files);
     renderCategorizedFiles(files, summary.categorization);
     restoreFileSelection(files);
@@ -1179,7 +1355,7 @@ async function loadSummary() {
     state.fileRequest += 1;
     var request = ++state.summaryRequest;
     clearNavigator();
-    document.getElementById('base-label').textContent = 'Loading comparison…';
+    setComparisonStatus('Loading comparison…');
     renderState('loading-summary', 'Loading changed files…', '', true);
 
     try {
@@ -1239,7 +1415,8 @@ window.canvasSelectionMetadata = function(selectionContext) {
 
 document.getElementById('unified-view').addEventListener('click', function() { setView('unified'); });
 document.getElementById('split-view').addEventListener('click', function() { setView('split'); });
-document.getElementById('refresh').addEventListener('click', loadSummary);
+document.getElementById('refresh').addEventListener('click', refreshComparisonsAndSummary);
+document.getElementById('comparison-target').addEventListener('change', comparisonChanged);
 if (canvasTransportAvailable()) {
     document
         .querySelector('.toolbar')
@@ -1250,4 +1427,4 @@ document.getElementById('filter-local').addEventListener('change', filtersChange
 document.getElementById('filter-untracked').addEventListener('change', filtersChanged);
 updateViewButtons();
 updateFilterInputs();
-loadSummary();
+refreshComparisonsAndSummary();

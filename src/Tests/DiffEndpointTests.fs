@@ -269,6 +269,26 @@ type DiffSerializationTests() =
             |> assertJson expected)
 
     [<Test>]
+    member _.``comparison targets serialize availability and typed failures``() =
+        let ready: Result<WorktreeDiff.DiffComparisonTargets, WorktreeDiff.WorktreeDiffError> =
+            Ok
+                { ConfiguredBase =
+                    WorktreeDiff.ConfiguredDiffComparison.Available
+                        "origin/main"
+                  LocalBranches = [ "main"; "feature/topic&mode=100%" ] }
+
+        [ ready,
+          """{"status":"ready","configuredBase":{"label":"origin/main","available":true},"localBranches":["main","feature/topic&mode=100%"]}"""
+          Error(WorktreeDiff.GitTimedOut WorktreeDiff.EnumerateBranches),
+          """{"status":"timeout"}"""
+          Error(WorktreeDiff.GitFailed(WorktreeDiff.EnumerateBranches, 1)),
+          """{"status":"git-error"}""" ]
+        |> List.iter (fun (result, expected) ->
+            result
+            |> WorktreeDiffApi.serializeComparisonTargetsResult
+            |> assertJson expected)
+
+    [<Test>]
     member _.``ready summaries report the categorization state without exposing patterns``() =
         let ready categoryPath =
             DiffSummaryResult.Ready
@@ -457,6 +477,87 @@ type DiffEndpointHttpTests() =
                             |> Set.ofList
 
                         Assert.That(summaryPaths body, Is.EqualTo(expected))))
+
+    [<Test>]
+    member _.``summary selects a local branch without changing no-query base compatibility``() =
+        let worktree = fakePath "branch-target"
+        let observed =
+            System.Collections.Concurrent.ConcurrentQueue<
+                WorktreeDiff.DiffComparisonTarget
+             >()
+
+        let service: WorktreeDiffApi.Service =
+            { GetSummary =
+                fun _ context _ ->
+                    observed.Enqueue(context.Target)
+                    async.Return(Ok(summary []))
+              GetLayerCounts =
+                fun _ _ -> async.Return(uniformLayerCounts 0)
+              GetFile =
+                fun _ _ _ _ _ ->
+                    failwith "Branch target test does not load files" }
+
+        withDiffServer
+            [ worktree ]
+            service
+            (fun _ -> "unused")
+            (fun client baseUrl ->
+                let summaryUrl =
+                    worktreeUrl baseUrl worktree "diff-summary"
+
+                use configuredBase = get client summaryUrl
+                use localBranch =
+                    get
+                        client
+                        (summaryUrl
+                         + layerQuery true true false
+                         + "&branch=feature%2Ftopic%26mode%3D100%25")
+
+                Assert.Multiple(fun () ->
+                    Assert.That(configuredBase.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(localBranch.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(
+                        observed.ToArray(),
+                        Is.EqualTo(
+                            [| WorktreeDiff.DiffComparisonTarget.ConfiguredBase
+                               WorktreeDiff.DiffComparisonTarget.LocalBranch
+                                   "feature/topic&mode=100%" |]
+                        )
+                    )))
+
+    [<Test>]
+    member _.``comparison metadata exposes configured base and unchecked-out local branches``() =
+        let tempDir = fakePath "comparison-targets"
+        let repoDir, _ = GitTestHelpers.initRepoWithOrigin tempDir
+
+        try
+            GitTestHelpers.gitOk repoDir [ "branch"; "zeta" ]
+            GitTestHelpers.gitOk repoDir [ "branch"; "feature/topic&mode=100%" ]
+
+            withDiffServer
+                [ repoDir ]
+                WorktreeDiffApi.liveService
+                (fun _ -> failwith "Comparison metadata issued a file identity")
+                (fun client baseUrl ->
+                    use response =
+                        get
+                            client
+                            (worktreeUrl
+                                baseUrl
+                                repoDir
+                                "diff-comparisons")
+
+                    Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    response
+                    |> getResponseBody
+                    |> assertJson
+                        """{"status":"ready","configuredBase":{"label":"origin/main","available":true},"localBranches":["main","feature/topic&mode=100%","zeta"]}""")
+        finally
+            if Directory.Exists(tempDir) then
+                try
+                    Directory.Delete(tempDir, recursive = true)
+                with _ ->
+                    ()
 
     [<Test>]
     member _.``summary exposes independent layer counts while a local-only comparison survives a missing base``() =
@@ -879,6 +980,8 @@ type DiffEndpointHttpTests() =
                   "?committed=yes&local=true&untracked=false"
                   "?committed=true&local=true&untracked=false&path=secret"
                   "?committed=true&committed=false&local=true&untracked=false"
+                  "?committed=true&local=true&untracked=false&branch="
+                  "?committed=true&local=true&untracked=false&branch=one&branch=two"
                   "?layer=committed" ]
                 |> List.iter (fun query ->
                     use response = get client (summaryUrl + query)
@@ -1579,6 +1682,8 @@ type DiffEndpointHttpTests() =
             service
             (fun _ -> "issued-id")
             (fun _ baseUrl ->
+                let comparisonsUrl =
+                    worktreeUrl baseUrl worktree "diff-comparisons"
                 let summaryUrl =
                     worktreeUrl baseUrl worktree "diff-summary"
 
@@ -1586,6 +1691,7 @@ type DiffEndpointHttpTests() =
                     worktreeUrl baseUrl worktree "diff-file?identity=issued-id"
 
                 use missingClient = new HttpClient()
+                use missingComparisons = get missingClient comparisonsUrl
                 use missingSummary = get missingClient summaryUrl
                 use missingFile = get missingClient fileUrl
 
@@ -1595,13 +1701,18 @@ type DiffEndpointHttpTests() =
                     "not-a-viewer"
                 )
 
+                use invalidComparisons = get invalidClient comparisonsUrl
                 use invalidSummary = get invalidClient summaryUrl
 
                 Assert.Multiple(fun () ->
+                    Assert.That(missingComparisons.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                    Assert.That(getResponseBody missingComparisons, Is.EqualTo("Invalid diff viewer"))
                     Assert.That(missingSummary.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
                     Assert.That(getResponseBody missingSummary, Is.EqualTo("Invalid diff viewer"))
                     Assert.That(missingFile.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
                     Assert.That(getResponseBody missingFile, Is.EqualTo("Invalid diff-file query"))
+                    Assert.That(invalidComparisons.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                    Assert.That(getResponseBody invalidComparisons, Is.EqualTo("Invalid diff viewer"))
                     Assert.That(invalidSummary.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
                     Assert.That(getResponseBody invalidSummary, Is.EqualTo("Invalid diff viewer"))))
 
@@ -1626,13 +1737,24 @@ type DiffEndpointHttpTests() =
             neverCallService
             (fun _ -> failwith "Unknown worktree issued an identity")
             (fun client baseUrl ->
+                use unknownComparisons =
+                    get
+                        client
+                        (worktreeUrl
+                            baseUrl
+                            unknown
+                            "diff-comparisons")
+
                 use unknownResponse =
                     get
                         client
                         (worktreeUrl baseUrl unknown "diff-summary")
 
-                Assert.That(unknownResponse.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
-                Assert.That(getResponseBody unknownResponse, Is.EqualTo("Unknown worktree")))
+                Assert.Multiple(fun () ->
+                    Assert.That(unknownComparisons.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
+                    Assert.That(getResponseBody unknownComparisons, Is.EqualTo("Unknown worktree"))
+                    Assert.That(unknownResponse.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
+                    Assert.That(getResponseBody unknownResponse, Is.EqualTo("Unknown worktree"))))
 
         let changed = entry "changed.txt" None WorktreeDiff.Modified
 
@@ -1648,8 +1770,19 @@ type DiffEndpointHttpTests() =
             (fun client baseUrl ->
                 let summaryUrl =
                     worktreeUrl baseUrl known "diff-summary"
+                let comparisonsUrl =
+                    worktreeUrl baseUrl known "diff-comparisons"
                 let fileUrl =
                     worktreeUrl baseUrl known "diff-file"
+
+                use invalidComparisons =
+                    get client (comparisonsUrl + "?branch=main")
+
+                Assert.That(invalidComparisons.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                Assert.That(
+                    getResponseBody invalidComparisons,
+                    Is.EqualTo("Invalid diff-comparisons query")
+                )
 
                 [ "?baseRef=HEAD"
                   $"?root={Uri.EscapeDataString(unknown)}"

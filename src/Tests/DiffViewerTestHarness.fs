@@ -84,6 +84,18 @@ let categorizationJsonAt status reason revision =
 let categorizationBody status reason revision =
     JsonSerializer.Serialize(categorizationJsonAt status reason revision)
 
+let comparisonTargetsJson baseLabel available localBranches =
+    JsonSerializer.Serialize(
+        {| status = "ready"
+           configuredBase =
+            {| label = baseLabel
+               available = available |}
+           localBranches = (localBranches: string array) |}
+    )
+
+let defaultComparisonTargetsJson =
+    comparisonTargetsJson "origin/main" true [| "main"; "feature" |]
+
 let summaryJsonWithCategorization categorization committed local untracked files =
     JsonSerializer.Serialize(
         {| status = "ready"
@@ -272,6 +284,28 @@ type DiffViewerHarness() =
     member this.RouteSummary(body) =
         this.RouteBody("**/diff-summary?*", "application/json", body)
 
+    member this.RouteComparisons(body) =
+        this.RouteBody("**/diff-comparisons", "application/json", body)
+
+    member this.RouteComparisonResponses(responses: string array) =
+        // The route callback is the stateful boundary: each browser refresh must receive the next
+        // scripted repository branch snapshot.
+        let mutable index = 0
+
+        this.Page.RouteAsync(
+            "**/diff-comparisons",
+            fun route ->
+                let body = responses[Math.Min(index, responses.Length - 1)]
+                index <- index + 1
+
+                route.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = body
+                    )
+                )
+        )
+
     /// Answers the categorization poll the configure action watches. `revisions` is served one per
     /// request, in order, with the last entry answering once the list is exhausted, so a test can
     /// script "unchanged, unchanged, then rewritten".
@@ -397,6 +431,7 @@ type DiffViewerHarness() =
         task {
             do! this.RouteBody("**/diff.html", "text/html; charset=utf-8", template)
             do! this.RouteEmbeddedHost()
+            do! this.RouteComparisons(defaultComparisonTargetsJson)
             do!
                 this.RouteBody(
                     $"**/{DiffAssets.Version}/diff2html.min.css",
