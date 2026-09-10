@@ -30,19 +30,18 @@ let private comparisonContext worktreePath : DiffComparisonContext =
       UpstreamRemote = "origin"
       BaseBranch = "main" }
 
-let private assertSummaryOk result =
+let private expectOk description result =
     match result with
-    | Ok summary -> summary
+    | Ok value -> value
     | Error error ->
-        Assert.Fail($"Expected diff summary, got {error}")
+        Assert.Fail($"Expected {description}, got {error}")
         Unchecked.defaultof<_>
 
+let private assertSummaryOk result =
+    expectOk "diff summary" result
+
 let private assertComparisonTargetsOk result =
-    match result with
-    | Ok targets -> targets
-    | Error error ->
-        Assert.Fail($"Expected comparison targets, got {error}")
-        Unchecked.defaultof<_>
+    expectOk "comparison targets" result
 
 let private findEntry path (summary: WorktreeDiffSummary) =
     summary.Files
@@ -1131,11 +1130,81 @@ type WorktreeDiffIntegrationTests() =
             Assert.That(targets.LocalBranches, Is.EqualTo([ "feature" ])))
 
     [<Test>]
+    member _.``configured local base ignores a same-named tag``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        writeText repoDir "base.txt" "base"
+        gitOk repoDir [ "add"; "--"; "base.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "base" ]
+        gitOk repoDir [ "tag"; "main"; "HEAD~1" ]
+        gitOk repoDir [ "checkout"; "-b"; "feature" ]
+        writeText repoDir "feature.txt" "feature"
+        gitOk repoDir [ "add"; "--"; "feature.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "feature" ]
+
+        let summary =
+            getWorktreeDiffSummary (comparisonContext repoDir)
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                summary.MergeBase,
+                Is.EqualTo(
+                    gitText
+                        repoDir
+                        [ "merge-base"
+                          "HEAD"
+                          "refs/heads/main" ]
+                )
+            )
+            Assert.That(
+                summary.Files |> List.map _.Path,
+                Is.EqualTo([ "feature.txt" ])
+            ))
+
+    [<Test>]
+    member _.``configured remote base ignores a colliding local shorthand``() =
+        let repoDir, _ = initRepoWithOrigin tempDir
+        writeText repoDir "local-main.txt" "local"
+        gitOk repoDir [ "add"; "--"; "local-main.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "local main" ]
+        gitOk repoDir [ "branch"; "origin/main" ]
+        gitOk repoDir [ "checkout"; "-b"; "feature"; "refs/heads/origin/main" ]
+        writeText repoDir "feature.txt" "feature"
+        gitOk repoDir [ "add"; "--"; "feature.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "feature" ]
+
+        let summary =
+            getWorktreeDiffSummary (comparisonContext repoDir)
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        Assert.Multiple(fun () ->
+            Assert.That(summary.BaseRef, Is.EqualTo("origin/main"))
+            Assert.That(
+                summary.MergeBase,
+                Is.EqualTo(
+                    gitText
+                        repoDir
+                        [ "merge-base"
+                          "HEAD"
+                          "refs/remotes/origin/main" ]
+                )
+            )
+            Assert.That(
+                summary.Files |> List.map _.Path,
+                Is.EqualTo([ "feature.txt"; "local-main.txt" ])
+            ))
+
+    [<Test>]
     member _.``comparison targets omit deceptive Unicode branch names``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
         let deceptive = "ma\u200Bin"
+        let supplementary = "feature/\U000E0001hidden"
         gitOk repoDir [ "branch"; deceptive ]
+        gitOk repoDir [ "branch"; supplementary ]
         gitOk repoDir [ "branch"; "feature/žluťoučký" ]
 
         let targets =
@@ -1145,6 +1214,10 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(targets.LocalBranches, Does.Not.Contain(deceptive))
+            Assert.That(
+                targets.LocalBranches,
+                Does.Not.Contain(supplementary)
+            )
             Assert.That(
                 targets.LocalBranches,
                 Does.Contain("feature/žluťoučký")
@@ -1357,7 +1430,7 @@ type WorktreeDiffIntegrationTests() =
             |> TestUtils.runAsync
 
         match result with
-        | Error(NoCommonAncestor "main") -> ()
+        | Error(NoCommonAncestor "refs/heads/main") -> ()
         | _ -> Assert.Fail($"Expected no common ancestor, got {result}")
 
     [<Test>]

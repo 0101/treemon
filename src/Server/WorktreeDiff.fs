@@ -172,6 +172,11 @@ let private runDiffGit
             // viewer keeps its typed capture-limit error even though the process exited.
             | Ok output when not output.Truncated.IsEmpty ->
                 Error(GitCaptureLimitExceeded(operation, List.head output.Truncated))
+            | Ok output
+                when
+                    operation = ResolveMergeBase
+                    && output.ExitCode = 1 ->
+                Error(GitFailed(operation, output.ExitCode))
             | Ok output when output.ExitCode <> 0 ->
                 Log.log
                     "WorktreeDiff"
@@ -244,10 +249,6 @@ let private runExactRefExists deadline repoRoot gitRef =
         repoRoot
         [ "show-ref"; "--verify"; "--quiet"; gitRef ]
 
-type private ResolvedConfiguredBase =
-    | RemoteConfiguredBase of string
-    | LocalConfiguredBase of string
-
 let private resolveConfiguredBase
     (deadline: ProcessRunner.ResponseDeadline)
     (repoRoot: string)
@@ -277,10 +278,13 @@ let private resolveConfiguredBase
             return
                 match localResult with
                 | Error error -> Error error
-                | Ok true -> Ok(Some(LocalConfiguredBase baseBranch))
-                | Ok false when remoteExists ->
-                    Ok(Some(RemoteConfiguredBase remoteRef))
-                | Ok false -> Ok None
+                | Ok localExists ->
+                    GitWorktree.selectBaseRefSelection
+                        upstreamRemote
+                        baseBranch
+                        remoteExists
+                        localExists
+                    |> Ok
     }
 
 let private resolveDiffBaseRef deadline repoRoot upstreamRemote baseBranch =
@@ -296,8 +300,9 @@ let private resolveDiffBaseRef deadline repoRoot upstreamRemote baseBranch =
         return!
             resolved
             |> Option.map (function
-                | RemoteConfiguredBase label -> label
-                | LocalConfiguredBase label -> label)
+                | GitWorktree.BaseRefSelection.Remote (label, gitRef)
+                | GitWorktree.BaseRefSelection.Local (label, gitRef) ->
+                    label, gitRef)
             |> Result.requireSome (BaseNotFound(baseBranch, remoteRef))
     }
 
@@ -308,16 +313,11 @@ let private resolveComparisonRef
     =
     match target with
     | DiffComparisonTarget.ConfiguredBase ->
-        async {
-            let! result =
-                resolveDiffBaseRef
-                    deadline
-                    context.WorktreePath
-                    context.UpstreamRemote
-                    context.BaseBranch
-
-            return result |> Result.map (fun baseRef -> baseRef, baseRef)
-        }
+        resolveDiffBaseRef
+            deadline
+            context.WorktreePath
+            context.UpstreamRemote
+            context.BaseBranch
     | DiffComparisonTarget.LocalBranch branch ->
         asyncResult {
             let branchRef = $"refs/heads/{branch}"
@@ -340,39 +340,19 @@ let private resolveMergeBase
     =
     async {
         let! result =
-            ProcessRunner.capture
-                { diffGit with
-                    Limits = ProcessRunner.CaptureLimits.small
-                    Deadline = ProcessRunner.SharedDeadline deadline }
-                [ "-C"
-                  repoRoot
-                  "-c"
-                  "core.quotepath=false"
-                  "merge-base"
-                  "HEAD"
-                  comparisonRef ]
+            runDiffGit
+                deadline
+                ResolveMergeBase
+                ProcessRunner.CaptureLimits.small
+                repoRoot
+                [ "merge-base"; "HEAD"; comparisonRef ]
 
         return
             match result with
-            | Error failure ->
-                Error(mapDiffProcessFailure ResolveMergeBase failure)
-            | Ok output when not output.Truncated.IsEmpty ->
-                Error(
-                    GitCaptureLimitExceeded(
-                        ResolveMergeBase,
-                        List.head output.Truncated
-                    )
-                )
-            | Ok output when output.ExitCode = 0 ->
-                trimSingleLine ResolveMergeBase output.Stdout
-            | Ok output when output.ExitCode = 1 ->
+            | Error(GitFailed(ResolveMergeBase, 1)) ->
                 Error(NoCommonAncestor comparisonRef)
-            | Ok output ->
-                Log.log
-                    "WorktreeDiff"
-                    $"Git {ResolveMergeBase} failed with exit {output.ExitCode} and {output.Stderr.Length} stderr bytes"
-
-                Error(GitFailed(ResolveMergeBase, output.ExitCode))
+            | Error error -> Error error
+            | Ok bytes -> trimSingleLine ResolveMergeBase bytes
     }
 
 let private parseNulTokens
@@ -695,9 +675,9 @@ let private resolveConfiguredComparison
 
         return
             match result with
-            | Ok(Some(RemoteConfiguredBase label)) ->
+            | Ok(Some(GitWorktree.BaseRefSelection.Remote (label, _))) ->
                 Ok(ConfiguredDiffComparison.Remote label)
-            | Ok(Some(LocalConfiguredBase configuredName)) ->
+            | Ok(Some(GitWorktree.BaseRefSelection.Local (configuredName, _))) ->
                 GitWorktree.canonicalLocalBranchName
                     configuredName
                     localBranches

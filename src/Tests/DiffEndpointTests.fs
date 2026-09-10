@@ -253,6 +253,8 @@ type DiffSerializationTests() =
                """{"status":"stale","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.BaseError,
                """{"status":"base-error","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+              (DiffSummaryResult.TargetMissing,
+               """{"status":"target-missing","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.NoCommonAncestor,
                """{"status":"no-common-ancestor","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.TimedOut,
@@ -526,16 +528,25 @@ type DiffEndpointHttpTests() =
                         (summaryUrl
                          + layerQuery true true false
                          + "&branch=feature%2Ftopic%26mode%3D100%25")
+                use percentBranch =
+                    get
+                        client
+                        (summaryUrl
+                         + layerQuery true true false
+                         + "&branch=feature%2F%2509x")
 
                 Assert.Multiple(fun () ->
                     Assert.That(configuredBase.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                     Assert.That(localBranch.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(percentBranch.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                     Assert.That(
                         observed.ToArray(),
                         Is.EqualTo(
                             [| WorktreeDiff.DiffComparisonTarget.ConfiguredBase
                                WorktreeDiff.DiffComparisonTarget.LocalBranch
-                                   "feature/topic&mode=100%" |]
+                                   "feature/topic&mode=100%"
+                               WorktreeDiff.DiffComparisonTarget.LocalBranch
+                                   "feature/%09x" |]
                         )
                     )))
 
@@ -1366,6 +1377,9 @@ type DiffEndpointHttpTests() =
                   )
               ),
               ("""{"status":"base-error"}""" |> withUniformLayerError "base-error")
+              Error(WorktreeDiff.ComparisonTargetNotFound "gone"),
+              ("""{"status":"target-missing"}"""
+               |> withUniformLayerError "target-missing")
               Error(WorktreeDiff.NoCommonAncestor "orphan"),
               ("""{"status":"no-common-ancestor"}"""
                |> withUniformLayerError "no-common-ancestor")

@@ -489,12 +489,13 @@ let branchSortKey (baseBranch: string) (name: string) =
     | n when n.StartsWith("dev") -> (3, name)
     | _ -> (4, name)
 
-let internal hasUnsafeComparisonCharacters (value: string) =
-    value
+let private hasUnsafeComparisonCharacters (value: string) =
+    value.EnumerateRunes()
     |> Seq.exists (fun character ->
-        Char.IsControl character
-        || Char.GetUnicodeCategory(character)
-           = Globalization.UnicodeCategory.Format)
+        match Text.Rune.GetUnicodeCategory(character) with
+        | Globalization.UnicodeCategory.Control
+        | Globalization.UnicodeCategory.Format -> true
+        | _ -> false)
 
 let internal isSafeComparisonBranch (branchName: string) =
     not (String.IsNullOrWhiteSpace branchName)
@@ -526,6 +527,25 @@ let internal canonicalLocalBranchName configuredName localBranches =
         |> function
             | [ branch ] -> Some branch
             | _ -> None)
+
+[<RequireQualifiedAccess>]
+type internal BaseRefSelection =
+    | Remote of label: string * gitRef: string
+    | Local of label: string * gitRef: string
+
+let internal selectBaseRefSelection
+    (upstreamRemote: string)
+    (baseBranch: string)
+    (remoteExists: bool)
+    (localExists: bool)
+    =
+    if remoteExists then
+        let label = mainRef upstreamRemote baseBranch
+        Some(BaseRefSelection.Remote(label, $"refs/remotes/{label}"))
+    elif localExists then
+        Some(BaseRefSelection.Local(baseBranch, $"refs/heads/{baseBranch}"))
+    else
+        None
 
 let private validBranchNamePattern = System.Text.RegularExpressions.Regex(@"^[a-zA-Z0-9][a-zA-Z0-9._/-]*$")
 
@@ -562,12 +582,14 @@ let internal selectBaseRef
     (remoteExists: bool)
     (localExists: bool)
     =
-    if remoteExists then
-        Some(mainRef upstreamRemote baseBranch)
-    elif localExists then
-        Some baseBranch
-    else
-        None
+    selectBaseRefSelection
+        upstreamRemote
+        baseBranch
+        remoteExists
+        localExists
+    |> Option.map (function
+        | BaseRefSelection.Remote (label, _)
+        | BaseRefSelection.Local (label, _) -> label)
 
 /// Resolves the base branch to a concrete git ref to fork from. Prefers the
 /// remote-tracking ref (e.g. `upstream/main`) so a new worktree forks from the

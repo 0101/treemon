@@ -45,6 +45,7 @@ var CONFIGURE_PENDING_LABEL = 'Configuring diff groups — waiting for the agent
 var VIEWER_ID = crypto.randomUUID();
 var state = {
     summary: null,
+    summaryBaseRef: null,
     selected: null,
     currentResult: null,
     currentPatch: null,
@@ -53,10 +54,10 @@ var state = {
     targetBranch: null,
     comparisonReady: false,
     comparisonRequest: 0,
-    comparisonNotice: '',
     comparisonWarning: '',
     comparisonStatus: '',
     refreshPromise: null,
+    comparisonTimer: null,
     fileRequest: 0,
     fileAbort: null,
     summaryRequest: 0,
@@ -134,7 +135,6 @@ function setComparisonWarning(message) {
 }
 
 function comparisonScopeStatus() {
-    if (state.comparisonNotice) return state.comparisonNotice;
     if (state.filters.committed) return '';
     if (state.filters.local) return 'Local changes from HEAD';
     if (state.filters.untracked) return 'Untracked files';
@@ -175,13 +175,24 @@ function showComparisonLoading() {
 
 function showComparisonUnavailable(reason) {
     var select = document.getElementById('comparison-target');
-    var keepsCurrent = state.comparisonReady;
+    var keepsCurrent = state.comparisonReady || Boolean(state.targetBranch);
     select.removeAttribute('aria-busy');
 
-    if (!keepsCurrent) {
-        state.targetBranch = null;
-        select.replaceChildren(comparisonOption('', 'Configured base'));
-        select.value = '';
+    if (!state.comparisonReady) {
+        var currentLabel = select.options[0] && select.options[0].textContent;
+        select.replaceChildren(
+            comparisonOption(
+                state.targetBranch || '',
+                state.targetBranch ||
+                    (
+                        currentLabel &&
+                        currentLabel !== 'Loading branches…'
+                            ? currentLabel
+                            : 'Configured base'
+                    )
+            )
+        );
+        select.value = state.targetBranch || '';
     }
 
     setComparisonWarning(reason + (
@@ -210,18 +221,23 @@ function isComparisonMetadata(metadata) {
     );
 }
 
-function showComparisonTargets(metadata) {
+function showComparisonTargets(metadata, preferred) {
     var select = document.getElementById('comparison-target');
-    var preferred = state.targetBranch || readStorage(TARGET_KEY);
     var preferredUsesBase =
         preferred &&
         metadata.configuredBase.localBranch === preferred;
     var hasPreferred =
         preferredUsesBase ||
         (preferred && metadata.localBranches.includes(preferred));
+    var baseLabel =
+        !preferred &&
+        state.filters.committed &&
+        state.summaryBaseRef
+            ? state.summaryBaseRef
+            : metadata.configuredBase.label;
     var base = comparisonOption(
         preferredUsesBase ? preferred : '',
-        metadata.configuredBase.label
+        baseLabel
     );
 
     if (!metadata.configuredBase.available) {
@@ -247,7 +263,7 @@ function showComparisonTargets(metadata) {
     }
 
     state.targetBranch = hasPreferred ? preferred : null;
-    state.comparisonNotice = preferred && !hasPreferred
+    var fallbackNotice = preferred && !hasPreferred
         ? 'Saved branch no longer exists; using configured base.'
         : '';
 
@@ -256,11 +272,11 @@ function showComparisonTargets(metadata) {
     select.value = state.targetBranch || '';
     select.removeAttribute('aria-busy');
     state.comparisonReady = true;
-    setComparisonWarning('');
+    setComparisonWarning(fallbackNotice);
     updateComparisonControl();
 }
 
-async function loadComparisons() {
+async function loadComparisons(preferred) {
     var request = ++state.comparisonRequest;
     showComparisonLoading();
 
@@ -269,7 +285,7 @@ async function loadComparisons() {
         if (request !== state.comparisonRequest) return false;
 
         if (isComparisonMetadata(metadata)) {
-            showComparisonTargets(metadata);
+            showComparisonTargets(metadata, preferred);
         } else {
             showComparisonUnavailable(
                 metadata && metadata.status === 'timeout'
@@ -289,16 +305,29 @@ async function refreshComparisonsAndSummary() {
     if (state.refreshPromise) return state.refreshPromise;
 
     var refresh = document.getElementById('refresh');
-    var savedTarget = state.targetBranch || readStorage(TARGET_KEY);
+    var requestedTarget = state.targetBranch || readStorage(TARGET_KEY);
+    state.targetBranch = requestedTarget || null;
+
+    if (state.comparisonTimer) {
+        clearTimeout(state.comparisonTimer);
+        state.comparisonTimer = null;
+    }
+
     refresh.disabled = true;
     refresh.setAttribute('aria-busy', 'true');
 
-    var operation =
-        savedTarget
-            ? loadComparisons().then(function(current) {
-                if (current) return loadSummary();
-            })
-            : Promise.all([loadComparisons(), loadSummary()]);
+    var summaryPromise = loadSummary(requestedTarget);
+    var comparisonPromise =
+        loadComparisons(requestedTarget).then(function(current) {
+            if (
+                current &&
+                requestedTarget &&
+                state.targetBranch !== requestedTarget
+            ) {
+                return loadSummary(null);
+            }
+        });
+    var operation = Promise.all([comparisonPromise, summaryPromise]);
 
     state.refreshPromise = operation.finally(function() {
         state.refreshPromise = null;
@@ -312,12 +341,16 @@ async function refreshComparisonsAndSummary() {
 function comparisonChanged() {
     var branch = document.getElementById('comparison-target').value;
     state.targetBranch = branch || null;
-    state.comparisonNotice = '';
 
     if (state.targetBranch) writeStorage(TARGET_KEY, state.targetBranch);
     else removeStorage(TARGET_KEY);
 
-    loadSummary();
+    if (state.comparisonTimer) clearTimeout(state.comparisonTimer);
+
+    state.comparisonTimer = setTimeout(function() {
+        state.comparisonTimer = null;
+        loadSummary(state.targetBranch);
+    }, 120);
 }
 
 function layerCountPresentation(result) {
@@ -326,6 +359,9 @@ function layerCountPresentation(result) {
     }
     if (result.status === 'base-error') {
         return { text: 'unavailable', title: 'File count unavailable because the comparison base could not be resolved.' };
+    }
+    if (result.status === 'target-missing') {
+        return { text: 'unavailable', title: 'File count unavailable because the selected branch no longer exists.' };
     }
     if (result.status === 'no-common-ancestor') {
         return { text: 'unavailable', title: 'File count unavailable because the selected branch does not share history with HEAD.' };
@@ -355,14 +391,14 @@ function applyLayerCounts(counts) {
     applyLayerCount('untracked', counts.untracked);
 }
 
-function summaryUrl() {
+function summaryUrl(targetBranch) {
     var query = new URLSearchParams({
         committed: String(state.filters.committed),
         local: String(state.filters.local),
         untracked: String(state.filters.untracked)
     });
 
-    if (state.targetBranch) query.set('branch', state.targetBranch);
+    if (targetBranch) query.set('branch', targetBranch);
 
     return 'diff-summary?' + query.toString();
 }
@@ -375,7 +411,11 @@ function filtersChanged() {
     };
     writeStorage(FILTER_KEY, JSON.stringify(state.filters));
     updateComparisonControl();
-    loadSummary();
+    if (state.comparisonTimer) {
+        clearTimeout(state.comparisonTimer);
+        state.comparisonTimer = null;
+    }
+    loadSummary(state.targetBranch);
 }
 
 function fileSelectionKey(file) {
@@ -1311,7 +1351,7 @@ async function loadFile(file) {
 }
 
 function updateFallbackBaseLabel(baseRef) {
-    if (state.comparisonReady || !baseRef) return;
+    if (!baseRef || !state.filters.committed || state.targetBranch) return;
     var option = document.getElementById('comparison-target').options[0];
     if (option) option.textContent = baseRef;
 }
@@ -1320,6 +1360,7 @@ function renderSummaryState(summary) {
     clearNavigator();
     switch (summary.status) {
         case 'clean':
+            state.summaryBaseRef = summary.baseRef || null;
             updateFallbackBaseLabel(summary.baseRef);
             setComparisonStatus(comparisonScopeStatus());
             renderState(
@@ -1348,10 +1389,17 @@ function renderSummaryState(summary) {
             setComparisonStatus('Comparison unavailable');
             renderState(
                 'base-error',
-                state.targetBranch ? 'Selected branch unavailable' : 'Comparison base unavailable',
-                state.targetBranch
-                    ? 'The selected local branch no longer exists. Use Refresh or choose another branch.'
-                    : 'Treemon could not resolve the configured base branch.',
+                'Comparison base unavailable',
+                'Treemon could not resolve the configured base branch.',
+                false
+            );
+            break;
+        case 'target-missing':
+            setComparisonStatus('Comparison unavailable');
+            renderState(
+                'target-missing',
+                'Selected branch unavailable',
+                'The selected local branch no longer exists. Use Refresh or choose another branch.',
                 false
             );
             break;
@@ -1399,6 +1447,7 @@ function renderReadySummary(summary) {
 
     clearNavigator();
     state.summary = summary;
+    state.summaryBaseRef = summary.baseRef || null;
     updateFallbackBaseLabel(summary.baseRef);
     setComparisonStatus(comparisonScopeStatus());
     renderChangeSummary(files);
@@ -1406,7 +1455,8 @@ function renderReadySummary(summary) {
     restoreFileSelection(files);
 }
 
-async function loadSummary() {
+async function loadSummary(targetBranch) {
+    if (targetBranch === undefined) targetBranch = state.targetBranch;
     if (state.fileAbort) state.fileAbort.abort();
     state.fileAbort = null;
     state.fileRequest += 1;
@@ -1416,7 +1466,7 @@ async function loadSummary() {
     renderState('loading-summary', 'Loading changed files…', '', true);
 
     try {
-        var summary = await fetchJson(summaryUrl(), { cache: 'no-store' });
+        var summary = await fetchJson(summaryUrl(targetBranch), { cache: 'no-store' });
         if (request !== state.summaryRequest) return;
         applyLayerCounts(summary.layerCounts);
         if (summary.status === 'ready') renderReadySummary(summary);

@@ -526,9 +526,10 @@ let private diffReplacementName =
 let private layerCountResult =
     function
     | Ok count -> DiffLayerCountResult.Available count
-    | Error(WorktreeDiff.BaseNotFound _)
-    | Error(WorktreeDiff.ComparisonTargetNotFound _) ->
+    | Error(WorktreeDiff.BaseNotFound _) ->
         DiffLayerCountResult.BaseError
+    | Error(WorktreeDiff.ComparisonTargetNotFound _) ->
+        DiffLayerCountResult.TargetMissing
     | Error(WorktreeDiff.NoCommonAncestor _) ->
         DiffLayerCountResult.NoCommonAncestor
     | Error(WorktreeDiff.GitTimedOut _) -> DiffLayerCountResult.TimedOut
@@ -546,6 +547,9 @@ let private layerCountJson =
            fileCount = Some count |}
     | DiffLayerCountResult.BaseError ->
         {| status = "base-error"
+           fileCount = None |}
+    | DiffLayerCountResult.TargetMissing ->
+        {| status = "target-missing"
            fileCount = None |}
     | DiffLayerCountResult.NoCommonAncestor ->
         {| status = "no-common-ancestor"
@@ -597,6 +601,10 @@ let internal serializeSummaryResult counts categorization =
     | DiffSummaryResult.BaseError ->
         JsonSerializer.Serialize
             {| status = "base-error"
+               layerCounts = countsJson |}
+    | DiffSummaryResult.TargetMissing ->
+        JsonSerializer.Serialize
+            {| status = "target-missing"
                layerCounts = countsJson |}
     | DiffSummaryResult.NoCommonAncestor ->
         JsonSerializer.Serialize
@@ -721,9 +729,10 @@ let private issueFile
 
 let private summaryErrorResult =
     function
-    | WorktreeDiff.BaseNotFound _
-    | WorktreeDiff.ComparisonTargetNotFound _ ->
+    | WorktreeDiff.BaseNotFound _ ->
         DiffSummaryResult.BaseError
+    | WorktreeDiff.ComparisonTargetNotFound _ ->
+        DiffSummaryResult.TargetMissing
     | WorktreeDiff.NoCommonAncestor _ ->
         DiffSummaryResult.NoCommonAncestor
     | WorktreeDiff.GitTimedOut _ -> DiffSummaryResult.TimedOut
@@ -883,18 +892,14 @@ let private summaryTarget (ctx: HttpContext) =
 
 let private summaryRequest (ctx: HttpContext) =
     let rawQuery = ctx.Request.QueryString.Value
-    let hasUnsafeEncodedValue =
-        if System.String.IsNullOrEmpty rawQuery then
-            false
-        else
-            try
-                rawQuery
-                |> System.Uri.UnescapeDataString
-                |> GitWorktree.hasUnsafeComparisonCharacters
-            with :? System.UriFormatException ->
-                true
+    let hasEncodedNull =
+        not (System.String.IsNullOrEmpty rawQuery)
+        && rawQuery.Contains(
+            "%00",
+            System.StringComparison.OrdinalIgnoreCase
+        )
 
-    if hasUnsafeEncodedValue then
+    if hasEncodedNull then
         None
     elif ctx.Request.Query.Count = 0 then
         Some

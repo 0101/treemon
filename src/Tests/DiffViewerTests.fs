@@ -163,6 +163,20 @@ let private summaryStateJson status =
                     {| status = "ready"
                        fileCount = Some 0 |} |} |}
         )
+    | "target-missing" ->
+        JsonSerializer.Serialize(
+            {| status = "target-missing"
+               layerCounts =
+                {| committed =
+                    {| status = "target-missing"
+                       fileCount = (None: int option) |}
+                   local =
+                    {| status = "ready"
+                       fileCount = Some 0 |}
+                   untracked =
+                    {| status = "ready"
+                       fileCount = Some 0 |} |} |}
+        )
     | "too-many-files" ->
         JsonSerializer.Serialize(
             {| status = "too-many-files"
@@ -895,11 +909,11 @@ type DiffViewerE2ETests() =
                 )
             do!
                 this.RouteSummaries(
-                    [| summaryStateJson "base-error";
+                    [| summaryStateJson "target-missing";
                        readySummaryJson [| firstFile |] |]
                 )
             do! this.Goto()
-            do! this.Page.Locator("[data-state='base-error']").WaitForAsync()
+            do! this.Page.Locator("[data-state='target-missing']").WaitForAsync()
 
             let! unavailable =
                 this.Page.EvaluateAsync<string array>(
@@ -1067,7 +1081,12 @@ type DiffViewerE2ETests() =
                                 route.FulfillAsync(
                                     RouteFulfillOptions(
                                         ContentType = "application/json",
-                                        Body = defaultComparisonTargetsJson
+                                        Body =
+                                            comparisonTargetsJsonWithLocalBranch
+                                                "main"
+                                                true
+                                                (Some "main")
+                                                [| "feature" |]
                                     )
                                 )
                         } :> Task))
@@ -1092,9 +1111,86 @@ type DiffViewerE2ETests() =
                     "() => !document.getElementById('comparison-target').disabled"
                 )
 
+            let! configuredLabel =
+                this.Page.Locator("#comparison-target option").First.TextContentAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    whilePending,
+                    Is.EqualTo([| "origin/main"; "true"; "1" |])
+                )
+                Assert.That(configuredLabel, Is.EqualTo("origin/main")))
+        }
+
+    [<Test>]
+    member this.``saved branch summary renders while metadata is still loading``() =
+        task {
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        localStorage.setItem(
+                            'treemon.diff.target:/e2e-diff-worktree',
+                            'feature'
+                        );
+                        window.__summaryQueries = [];
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            if (url.includes('diff-summary')) {
+                                window.__summaryQueries.push(new URL(url, location.href).search);
+                            }
+                            return originalFetch.apply(this, arguments);
+                        };
+                    })()"""
+                )
+
+            let comparisonRequested =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let releaseComparison =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-comparisons",
+                    Func<IRoute, Task>(fun route ->
+                        (task {
+                            comparisonRequested.TrySetResult(true) |> ignore
+                            let! _ = releaseComparison.Task
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = defaultComparisonTargetsJson
+                                    )
+                                )
+                        } :> Task))
+                )
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.Goto()
+            let! _ = comparisonRequested.Task
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+
+            let! query =
+                this.Page.EvaluateAsync<string>(
+                    "() => window.__summaryQueries.at(-1)"
+                )
+
+            releaseComparison.TrySetResult(true) |> ignore
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => !document.getElementById('comparison-target').disabled"
+                )
+
             Assert.That(
-                whilePending,
-                Is.EqualTo([| "origin/main"; "true"; "1" |])
+                query,
+                Is.EqualTo(
+                    "?committed=true&local=true&untracked=false&branch=feature"
+                )
             )
         }
 
@@ -1104,7 +1200,6 @@ type DiffViewerE2ETests() =
             do!
                 this.RouteSummaries(
                     [| readySummaryJson [| firstFile |]
-                       readySummaryJson [| firstFile |]
                        readySummaryJson [| firstFile |]
                        readySummaryJson [| firstFile |]
                        summaryStateJson "filtered-empty" |]
@@ -1199,6 +1294,99 @@ type DiffViewerE2ETests() =
                 )
 
             ()
+        }
+
+    [<Test>]
+    member this.``rapid branch changes dispatch only the final summary``() =
+        task {
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        window.__summaryQueries = [];
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            if (url.includes('diff-summary')) {
+                                window.__summaryQueries.push(new URL(url, location.href).search);
+                            }
+                            return originalFetch.apply(this, arguments);
+                        };
+                    })()"""
+                )
+            do!
+                this.RouteComparisons(
+                    comparisonTargetsJson
+                        "origin/main"
+                        true
+                        [| "main"; "feature"; "zeta" |]
+                )
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.Goto()
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+            let! _ =
+                this.Page.EvaluateAsync<obj>(
+                    """() => {
+                        window.__summaryQueries = [];
+                        const select = document.getElementById('comparison-target');
+                        ['main', 'feature', 'zeta'].forEach(branch => {
+                            select.value = branch;
+                            select.dispatchEvent(new Event('change', { bubbles: true }));
+                        });
+                    }"""
+                )
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__summaryQueries.length === 1"
+                )
+
+            let! queries =
+                this.Page.EvaluateAsync<string array>(
+                    "() => window.__summaryQueries"
+                )
+
+            Assert.That(
+                queries,
+                Is.EqualTo(
+                    [| "?committed=true&local=true&untracked=false&branch=zeta" |]
+                )
+            )
+        }
+
+    [<Test>]
+    member this.``metadata failure never writes HEAD into the branch option``() =
+        task {
+            let localSummary =
+                JsonSerializer.Serialize(
+                    {| status = "ready"
+                       baseRef = "HEAD"
+                       fileCount = 1
+                       files = [| firstFile |]
+                       categorization =
+                        categorizationJson "missing" None
+                       layerCounts = readyLayerCounts 0 1 0 |}
+                )
+
+            do!
+                this.RouteComparisons(
+                    JsonSerializer.Serialize {| status = "git-error" |}
+                )
+            do!
+                this.RouteSummaries(
+                    [| readySummaryJson [| firstFile |]
+                       localSummary |]
+                )
+            do! this.Goto()
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+            do! this.Page.Locator("#filter-committed").UncheckAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.getElementById('comparison-status').textContent.includes('Local changes from HEAD')"
+                )
+
+            let! optionLabel =
+                this.Page.Locator("#comparison-target option").First.TextContentAsync()
+
+            Assert.That(optionLabel, Is.EqualTo("origin/main"))
         }
 
     [<Test>]
@@ -3103,6 +3291,7 @@ type DiffViewerE2ETests() =
     [<TestCase("clean", "No changes")>]
     [<TestCase("filtered-empty", "No change layers selected")>]
     [<TestCase("base-error", "Comparison base unavailable")>]
+    [<TestCase("target-missing", "Selected branch unavailable")>]
     [<TestCase("no-common-ancestor", "Branches do not share history")>]
     [<TestCase("timeout", "Diff timed out")>]
     [<TestCase("git-error", "Diff unavailable")>]
@@ -3126,6 +3315,30 @@ type DiffViewerE2ETests() =
             Assert.Multiple(fun () ->
                 Assert.That(title, Is.EqualTo(expectedTitle))
                 Assert.That(accordionCounts, Is.EqualTo([| 0; 0; 0 |])))
+        }
+
+    [<Test>]
+    member this.``missing selected branch is explicit in summary and layer count``() =
+        task {
+            do! this.RouteSummary(summaryStateJson "target-missing")
+            do! this.Goto()
+            do! this.Page.Locator("[data-state='target-missing']").WaitForAsync()
+
+            let! state =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.querySelector('.state-title').textContent,
+                        document.getElementById('count-committed').title
+                    ]"""
+                )
+
+            Assert.That(
+                state,
+                Is.EqualTo(
+                    [| "Selected branch unavailable"
+                       "File count unavailable because the selected branch no longer exists." |]
+                )
+            )
         }
 
     [<TestCase("deleted", "")>]
