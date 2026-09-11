@@ -698,7 +698,7 @@ type CanvasAuthoringDxPaneE2ETests() =
             Assert.That(iframeVisible, Is.True, "the doc iframe must remain visible (banner must not cover content)")
 
             // Pane stays interactive while the banner is up: changing the workspace width still works.
-            do! (this.Page.Locator(".canvas-tab-bar .canvas-width-btn").Nth(1)).ClickAsync()
+            do! (this.Page.Locator(".header-controls .workspace-width-btn").Nth(1)).ClickAsync()
             do! this.Page.Locator(".app-layout.workspace-wide-canvas").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             // Banner is dismissible.

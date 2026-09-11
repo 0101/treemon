@@ -19,6 +19,12 @@
 - Scheduler footer: one row per refresh category, persistent status (never reverts to "pending")
 - Loading skeleton on cold start until first worktree list completes
 - Fixed header bar with system metrics and deploy branch badge
+- Header workspace ratios follow the fixed `Terminal | Canvas | Dashboard` order: `1:1:1`,
+  `1:2:1`, and `2:2:1`. With either Terminal or Canvas hidden, the controls become `1:1` and `2:1`
+  for the remaining pane and Dashboard; both wide modes use `2:1` and retain their three-pane
+  preference when the hidden pane returns. With both hidden, Dashboard fills the workspace and the
+  ratio controls disappear. The selection persists in global config. Narrow screens stack panes
+  in the same order, ignoring desktop ratios.
 - Keyboard navigation: arrow keys move focus spatially, while Ctrl+P fuzzy-searches worktrees across repositories (see `docs/spec/keyboard-navigation.md`)
 - Canvas pane: per-worktree interactive HTML documents for agent-to-user rich content (see `docs/spec/canvas-pane.md`)
 
@@ -37,7 +43,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 - **Single serialized runtime writer, atomic on disk.** Every server mutation funnels through one in-process lock and writes via a temp-file-then-replace, so concurrent runtime updates can't interleave or leave a partially written file.
 - **Never destroy data.** An unparseable `config.json` is backed up to a timestamped `*.corrupt-<ts>` sibling before a fresh object is started, and each write touches only its own named keys — every unrelated key is left intact.
-- **Typed accessors over one store.** Watched roots (with the missing-vs-empty distinction the startup resolver depends on — see Multi-Repo above), canvas pane open/position, collapsed repos, last-viewed hashes, and the editor command/name reader are thin wrappers over the same locked store.
+- **Typed accessors over one store.** Watched roots (with the missing-vs-empty distinction the startup resolver depends on — see Multi-Repo above), pane visibility and workspace width, collapsed repos, last-viewed hashes, and the editor command/name reader are thin wrappers over the same locked store.
 
 ### Loopback Request Boundary
 
