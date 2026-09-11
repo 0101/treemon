@@ -138,13 +138,44 @@ $manifest = $null
 try {
     Remove-Item Env:\TREEMON_TERMINAL_SESSION_ID -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path $root | Out-Null
-    Publish-TestProject (
-        Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
-    ) $baseline "1.0.0-deployment-test"
+
+    $script:publishSetupEvents = @()
+    $PublishDir = Join-Path $root "setup-order"
+    $originalInstallTtydRuntime = (Get-Item Function:\Install-TtydRuntime).ScriptBlock
+    try {
+        function Install-TtydRuntime {
+            $script:publishSetupEvents += "setup-ttyd"
+        }
+        function dotnet {
+            $script:publishSetupEvents += "dotnet-publish"
+            $outputIndex = [Array]::IndexOf($args, "-o")
+            $outputPath = [string]$args[$outputIndex + 1]
+            New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $outputPath "Treemon.exe") `
+                -Value "fixture" -NoNewline
+            $global:LASTEXITCODE = 0
+        }
+
+        $setupOrderCandidate = Publish-ServerCandidate
+        Assert-True (
+            ($script:publishSetupEvents -join "|") -ceq "setup-ttyd|dotnet-publish"
+        ) "Server publication did not install ttyd before dotnet publish"
+        Write-Host "PASS: server publication installs ttyd before dotnet publish"
+    } finally {
+        Set-Item Function:\Install-TtydRuntime $originalInstallTtydRuntime
+        Remove-Item Function:\dotnet -ErrorAction SilentlyContinue
+        if ($setupOrderCandidate -and (Test-Path -LiteralPath $setupOrderCandidate)) {
+            Remove-Item -LiteralPath $setupOrderCandidate -Recurse -Force
+        }
+    }
+
     $PublishDir = Join-Path $root "candidate-active"
     $candidateServer = Publish-ServerCandidate
     Assert-True ($candidateServer -is [string]) "Server candidate path was not scalar"
     $candidateHost = Join-Path $candidateServer "terminal-host"
+    Publish-TestProject (
+        Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
+    ) $baseline "1.0.0-deployment-test"
 
     $env:TREEMON_TERMINAL_HOST_STATE_DIR = $emptyState
     $layoutProbe = Test-TerminalHostDeployment $candidateServer
