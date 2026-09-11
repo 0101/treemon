@@ -81,6 +81,8 @@ type WorkspaceWidthConfigTests() =
         withTempConfigDir "treemon-width-test" (fun _ ->
             writeWorkspaceWidth WorkspaceWidth.WideCanvas
             Assert.That(readWorkspaceWidth (), Is.EqualTo(WorkspaceWidth.WideCanvas))
+            writeWorkspaceWidth WorkspaceWidth.WidePanes
+            Assert.That(readWorkspaceWidth (), Is.EqualTo(WorkspaceWidth.WidePanes))
             writeWorkspaceWidth WorkspaceWidth.EqualThirds
             Assert.That(readWorkspaceWidth (), Is.EqualTo(WorkspaceWidth.EqualThirds)))
 

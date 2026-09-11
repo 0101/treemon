@@ -890,30 +890,18 @@ type CanvasPaneTests() =
     // ── Toolbar Consolidation ───────────────────────────────────────────
 
     [<Test>]
-    member this.``Width buttons render inside header bar``() =
+    member this.``Width buttons render in the top bar instead of the canvas header``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
             do! ensureCanvasPaneOpen this.Page
 
-            let widthButtons = this.Page.Locator(".canvas-tab-bar .canvas-width-btn")
+            let widthButtons = this.Page.Locator(".header-controls .workspace-width-btn")
             let! count = widthButtons.CountAsync()
-            Assert.That(count, Is.EqualTo(2), "Should have 2 workspace width buttons inside the header bar")
+            Assert.That(count, Is.EqualTo(2), "Two-pane width controls belong in the app header")
+            let! localCount = this.Page.Locator(".canvas-tab-bar .workspace-width-btn, .canvas-tab-bar .canvas-width-btn").CountAsync()
+            Assert.That(localCount, Is.Zero, "Canvas must not retain local width controls")
             let! dockCount = this.Page.Locator(".canvas-tab-bar .canvas-pos-btn").CountAsync()
             Assert.That(dockCount, Is.EqualTo(0), "Canvas docking controls are removed")
-        }
-
-    [<Test>]
-    member this.``Width buttons have low opacity by default``() =
-        task {
-            do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! ensureCanvasPaneOpen this.Page
-
-            let widthBtn = this.Page.Locator(".canvas-tab-bar .canvas-width-btn").First
-            do! widthBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let! opacity = widthBtn.EvaluateAsync<string>("el => getComputedStyle(el).opacity")
-            let opacityVal = System.Double.Parse(opacity, System.Globalization.CultureInfo.InvariantCulture)
-            Assert.That(opacityVal, Is.LessThanOrEqualTo(0.5), "Width buttons should have low opacity (0.4) by default")
         }
 
     [<Test>]
@@ -925,7 +913,7 @@ type CanvasPaneTests() =
             // The old separate toolbar should not exist
             let toolbar = this.Page.Locator(".canvas-pane .canvas-toolbar")
             let! count = toolbar.CountAsync()
-            Assert.That(count, Is.EqualTo(0), "Separate canvas-toolbar should not exist — width buttons are in the header bar")
+            Assert.That(count, Is.EqualTo(0), "Separate canvas-toolbar should not exist — width buttons are in the app header")
         }
 
     // ── Archive Button ──────────────────────────────────────────────────
@@ -943,16 +931,16 @@ type CanvasPaneTests() =
         }
 
     [<Test>]
-    member this.``Header bar renders with width buttons when overview is shown``() =
+    member this.``Top bar retains width buttons when canvas overview is shown``() =
         task {
             // Focus worktree with no canvas docs — triggers overview
             do! focusCanvasCard this.Page "feature-recent"
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let widthButtons = this.Page.Locator(".canvas-tab-bar .canvas-width-btn")
+            let widthButtons = this.Page.Locator(".header-controls .workspace-width-btn")
             let! count = widthButtons.CountAsync()
-            Assert.That(count, Is.EqualTo(2), "Width buttons should render in header bar even in overview mode")
+            Assert.That(count, Is.EqualTo(2), "Width buttons should remain in the app header in overview mode")
 
             // Archive button should NOT appear (no active doc)
             let archiveBtn = this.Page.Locator(".canvas-tab-bar .canvas-archive-btn")
