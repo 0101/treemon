@@ -894,7 +894,12 @@ async function runRealCliReportingVerification() {
 
     server = startProcess(
       serverExecutable,
-      [repository, "--port", String(backendPort), "--no-canvas"],
+      [
+        repository,
+        "--port", String(backendPort),
+        "--no-canvas",
+        "--log-dir", join(runtimeDirectory, "server-logs"),
+      ],
       {
         cwd: runtimeDirectory,
         env: isolatedEnvironment({
