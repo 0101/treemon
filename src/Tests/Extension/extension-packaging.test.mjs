@@ -37,3 +37,74 @@ test("each installed extension keeps its session-id compatibility boundary local
   assert.match(reporting, fallback);
   assert.doesNotMatch(reporting, /session-identity\.mjs/);
 });
+
+test("reporting startup diagnostics expose process and inherited-origin presence without the origin value", () => {
+  const reporting =
+    readFileSync(new URL("../../Extension/reporting/extension.mjs", import.meta.url), "utf8");
+
+  assert.match(
+    reporting,
+    /startup pid=\$\{process\.pid\} parentPid=\$\{parentProcessId\} terminalOrigin=\$\{terminalSessionId \? "present" : "absent"\} endpointPort=\$\{port\}/,
+  );
+  assert.doesNotMatch(
+    reporting,
+    /startup[^`]*\$\{terminalSessionId\}/,
+    "the exact terminal origin must not enter extension diagnostics",
+  );
+});
+
+test("the reporting extension targets exactly one Treemon activity endpoint", () => {
+  const reporting =
+    readFileSync(new URL("../../Extension/reporting/extension.mjs", import.meta.url), "utf8");
+
+  assert.match(
+    reporting,
+    /const port = process\.env\.TREEMON_PORT\?\.trim\(\) \|\| "5000";/,
+  );
+  assert.match(
+    reporting,
+    /const activityUrl = `http:\/\/127\.0\.0\.1:\$\{port\}\/api\/session\/activity`;/,
+  );
+});
+
+test("canvas bridge registration carries exact process and opaque shutdown metadata", () => {
+  const canvas =
+    readFileSync(new URL("../../Extension/extension.mjs", import.meta.url), "utf8");
+
+  assert.match(canvas, /const parentProcessId = process\.ppid;/);
+  assert.match(canvas, /process\.env\.TREEMON_TERMINAL_SESSION_ID/);
+  assert.match(
+    canvas,
+    /const shutdownCapability = randomBytes\(32\)\.toString\("base64url"\);/,
+  );
+  assert.match(canvas, /const shutdownUrl = `http:\/\/127\.0\.0\.1:\$\{port\}\/shutdown`;/);
+  assert.match(canvas, /registerWithTreemon\(registration\)/);
+  assert.doesNotMatch(
+    canvas,
+    /log\(`[^`]*\$\{shutdown(?:Capability|Url)\}/,
+    "shutdown capabilities and URLs must never enter extension diagnostics",
+  );
+});
+
+test("extension endpoints share the canonical request-body reader", () => {
+  const canvas =
+    readFileSync(new URL("../../Extension/extension.mjs", import.meta.url), "utf8");
+  const shutdown =
+    readFileSync(new URL("../../Extension/shutdown-endpoint.mjs", import.meta.url), "utf8");
+
+  assert.match(canvas, /import \{ readBody \} from "\.\/request-body\.mjs";/);
+  assert.match(shutdown, /import \{ readBody \} from "\.\/request-body\.mjs";/);
+  assert.doesNotMatch(canvas, /function readBody\(/);
+  assert.doesNotMatch(shutdown, /function readShutdownBody\(/);
+  assert.match(shutdown, /readBody\(req, MAX_SHUTDOWN_BODY_BYTES\)/);
+});
+
+test("unmonitored registration logs the browser-fallback outcome truthfully", () => {
+  const canvas =
+    readFileSync(new URL("../../Extension/extension.mjs", import.meta.url), "utf8");
+
+  assert.match(
+    canvas,
+    /monitored\s*\?\s*`registered \$\{registration\.worktreePath\} \(monitored=true\)`\s*:\s*`not registered \$\{registration\.worktreePath\} \(unmonitored; using browser fallback\)`/,
+  );
+});

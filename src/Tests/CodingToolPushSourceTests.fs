@@ -4,6 +4,7 @@ open System
 open System.Globalization
 open NUnit.Framework
 open Shared
+open Server
 open Server.SessionActivity
 open Server.SessionActivityStore
 open Server.CodingToolStatus
@@ -28,8 +29,9 @@ let private storedWithClocks
     (lastAsst: Message option)
     (updatedAt: string)
     (lastSeen: string)
-    : StoredStatus =
-    { SessionId = SessionId sid
+    : StoredInstance =
+    { ProcessIdentity = TestUtils.syntheticProcessIdentityForSessionId sid
+      SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath wt
       Provider = CopilotCli
@@ -40,8 +42,10 @@ let private storedWithClocks
             LastUserMessage = lastUser
             LastAssistantMessage = lastAsst }
       UpdatedAt = ts updatedAt
+      LifecycleAt = Some(ts updatedAt)
       LastSeen = ts lastSeen
-      ContextUsageAt = None }
+      ContextUsageAt = None
+      ClosedAt = None }
 
 let private stored sid wt status skill lastUser lastAsst seen =
     storedWithClocks sid wt status skill lastUser lastAsst seen seen
@@ -49,207 +53,213 @@ let private stored sid wt status skill lastUser lastAsst seen =
 let private now = ts "2026-03-01T12:00:00Z"
 
 /// A stored OPEN session carrying a context-usage snapshot — for the per-session donut tests.
-let private storedUsage sid wt status usage seen : StoredStatus =
+let private storedUsage sid wt status usage seen : StoredInstance =
     let s = stored sid wt status None None None seen
     { s with Status.ContextUsage = usage }
 
+let private fromPushSessions now sessions =
+    fromPushInstances now None sessions
+
+let private collapseByWorktree now sessions =
+    Server.CodingToolStatus.collapseByWorktree
+        now
+        Map.empty
+        sessions
+
+let private retainedFromInstance (instance: StoredInstance) : RetainedSession =
+    { SessionId = instance.SessionId
+      WorktreePath = instance.WorktreePath
+      Provider = instance.Provider
+      Status = instance.Status
+      UpdatedAt = instance.UpdatedAt
+      ContextUsageAt = instance.ContextUsageAt }
+
+
+/// The card fields the push collapse must produce for one worktree, flattened for whole-record
+/// comparison so a scenario cannot silently change a field it does not name.
+type CollapsedCard =
+    { Status: CodingToolStatus
+      Skill: string option
+      LastUser: string option
+      LastAssistant: string option
+      ActivityAt: DateTimeOffset option }
+
+let private cardOf (result: CodingToolResult) =
+    { Status = result.Status
+      Skill = result.CurrentSkill
+      LastUser = result.LastUserMessage |> Option.map _.Text
+      LastAssistant = result.LastAssistantMessage |> Option.map fst
+      ActivityAt = result.SessionActivityAt }
+
+/// A card with no footer content; each scenario overrides only the fields its sessions supply.
+let private card status =
+    { Status = status
+      Skill = None
+      LastUser = None
+      LastAssistant = None
+      ActivityAt = None }
+
+type CollapseScenario =
+    { Name: string
+      Sessions: StoredInstance list
+      Expected: CollapsedCard }
+
+let private atEdge = (now - openWindow).ToString("O")
+let private staleAt = ((now - stalenessTimeout).AddMinutes -1.0).ToString("O")
+
+/// Live sets that differ only by each session's status, freshness and footer content. Every row
+/// names the collapse rule it proves: drop non-open sessions, drop Idle before picking the
+/// most-recent active winner, and keep the footer on that winner.
+let private collapseScenarios =
+    [ { Name = "a session without lifecycle activity has no recency timestamp"
+        Sessions =
+          [ storedWithClocks "hydrated" "wt" SessionLevelStatus.Idle None None None
+                (DateTimeOffset.MinValue.ToString("O")) "2026-03-01T11:59:00Z" ]
+        Expected = card Idle }
+
+      { Name = "stale idle sessions past the open window collapse to grey NoSession"
+        Sessions =
+          [ stored "a" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:00:00Z"
+            stored "b" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:30:00Z" ]
+        Expected = { card NoSession with ActivityAt = Some(ts "2026-03-01T11:30:00Z") } }
+
+      { Name = "an open idle session collapses to blue Idle"
+        Sessions = [ stored "a" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:59:00Z" ]
+        Expected = { card Idle with ActivityAt = Some(ts "2026-03-01T11:59:00Z") } }
+
+      { Name = "a session exactly at the open-window edge is not open"
+        Sessions = [ stored "a" "wt" SessionLevelStatus.Idle None None None atEdge ]
+        Expected = { card NoSession with ActivityAt = Some(ts atEdge) } }
+
+      { Name = "an open idle worktree keeps its retained footer"
+        Sessions =
+          [ stored "a" "wt" SessionLevelStatus.Idle (Some "bd-execute")
+                (Some(msg "ship it" "2026-03-01T11:58:00Z"))
+                (Some(msg "done, all green" "2026-03-01T11:58:30Z"))
+                "2026-03-01T11:59:00Z" ]
+        Expected =
+          { card Idle with
+              Skill = Some "bd-execute"
+              LastUser = Some "ship it"
+              LastAssistant = Some "done, all green"
+              ActivityAt = Some(ts "2026-03-01T11:59:00Z") } }
+
+      { Name = "a NoSession worktree with retained data keeps its footer"
+        Sessions =
+          [ stored "a" "wt" SessionLevelStatus.Idle (Some "review")
+                (Some(msg "look at auth" "2026-03-01T10:58:00Z"))
+                (Some(msg "which file?" "2026-03-01T10:58:30Z"))
+                "2026-03-01T11:00:00Z" ]
+        Expected =
+          { card NoSession with
+              Skill = Some "review"
+              LastUser = Some "look at auth"
+              LastAssistant = Some "which file?"
+              ActivityAt = Some(ts "2026-03-01T11:00:00Z") } }
+
+      { Name = "the most-recent active session wins and every field comes from it"
+        Sessions =
+          [ stored "old" "wt" SessionLevelStatus.Working (Some "old-skill")
+                (Some(msg "old prompt" "2026-03-01T10:00:00Z"))
+                (Some(msg "old reply" "2026-03-01T10:00:01Z"))
+                "2026-03-01T11:58:00Z"
+            stored "new" "wt" SessionLevelStatus.WaitingForUser (Some "review")
+                (Some(msg "the auth module" "2026-03-01T11:40:00Z"))
+                (Some(msg "which file?" "2026-03-01T11:40:01Z"))
+                "2026-03-01T11:59:00Z" ]
+        Expected =
+          { card WaitingForUser with
+              Skill = Some "review"
+              LastUser = Some "the auth module"
+              LastAssistant = Some "which file?"
+              ActivityAt = Some(ts "2026-03-01T11:59:00Z") } }
+
+      { Name = "a heartbeat cannot replace the most-recent active session"
+        Sessions =
+          [ storedWithClocks "heartbeat" "wt" SessionLevelStatus.Working (Some "old-skill")
+                (Some(msg "old prompt" "2026-03-01T11:57:00Z"))
+                (Some(msg "old reply" "2026-03-01T11:57:30Z"))
+                "2026-03-01T11:58:00Z" "2026-03-01T11:59:30Z"
+            storedWithClocks "activity" "wt" SessionLevelStatus.WaitingForUser (Some "new-skill")
+                (Some(msg "new prompt" "2026-03-01T11:58:30Z"))
+                (Some(msg "new reply" "2026-03-01T11:59:00Z"))
+                "2026-03-01T11:59:00Z" "2026-03-01T11:59:00Z" ]
+        Expected =
+          { card WaitingForUser with
+              Skill = Some "new-skill"
+              LastUser = Some "new prompt"
+              LastAssistant = Some "new reply"
+              ActivityAt = Some(ts "2026-03-01T11:59:00Z") } }
+
+      { Name = "a heartbeat cannot replace the most-recent idle footer"
+        Sessions =
+          [ storedWithClocks "heartbeat" "wt" SessionLevelStatus.Idle (Some "old-skill")
+                (Some(msg "old prompt" "2026-03-01T11:57:00Z"))
+                (Some(msg "old reply" "2026-03-01T11:57:30Z"))
+                "2026-03-01T11:58:00Z" "2026-03-01T11:59:30Z"
+            storedWithClocks "activity" "wt" SessionLevelStatus.Idle (Some "new-skill")
+                (Some(msg "new prompt" "2026-03-01T11:58:30Z"))
+                (Some(msg "new reply" "2026-03-01T11:59:00Z"))
+                "2026-03-01T11:59:00Z" "2026-03-01T11:59:00Z" ]
+        Expected =
+          { card Idle with
+              Skill = Some "new-skill"
+              LastUser = Some "new prompt"
+              LastAssistant = Some "new reply"
+              ActivityAt = Some(ts "2026-03-01T11:59:00Z") } }
+
+      { Name = "a just-idled newer session does not hide an actively-working sibling"
+        Sessions =
+          [ stored "active" "wt" SessionLevelStatus.Working (Some "bd-execute")
+                (Some(msg "go" "2026-03-01T11:58:00Z")) None "2026-03-01T11:58:00Z"
+            stored "idle" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:59:00Z" ]
+        Expected =
+          { card Working with
+              Skill = Some "bd-execute"
+              LastUser = Some "go"
+              ActivityAt = Some(ts "2026-03-01T11:59:00Z") } }
+
+      { Name = "a stale (crashed) active session is not open, so the worktree is grey NoSession"
+        Sessions =
+          [ stored "stale" "wt" SessionLevelStatus.Working (Some "review") None None staleAt ]
+        Expected =
+          { card NoSession with
+              Skill = Some "review"
+              ActivityAt = Some(ts staleAt) } }
+
+      { Name = "a stale active session loses to a fresh active sibling"
+        Sessions =
+          [ stored "stale" "wt" SessionLevelStatus.Working (Some "stale-skill") None None staleAt
+            stored "fresh" "wt" SessionLevelStatus.Working (Some "fresh-skill") None None
+                "2026-03-01T11:58:00Z" ]
+        Expected =
+          { card Working with
+              Skill = Some "fresh-skill"
+              ActivityAt = Some(ts "2026-03-01T11:58:00Z") } } ]
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type FromPushSessionsTests() =
 
+    static member CollapseCases: TestCaseData seq =
+        collapseScenarios
+        |> Seq.map (fun scenario -> TestCaseData(scenario).SetName(scenario.Name))
+
     [<Test>]
     member _.``No sessions yields the blank NoSession card``() =
         Assert.That(fromPushSessions now [], Is.EqualTo noSessionPushResult)
 
-    [<Test>]
-    member _.``A session without lifecycle activity has no recency timestamp``() =
-        let hydratedOnly =
-            storedWithClocks
-                "hydrated"
-                "wt"
-                SessionLevelStatus.Idle
-                None
-                None
-                None
-                (DateTimeOffset.MinValue.ToString("O"))
-                "2026-03-01T11:59:00Z"
-
-        Assert.That(
-            (fromPushSessions now [ hydratedOnly ]).SessionActivityAt,
-            Is.EqualTo(None)
-        )
+    [<TestCaseSource("CollapseCases")>]
+    member _.``the push collapse projects the expected worktree card``(scenario: CollapseScenario) =
+        Assert.That(cardOf (fromPushSessions now scenario.Sessions), Is.EqualTo scenario.Expected)
 
     [<Test>]
-    member _.``Stale idle sessions past the open window collapse to grey NoSession``() =
-        // Both were last seen well over openWindow (~3 min) ago, so neither is an OPEN session — the
-        // worktree has no live CLI and reads as NoSession (grey). They carry no footer data, so the
-        // card renders blank.
-        let sessions =
-            [ stored "a" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:00:00Z"
-              stored "b" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:30:00Z" ]
-        let result = fromPushSessions now sessions
-        Assert.That(result.Status, Is.EqualTo NoSession)
-        Assert.That(result.CurrentSkill, Is.EqualTo None)
-        Assert.That(result.LastUserMessage, Is.EqualTo None)
-        Assert.That(result.LastAssistantMessage, Is.EqualTo None)
-
-    [<Test>]
-    member _.``An open idle session collapses to blue Idle``() =
-        // Seen ~1 min ago (inside openWindow) but Idle → the CLI is open and the agent is parked:
-        // blue Idle, not grey NoSession.
-        let session = stored "a" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:59:00Z"
-        Assert.That((fromPushSessions now [ session ]).Status, Is.EqualTo Idle)
-
-    [<Test>]
-    member _.``A session exactly at the open-window edge is not open (grey)``() =
-        // now - last_seen = openWindow exactly; the strict `< openWindow` predicate excludes it, so it
-        // is NOT open → NoSession.
-        let atEdge =
-            stored "a" "wt" SessionLevelStatus.Idle None None None ((now - openWindow).ToString("O"))
-        Assert.That((fromPushSessions now [ atEdge ]).Status, Is.EqualTo NoSession)
-
-    [<Test>]
-    member _.``An open idle worktree keeps its retained footer (skill + messages)``() =
-        // The bug fix: going Idle must NOT blank the footer. The just-idled session retains its last
-        // user/assistant messages and skill through the fold, so the card footer stays populated.
+    member _.``the winning session supplies the card provider``() =
         let session =
-            stored "a" "wt" SessionLevelStatus.Idle (Some "bd-execute")
-                (Some(msg "ship it" "2026-03-01T11:58:00Z"))
-                (Some(msg "done, all green" "2026-03-01T11:58:30Z"))
-                "2026-03-01T11:59:00Z"
-        let result = fromPushSessions now [ session ]
-        Assert.That(result.Status, Is.EqualTo Idle)
-        Assert.That(result.CurrentSkill, Is.EqualTo(Some "bd-execute"))
-        Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "ship it"))
-        Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "done, all green"))
+            stored "a" "wt" SessionLevelStatus.Working (Some "review") None None "2026-03-01T11:59:00Z"
 
-    [<Test>]
-    member _.``A NoSession worktree with retained data keeps its footer``() =
-        // No OPEN session (last seen ~1 h ago, past openWindow) → grey NoSession dot, but the retained
-        // session still carries the last prompt/reply so the footer/event-log does not vanish.
-        let session =
-            stored "a" "wt" SessionLevelStatus.Idle (Some "review")
-                (Some(msg "look at auth" "2026-03-01T10:58:00Z"))
-                (Some(msg "which file?" "2026-03-01T10:58:30Z"))
-                "2026-03-01T11:00:00Z"
-        let result = fromPushSessions now [ session ]
-        Assert.That(result.Status, Is.EqualTo NoSession)
-        Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
-        Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "look at auth"))
-        Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "which file?"))
-
-    [<Test>]
-    member _.``The most-recent active session wins and every field comes from it``() =
-        let older =
-            stored "old" "wt" SessionLevelStatus.Working (Some "old-skill")
-                (Some(msg "old prompt" "2026-03-01T10:00:00Z"))
-                (Some(msg "old reply" "2026-03-01T10:00:01Z"))
-                "2026-03-01T11:58:00Z"
-        let newer =
-            stored "new" "wt" SessionLevelStatus.WaitingForUser (Some "review")
-                (Some(msg "the auth module" "2026-03-01T11:40:00Z"))
-                (Some(msg "which file?" "2026-03-01T11:40:01Z"))
-                "2026-03-01T11:59:00Z"
-
-        let result = fromPushSessions now [ older; newer ]
-
-        Assert.That(result.Status, Is.EqualTo WaitingForUser)
-        Assert.That(result.Provider, Is.EqualTo(Some CopilotCli))
-        Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
-        Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "the auth module"))
-        Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "which file?"))
-
-    [<Test>]
-    member _.``A heartbeat cannot replace the most-recent active session``() =
-        let heartbeatNewest =
-            storedWithClocks "heartbeat" "wt" SessionLevelStatus.Working (Some "old-skill")
-                (Some(msg "old prompt" "2026-03-01T11:57:00Z"))
-                (Some(msg "old reply" "2026-03-01T11:57:30Z"))
-                "2026-03-01T11:58:00Z"
-                "2026-03-01T11:59:30Z"
-        let activityNewest =
-            storedWithClocks "activity" "wt" SessionLevelStatus.WaitingForUser (Some "new-skill")
-                (Some(msg "new prompt" "2026-03-01T11:58:30Z"))
-                (Some(msg "new reply" "2026-03-01T11:59:00Z"))
-                "2026-03-01T11:59:00Z"
-                "2026-03-01T11:59:00Z"
-
-        let result = fromPushSessions now [ heartbeatNewest; activityNewest ]
-
-        Assert.That(result.Status, Is.EqualTo WaitingForUser)
-        Assert.That(result.CurrentSkill, Is.EqualTo(Some "new-skill"))
-        Assert.That(result.LastUserMessage, Is.EqualTo(Some(footerMessage "new prompt" "2026-03-01T11:58:30Z")))
-        Assert.That(result.LastAssistantMessage, Is.EqualTo(Some("new reply", ts "2026-03-01T11:59:00Z")))
-        Assert.That(
-            result.SessionActivityAt,
-            Is.EqualTo(Some(ts "2026-03-01T11:59:00Z"))
-        )
-
-    [<Test>]
-    member _.``A heartbeat cannot replace the most-recent idle footer``() =
-        let heartbeatNewest =
-            storedWithClocks "heartbeat" "wt" SessionLevelStatus.Idle (Some "old-skill")
-                (Some(msg "old prompt" "2026-03-01T11:57:00Z"))
-                (Some(msg "old reply" "2026-03-01T11:57:30Z"))
-                "2026-03-01T11:58:00Z"
-                "2026-03-01T11:59:30Z"
-        let activityNewest =
-            storedWithClocks "activity" "wt" SessionLevelStatus.Idle (Some "new-skill")
-                (Some(msg "new prompt" "2026-03-01T11:58:30Z"))
-                (Some(msg "new reply" "2026-03-01T11:59:00Z"))
-                "2026-03-01T11:59:00Z"
-                "2026-03-01T11:59:00Z"
-
-        let result = fromPushSessions now [ heartbeatNewest; activityNewest ]
-
-        Assert.That(result.Status, Is.EqualTo Idle)
-        Assert.That(result.CurrentSkill, Is.EqualTo(Some "new-skill"))
-        Assert.That(result.LastUserMessage, Is.EqualTo(Some(footerMessage "new prompt" "2026-03-01T11:58:30Z")))
-        Assert.That(result.LastAssistantMessage, Is.EqualTo(Some("new reply", ts "2026-03-01T11:59:00Z")))
-
-    [<Test>]
-    member _.``A just-idled newer session does not hide an actively-working sibling``() =
-        // The key collapse rule: drop Idle FIRST, then most-recent active wins — NOT raw latest
-        // last_seen. The idle sibling is newer but must not win the STATUS, and the FOOTER stays on
-        // the active session (the active winner, not the newer idle one).
-        let active =
-            stored "active" "wt" SessionLevelStatus.Working (Some "bd-execute")
-                (Some(msg "go" "2026-03-01T11:58:00Z")) None
-                "2026-03-01T11:58:00Z"
-        let justIdled = stored "idle" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:59:00Z"
-
-        let result = fromPushSessions now [ active; justIdled ]
-
-        Assert.That(result.Status, Is.EqualTo Working)
-        Assert.That(result.CurrentSkill, Is.EqualTo(Some "bd-execute"))
-        Assert.That(
-            result.SessionActivityAt,
-            Is.EqualTo(Some(ts "2026-03-01T11:59:00Z"))
-        )
-
-    [<Test>]
-    member _.``A stale (crashed) active session is not open, so the worktree is grey NoSession``() =
-        // No went_idle emitted and last_seen is well past both openWindow and the staleness timeout →
-        // the session is not OPEN, so it drops out of the status collapse and the worktree reads as
-        // grey NoSession (a dead agent goes straight to grey, never a lingering blue).
-        let stale =
-            stored "stale" "wt" SessionLevelStatus.Working (Some "review") None None
-                (((now - stalenessTimeout).AddMinutes -1.0).ToString("O"))
-        Assert.That((fromPushSessions now [ stale ]).Status, Is.EqualTo NoSession)
-
-    [<Test>]
-    member _.``A stale active session loses to a fresh active sibling``() =
-        let stale =
-            stored "stale" "wt" SessionLevelStatus.Working (Some "stale-skill") None None
-                (((now - stalenessTimeout).AddMinutes -1.0).ToString("O"))
-        let fresh =
-            stored "fresh" "wt" SessionLevelStatus.Working (Some "fresh-skill") None None
-                "2026-03-01T11:58:00Z"
-
-        let result = fromPushSessions now [ stale; fresh ]
-        Assert.That(result.CurrentSkill, Is.EqualTo(Some "fresh-skill"))
+        Assert.That((fromPushSessions now [ session ]).Provider, Is.EqualTo(Some CopilotCli))
 
     [<Test>]
     member _.``The last user message is truncated to the 120-char cap``() =
@@ -284,10 +294,17 @@ type FromPushSessionsTests() =
             |> fun value -> { value with Status.Title = Some(msg raw timestamp) }
 
         let liveResult = fromPushSessions now [ canvasSession "2026-03-01T11:59:00Z" ]
-        let retained = Map.ofList [ "wt", canvasSession "2026-03-01T08:00:00Z" ]
+        let retained =
+            Map.ofList
+                [ "wt",
+                  canvasSession "2026-03-01T08:00:00Z"
+                  |> retainedFromInstance ]
+
         let retainedResult =
-            includeRetainedSessions retained []
-            |> collapseByWorktree now
+            Server.CodingToolStatus.collapseByWorktree
+                now
+                retained
+                []
             |> Map.find "wt"
 
         [ liveResult; retainedResult ]
@@ -363,6 +380,37 @@ type SessionStatusesTests() =
         Assert.That(result.SessionStatuses |> List.map _.Status, Is.EqualTo [ Working; WaitingForUser; Idle ])
 
     [<Test>]
+    member _.``Two physical instances of one durable session remain two exact markers``() =
+        let firstIdentity =
+            ProcessIdentity.create 6101 7101L
+            |> Result.defaultWith invalidOp
+
+        let secondIdentity =
+            ProcessIdentity.create 6102 7102L
+            |> Result.defaultWith invalidOp
+
+        let first =
+            { stored "shared" "wt" SessionLevelStatus.Working None None None "2026-03-01T11:59:00Z" with
+                ProcessIdentity = firstIdentity }
+
+        let second =
+            { stored "shared" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:58:00Z" with
+                ProcessIdentity = secondIdentity }
+
+        let result = fromPushSessions now [ second; first ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(result.Status, Is.EqualTo Working)
+            Assert.That(result.SessionStatuses |> List.map _.Status, Is.EqualTo([ Working; Idle ]))
+            Assert.That(
+                result.SessionStatuses
+                |> List.map (_.InstanceId >> SessionInstanceId.value)
+                |> Set.ofList
+                |> Set.count,
+                Is.EqualTo 2
+            ))
+
+    [<Test>]
     member _.``Equal-status dots keep session id order when heartbeat recency changes``() =
         let sessionA seen =
             stored "a" "wt" SessionLevelStatus.Working (Some "session-a") None None seen
@@ -383,9 +431,12 @@ type SessionStatusesTests() =
             Assert.That(skills second, Is.EqualTo [ Some "session-a"; Some "session-b" ]))
 
     [<Test>]
-    member _.``Closed (stale) sessions are excluded from the per-session dots``() =
+    member _.``A freshly seen but closed instance is excluded from the per-session dots``() =
         let openWorking = storedUsage "o" "wt" SessionLevelStatus.Working (usage 10000 200000) "2026-03-01T11:59:00Z"
-        let closed = storedUsage "c" "wt" SessionLevelStatus.Working (usage 99000 200000) "2026-03-01T11:00:00Z"
+        let closed =
+            { storedUsage "c" "wt" SessionLevelStatus.Working (usage 99000 200000) "2026-03-01T11:59:30Z" with
+                ClosedAt = Some(ts "2026-03-01T11:59:45Z") }
+
         let result = fromPushSessions now [ openWorking; closed ]
         Assert.That(result.SessionStatuses |> List.map _.ContextUsage, Is.EqualTo [ usage 10000 200000 ])
 
@@ -425,13 +476,16 @@ type CollapseByWorktreeTests() =
 [<Category("Fast")>]
 type RetainedSessionsTests() =
 
-    let retainedRow sid wt lastUser seen : string * StoredStatus =
-        WorktreePath.value (WorktreePath wt), stored sid wt SessionLevelStatus.Idle None lastUser None seen
+    let retainedRow sid wt lastUser seen : string * RetainedSession =
+        WorktreePath.value (WorktreePath wt),
+        stored sid wt SessionLevelStatus.Idle None lastUser None seen
+        |> retainedFromInstance
 
     let collapseWithRetained at retained live =
-        live
-        |> includeRetainedSessions retained
-        |> collapseByWorktree at
+        Server.CodingToolStatus.collapseByWorktree
+            at
+            retained
+            live
 
     [<Test>]
     member _.``A worktree absent from the live map gets a NoSession card carrying the retained footer``() =
@@ -451,14 +505,12 @@ type RetainedSessionsTests() =
     member _.``An intent-only retained session still carries the provider indicator``() =
         // Regression: hasFooter must count Intent. A session folded from IntentReported alone still has
         // footer content (its intent line renders), so its retained card must carry the provider.
-        let intentOnly: StoredStatus =
+        let intentOnly: RetainedSession =
             { SessionId = SessionId "i"
-              TerminalSessionId = None
               WorktreePath = WorktreePath "wt-i"
               Provider = CopilotCli
               Status = { emptyStatus with Intent = Some(msg "investigating the fold" "2026-03-01T08:00:00Z") }
               UpdatedAt = ts "2026-03-01T08:00:00Z"
-              LastSeen = ts "2026-03-01T08:00:00Z"
               ContextUsageAt = None }
 
         let result = collapseWithRetained now (Map.ofList [ "wt-i", intentOnly ]) [] |> Map.find "wt-i"
@@ -488,6 +540,7 @@ type RetainedSessionsTests() =
                 None
                 "2026-03-01T09:30:00Z"
                 "2026-03-01T09:30:00Z"
+            |> retainedFromInstance
         let heartbeatKeptLive =
             storedWithClocks "heartbeat" "wt" SessionLevelStatus.Idle None None None
                 "2026-03-01T09:00:00Z"

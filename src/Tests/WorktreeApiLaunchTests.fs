@@ -42,8 +42,10 @@ let private startResult path id =
                         $"http://127.0.0.1:41001/{EmbeddedTerminalId.value id}/" } ] }
       TerminalId = id }
 
-let private liveSession now path terminalId sessionId : SessionActivityStore.StoredStatus =
-    { SessionId = SessionActivity.SessionId sessionId
+let private liveSession now path terminalId sessionId : SessionActivityStore.StoredInstance =
+    { ProcessIdentity =
+        syntheticProcessIdentityForSessionId sessionId
+      SessionId = SessionActivity.SessionId sessionId
       TerminalSessionId =
         terminalId
         |> EmbeddedTerminalId.value
@@ -53,8 +55,10 @@ let private liveSession now path terminalId sessionId : SessionActivityStore.Sto
       Provider = CodingToolProvider.CopilotCli
       Status = SessionActivity.emptyStatus
       UpdatedAt = now
+      LifecycleAt = Some now
       LastSeen = now
-      ContextUsageAt = None }
+      ContextUsageAt = None
+      ClosedAt = None }
 
 let private createApi
     root
@@ -84,6 +88,7 @@ let private createApi
           // the injected TerminalLaunch boundary or fail loudly by dereferencing the test sentinel.
           SessionAgent = Unchecked.defaultof<SessionManager.SessionAgent>
           EmbeddedTerminal = Unchecked.defaultof<EmbeddedTerminal.Manager>
+          TerminalSessionCleanup = WorktreeCleanup.noSessionClose
           ActivityStore = activityStore
           SnapshotStore = None
           AutoSyncStore = None
@@ -161,6 +166,97 @@ type WorktreeApiLaunchTests() =
                       path
                       existingId
                       "different-session" ]
+                existing.Snapshot
+
+        Assert.That(result, Is.EqualTo None)
+
+    [<Test>]
+    member _.``Resume does not reuse an exact waiting session after its heartbeat is stale``() =
+        let now = DateTimeOffset.UtcNow
+        let path = WorktreePath "C:/wt/resume"
+        let existingId =
+            terminalId "cccccccccccccccccccccccccccccccc"
+        let existing = startResult path (EmbeddedTerminalId.value existingId)
+        let awaitingAt = now - TimeSpan.FromMinutes 10.0
+        let staleWaiting =
+            { liveSession now path existingId "copilot-session" with
+                Status =
+                    SessionActivity.fold
+                        SessionActivity.emptyStatus
+                        (SessionActivity.AwaitingUserInput(None, awaitingAt))
+                UpdatedAt = awaitingAt
+                LastSeen = awaitingAt }
+
+        let result =
+            TerminalSessionActivity.tryFindLiveTerminalId
+                now
+                path
+                (SessionActivity.SessionId "copilot-session")
+                [ staleWaiting ]
+                existing.Snapshot
+
+        Assert.That(result, Is.EqualTo None)
+
+    [<Test>]
+    member _.``Resume chooses the greatest-activity exact process when a durable session is duplicated``() =
+        let now = DateTimeOffset.UtcNow
+        let path = WorktreePath "C:/wt/resume"
+        let firstId =
+            terminalId "dddddddddddddddddddddddddddddddd"
+        let secondId =
+            terminalId "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+        let snapshot =
+            { Tabs =
+                [ (startResult path (EmbeddedTerminalId.value firstId)).Snapshot.Tabs
+                  (startResult path (EmbeddedTerminalId.value secondId)).Snapshot.Tabs ]
+                |> List.concat }
+
+        let firstIdentity =
+            ProcessIdentity.create 6401 7401L
+            |> Result.defaultWith invalidOp
+
+        let secondIdentity =
+            ProcessIdentity.create 6402 7402L
+            |> Result.defaultWith invalidOp
+
+        let first =
+            { liveSession now path firstId "copilot-session" with
+                ProcessIdentity = firstIdentity
+                UpdatedAt = now.AddMinutes(-2.0) }
+
+        let second =
+            { liveSession now path secondId "copilot-session" with
+                ProcessIdentity = secondIdentity
+                UpdatedAt = now.AddMinutes(-1.0) }
+
+        let result =
+            TerminalSessionActivity.tryFindLiveTerminalId
+                now
+                path
+                (SessionActivity.SessionId "copilot-session")
+                [ first; second ]
+                snapshot
+
+        Assert.That(result, Is.EqualTo(Some secondId))
+
+    [<Test>]
+    member _.``Resume does not reuse a closed exact process even when its terminal still exists``() =
+        let now = DateTimeOffset.UtcNow
+        let path = WorktreePath "C:/wt/resume"
+        let existingId =
+            terminalId "ffffffffffffffffffffffffffffffff"
+        let existing = startResult path (EmbeddedTerminalId.value existingId)
+        let closed =
+            { liveSession now path existingId "copilot-session" with
+                ClosedAt = Some now }
+
+        let result =
+            TerminalSessionActivity.tryFindLiveTerminalId
+                now
+                path
+                (SessionActivity.SessionId "copilot-session")
+                [ closed ]
                 existing.Snapshot
 
         Assert.That(result, Is.EqualTo None)

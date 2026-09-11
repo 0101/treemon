@@ -24,6 +24,12 @@ module internal TerminalProxy =
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
+    type internal ProxyStopOperations =
+        { StopDataPlane: unit -> Task
+          StopApplication: CancellationToken -> Task
+          DisposeApplication: unit -> Task
+          DisposeClient: unit -> unit }
+
     let internal customizeTerminalPage (html: string) =
         html.Replace("</head>", TerminalPageHeadInjection + "</head>", StringComparison.OrdinalIgnoreCase)
 
@@ -291,16 +297,30 @@ module internal TerminalProxy =
                 ()
         }
 
-    let private stopProxy plane (application: WebApplication) (client: HttpClient) =
+    let internal stopProxy operations () =
         task {
-            do! plane.Stop() |> Async.StartAsTask
-            use cancellation = new CancellationTokenSource(proxyShutdownTimeout)
+            let! dataPlaneFailure =
+                task {
+                    try
+                        do! operations.StopDataPlane()
+                        return None
+                    with error ->
+                        return Some error
+                }
 
-            do! ignoreTaskFailure (fun () -> application.StopAsync(cancellation.Token))
-            do! ignoreTaskFailure (fun () -> application.DisposeAsync().AsTask().WaitAsync(proxyShutdownTimeout))
+            try
+                use cancellation = new CancellationTokenSource(proxyShutdownTimeout)
 
-            client.Dispose()
+                do! ignoreTaskFailure (fun () -> operations.StopApplication cancellation.Token)
+                do! ignoreTaskFailure operations.DisposeApplication
+            finally
+                operations.DisposeClient()
+
+            match dataPlaneFailure with
+            | None -> ()
+            | Some error -> raise error
         }
+        |> Async.AwaitTask
 
     let private startProxy
         allowedOrigins
@@ -384,13 +404,26 @@ module internal TerminalProxy =
                             do! core.Stop()
                             return Error error
                         | Ok(application, client, endpoint) ->
-                            let stopWorkflow = lazy (stopProxy core application client)
+                            let stopOperations =
+                                { StopDataPlane =
+                                    fun () ->
+                                        (core.Stop() |> Async.StartAsTask) :> Task
+                                  StopApplication =
+                                    fun cancellation ->
+                                        application.StopAsync(cancellation)
+                                  DisposeApplication =
+                                    fun () ->
+                                        application
+                                            .DisposeAsync()
+                                            .AsTask()
+                                            .WaitAsync(proxyShutdownTimeout)
+                                  DisposeClient = fun () -> client.Dispose() }
 
                             return
                                 Ok
                                     { core with
                                         AttachmentEndpoint = endpoint
-                                        Stop = fun () -> stopWorkflow.Value |> Async.AwaitTask }
+                                        Stop = stopProxy stopOperations }
         }
 
     let start startupTimeout allowedOrigins bearerToken

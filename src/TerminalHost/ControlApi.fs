@@ -10,14 +10,8 @@ open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Hosting
 
-type ControlApiConfig =
-    { Port: int
-      AllowedOrigins: string list }
-
-type RunningControlApi =
-    internal
-        { Application: WebApplication
-          Endpoint: string }
+type ControlApiConfig = { Port: int; AllowedOrigins: string list }
+type RunningControlApi = internal { Application: WebApplication; Endpoint: string }
 
 [<RequireQualifiedAccess>]
 module ControlApi =
@@ -25,24 +19,15 @@ module ControlApi =
 
     let private registryResponseV2 (snapshot: RegistrySnapshot) =
         {| Revision = snapshot.Revision
-           Terminals =
-            snapshot.Terminals
-            |> List.map (fun terminal ->
-                {| SessionId = terminal.SessionId; WorktreePath = terminal.WorktreePath
-                   AttachmentEndpoint = terminal.AttachmentEndpoint |}) |}
+           Terminals = snapshot.Terminals |> List.map (fun terminal ->
+               {| SessionId = terminal.SessionId; WorktreePath = terminal.WorktreePath; AttachmentEndpoint = terminal.AttachmentEndpoint |}) |}
 
     let private writeJson statusCode payload (context: HttpContext) =
         task {
             context.Response.StatusCode <- statusCode
             context.Response.ContentType <- "application/json; charset=utf-8"
 
-            do!
-                JsonSerializer.SerializeAsync(
-                    context.Response.Body,
-                    payload,
-                    jsonOptions,
-                    context.RequestAborted
-                )
+            do! JsonSerializer.SerializeAsync(context.Response.Body, payload, jsonOptions, context.RequestAborted)
         }
 
     let private writeError statusCode message context =
@@ -51,7 +36,6 @@ module ControlApi =
     let private reject (rejection: RequestRejection) (context: HttpContext) =
         if rejection = RequestRejection.Unauthorized then
             context.Response.Headers.WWWAuthenticate <- "Bearer"
-
         let message =
             match rejection with
             | RequestRejection.Forbidden -> "Request origin rejected"
@@ -63,7 +47,6 @@ module ControlApi =
     let private hasJsonContentType (context: HttpContext) =
         // MediaTypeHeaderValue.TryParse is a byref-only framework parser; mutation stays at this boundary.
         let mutable parsed = Unchecked.defaultof<MediaTypeHeaderValue>
-
         MediaTypeHeaderValue.TryParse(context.Request.ContentType, &parsed)
         && String.Equals(parsed.MediaType, "application/json", StringComparison.OrdinalIgnoreCase)
 
@@ -110,14 +93,7 @@ module ControlApi =
     let private validSessionId (value: string) =
         value.Length = 32 && value |> Seq.forall Uri.IsHexDigit
 
-    let private route
-        hostPid
-        processStartTimeUtcTicks
-        hostVersion
-        registry
-        (lifetime: IHostApplicationLifetime)
-        (context: HttpContext)
-        =
+    let private route hostPid processStartTimeUtcTicks hostVersion registry (lifetime: IHostApplicationLifetime) (context: HttpContext) =
         task {
             let method = context.Request.Method
             let path = context.Request.Path.Value |> Option.ofObj |> Option.defaultValue ""
@@ -152,9 +128,16 @@ module ControlApi =
                             return! writeError StatusCodes.Status500InternalServerError error context
             | "POST", "/api/v2/shutdown" ->
                 context.Response.OnCompleted(
-                    Func<Task>(fun () -> lifetime.StopApplication(); Task.CompletedTask)
+                    Func<Task>(fun () ->
+                        async {
+                            try
+                                let! clean = TerminalRegistry.shutdown registry
+                                if clean then lifetime.StopApplication()
+                            with _ -> ()
+                        }
+                        |> Async.Start
+                        Task.CompletedTask)
                 )
-
                 return! writeJson StatusCodes.Status202Accepted {| Accepted = true |} context
             | "DELETE", closePath
                 when closePath.StartsWith("/api/v2/terminals/", StringComparison.Ordinal) ->

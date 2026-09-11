@@ -414,11 +414,16 @@ let main args =
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
+    let processIdentityResolver =
+        ProcessIdentityResolverRuntime.defaultResolver
+
     let embeddedTerminal =
         if config.Demo then None
         else
             dashboardOrigins config
-            |> EmbeddedTerminal.create serverUrl
+            |> EmbeddedTerminal.createWithProcessIdentityResolver
+                processIdentityResolver
+                serverUrl
             |> Some
 
     let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, runtimeStoreFlushes =
@@ -451,6 +456,7 @@ let main args =
                       CardLog = cardLog
                       SessionAgent = sessionAgent
                       EmbeddedTerminal = embeddedTerminal.Value
+                      TerminalSessionCleanup = WorktreeCleanup.noSessionClose
                       ActivityStore = None
                       SnapshotStore = None
                       AutoSyncStore = None
@@ -468,7 +474,8 @@ let main args =
                 Log.log "Startup" $"Session activity store db: {dbPath}"
                 let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
                 let activity =
-                    SessionActivityRuntime.create
+                    SessionActivityRuntime.createWithProcessIdentityResolver
+                        processIdentityResolver
                         dbPath
                         agent
                         rootPaths
@@ -515,6 +522,9 @@ let main args =
                           CardLog = cardLog
                           SessionAgent = sessionAgent
                           EmbeddedTerminal = embeddedTerminal.Value
+                          TerminalSessionCleanup =
+                            TerminalSessionCleanup.terminalSessionCleanup
+                                activity.Components.Service
                           ActivityStore = Some store
                           SnapshotStore = Some activity.SnapshotStore
                           AutoSyncStore = Some autoSyncStore
@@ -552,7 +562,7 @@ let main args =
     let canvasAgentRoutes =
         match schedulerAgent with
         | Some agent ->
-            [ route "/api/canvas/register" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasRegisterHandler agent
+            [ route "/api/canvas/register" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasRegisterHandler processIdentityResolver agent
               route "/api/canvas/attribute" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasAttributeHandler agent ]
         | None -> []
 
@@ -586,20 +596,11 @@ let main args =
             use_gzip
         }
 
-    try
-        let replacementLoop =
-            match embeddedTerminal, sessionActivityService with
-            | Some manager, Some service ->
-                EmbeddedTerminal.runReplacementCoordinator
-                    manager
-                    (TerminalSessionActivity.queryReplacementPlan
-                        CodingToolStatus.readConfiguredProvider
-                        (fun terminalSessionIds ->
-                            service.QueryTerminalActivity terminalSessionIds))
-                |> BackgroundLoop.start
-                |> Some
-            | _ -> None
+    // The HTTP activity endpoint must be listening before replacement reconciliation can query
+    // startup-pending process identities, so this lifecycle handle is assigned only after host.Start.
+    let mutable replacementLoop: BackgroundLoop.Running option = None
 
+    try
         try
             let canvasHost =
                 match schedulerAgent, config.CanvasPort with
@@ -613,7 +614,22 @@ let main args =
                     :?> IHostApplicationLifetime
 
                 runHostWithCapture
-                    (fun () -> host.Start())
+                    (fun () ->
+                        host.Start()
+
+                        replacementLoop <-
+                            match embeddedTerminal, sessionActivityService with
+                            | Some manager, Some service ->
+                                EmbeddedTerminal.runReplacementCoordinator
+                                    manager
+                                    (TerminalSessionActivity.queryReplacementPlan
+                                        CodingToolStatus.readConfiguredProvider
+                                        (fun terminalSessionIds ->
+                                            service.QueryTerminalActivity terminalSessionIds))
+                                    service.ClosedProcessSnapshot
+                                |> BackgroundLoop.start
+                                |> Some
+                            | _ -> None)
                     (fun () -> host.WaitForShutdownAsync().GetAwaiter().GetResult())
                     applicationLifetime.ApplicationStopping
                     capture

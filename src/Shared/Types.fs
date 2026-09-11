@@ -16,6 +16,13 @@ module WorktreePath =
         let i = max (p.LastIndexOf '/') (p.LastIndexOf '\\')
         if i < 0 then p else p[i + 1..]
 
+/// Opaque wire identity of one physical coding-tool process. The server derives it from the
+/// process ID plus process-start identity; clients use it only as a stable marker key.
+type SessionInstanceId = SessionInstanceId of string
+
+module SessionInstanceId =
+    let value (SessionInstanceId id) = id
+
 type BranchName = BranchName of string
 
 module BranchName =
@@ -86,15 +93,14 @@ module ContextUsage =
     /// ring and one near its limit thins to a sliver.
     let remainingFraction (u: ContextUsage) : float = 1.0 - fraction u
 
-/// One live (open) session's own status, the skill it is running, and its context-window occupancy —
-/// the unit behind the per-session donuts. `Skill` is the session's OWN running skill (None when it
-/// is running no recognized skill); the Overview band classifies each session's activity from it
-/// (via Activity.classify) so a worktree's sessions split across activity groups by what each is
-/// actually doing — not the worktree's single collapsed skill. `ContextUsage` is None until the
-/// session first reports usage (including migrated rows with no snapshot), in which case the session
-/// renders as a plain status dot rather than a donut.
+/// One live physical instance's own status, running skill, and context-window occupancy — the unit
+/// behind the exact-instance donuts. `InstanceId` is an opaque stable client key derived from the
+/// server's PID/start identity. The Overview band classifies each instance independently, so
+/// duplicate processes for one durable conversation remain separate markers. `ContextUsage` is
+/// None until that process reports usage, in which case it renders as a plain status dot.
 type SessionDot =
-    { Status: CodingToolStatus
+    { InstanceId: SessionInstanceId
+      Status: CodingToolStatus
       Skill: string option
       ContextUsage: ContextUsage option }
 
@@ -465,10 +471,10 @@ type WorktreeStatus =
       /// The freshest activity signal for the card's "what it's doing" line, preserving whether it
       /// came from SDK `assistant.intent` or `session.title_changed`.
       AgentActivity: AgentActivity option
-      /// One entry per live (open) session for this worktree, each carrying that session's own status
-      /// and context-window occupancy — the source of the per-session status donuts. Empty ⇔
-      /// CodingTool = NoSession, so an empty list renders the single grey dot. The collapsed
-      /// CodingTool above still drives the card's overall accent/border.
+      /// One entry per live physical process for this worktree, each carrying its own status,
+      /// context-window occupancy, and exact marker identity. Empty ⇔ CodingTool = NoSession, so an
+      /// empty list renders the single grey dot. The collapsed CodingTool above still drives the
+      /// card's overall accent/border.
       Sessions: SessionDot list
       LastUserMessage: UserFooterMessage option
       /// The agent's last message (or pending ask_user question) + its timestamp — the card's third

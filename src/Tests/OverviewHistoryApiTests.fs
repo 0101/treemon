@@ -22,6 +22,7 @@ let private createApi store =
           CardLog = CardEventLog.createAgent ()
           SessionAgent = SessionManager.createAgent ()
           EmbeddedTerminal = EmbeddedTerminal.create "http://localhost:5000" []
+          TerminalSessionCleanup = WorktreeCleanup.noSessionClose
           ActivityStore = None
           SnapshotStore = Some store
           AutoSyncStore = None

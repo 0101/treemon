@@ -2,10 +2,18 @@ module Tests.SessionActivityServiceTests
 
 open System
 open System.IO
+open System.Text
+open System.Text.Json
+open System.Threading.Tasks
+open Giraffe
+open Microsoft.AspNetCore.Http
+open Microsoft.Extensions.DependencyInjection
 open NUnit.Framework
 open Shared
 open Server
 open Server.SessionActivity
+open Server.SessionActivityIngestion
+open Server.SessionActivityProtocol
 open Server.SessionActivityStore
 open Server.SessionActivityService
 open Server.TerminalSessionActivity
@@ -14,9 +22,8 @@ open Tests.TestUtils
 // Covers the ingestion layer of the push status model: the wire-contract DTO → domain parse (the
 // closed kind set, unknown rejected, per-kind message/skill rules), the known-worktree guard
 // (tryAcceptReport), and the single-writer mailbox flow (fold → persist/dedupe → last-write-wins
-// upsert → feed RefreshScheduler), plus the restart rebuild from the store. Fast/in-process — no
-// HTTP; the handler is a thin wrapper over these tested seams (its known-worktree guard is exactly
-// the CanvasDocServer pattern, tested there too).
+// upsert → feed RefreshScheduler), the HTTP binding/error boundary, and restart rebuild from the
+// store. Fast/in-process — handler tests use an in-memory HttpContext rather than a socket.
 
 /// Reference "now" for the pure parse tests — just after every baseReq occurredAt used below, so a
 /// past/current occurredAt passes the future-skew clamp untouched.
@@ -28,7 +35,8 @@ let private noMsg: MessageDto = Unchecked.defaultof<MessageDto>
 let private msgDto text at : MessageDto = { text = text; at = at }
 
 let private baseReq kind : SessionActivityRequest =
-    { sessionId = "s1"
+    { parentProcessId = 10_001
+      sessionId = "s1"
       terminalSessionId = null
       worktreePath = "C:/wt/a"
       provider = "copilot_cli"
@@ -45,7 +53,7 @@ let private parseOk req =
     match parseReport refNow req with
     | Ok r -> r
     | Error e ->
-        Assert.Fail $"expected Ok, got Error: {e}"
+        Assert.Fail $"expected Ok, got Error: {errorMessage e}"
         failwith "unreachable"
 
 let private parseErr req =
@@ -53,7 +61,7 @@ let private parseErr req =
     | Ok _ ->
         Assert.Fail "expected Error, got Ok"
         failwith "unreachable"
-    | Error e -> e
+    | Error e -> errorMessage e
 
 let private queryOwnedOk
     (service: SessionActivityService)
@@ -74,19 +82,24 @@ let private queryOwnedOk
 let private queryActivityOk
     (service: SessionActivityService)
     terminalSessionIds
-    : int64 * StoredStatus list =
+    : int64 * StoredInstance list =
     match service.QueryTerminalActivity terminalSessionIds with
-    | Ok snapshot -> snapshot
+    | Ok(epoch, instances, _) -> epoch, instances
     | Error error ->
         Assert.Fail $"expected terminal activity snapshot, got Error: {error}"
         failwith "unreachable"
 
 let private replacementTerminal
-    (TerminalSessionId terminalSessionId)
+    terminalSessionId
     worktreePath
     : TerminalHostReplacement.ReplacementTerminal =
     { TerminalSessionId = terminalSessionId
       WorktreePath = worktreePath }
+
+let private replacementResume sessionId command:
+    TerminalHostReplacement.ReplacementResumeCommand =
+    { CopilotSessionId = SessionId sessionId
+      Command = command }
 
 let private queryReplacementPlanOk
     (service: SessionActivityService)
@@ -107,16 +120,49 @@ let private queryReplacementPlanOk
 
 let private requireReplacementReady =
     function
-    | TerminalHostReplacement.ReplacementSessionPlan.Ready(epoch, commands) ->
-        epoch, commands
+    | TerminalHostReplacement.ReplacementSessionPlan.Ready(
+        epoch,
+        shutdownTargets,
+        commands
+      ) ->
+        epoch, shutdownTargets, commands
     | TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle ->
         Assert.Fail "expected a ready replacement session plan"
         failwith "unreachable"
 
+/// Distinct exact terminal origins shared by the ownership/replacement fixtures.
+let private terminalA = TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+let private terminalB = TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+let private terminalC = TerminalSessionId "cccccccccccccccccccccccccccccccc"
+
+/// An open exact session as the ownership snapshot projects it for one terminal.
+let private openSession terminalSessionId sessionId status =
+    { ProcessIdentity = syntheticProcessIdentityForSessionId sessionId
+      TerminalSessionId = terminalSessionId
+      CopilotSessionId = SessionId sessionId
+      Status = status }
+
+/// The provider-specific Resume command the session orchestration layer must emit for a durable
+/// conversation, keyed by the exact terminal that owns it.
+let private resumeCommandsFor entries =
+    entries
+    |> List.map (fun (terminalSessionId, sessionId) ->
+        terminalSessionId,
+        replacementResume sessionId $"copilot --experimental --yolo --session-id='{sessionId}'")
+    |> Map.ofList
+
 // --- Service / store fixture -------------------------------------------------------------------
 
+let private processIdentityResolver =
+    ProcessIdentityResolver.create (fun processId ->
+        processId
+        |> syntheticProcessIdentityForProcessId
+        |> Some
+        |> Ok)
+
 let private mkReport sid wt eid (t: string) ev : SessionActivityReport =
-    { SessionId = SessionId sid
+    { ParentProcessId = syntheticProcessIdForSessionId sid
+      SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath(PathUtils.normalizePath wt)
       Provider = CopilotCli
@@ -124,23 +170,76 @@ let private mkReport sid wt eid (t: string) ev : SessionActivityReport =
       OccurredAt = ts t
       Event = ev }
 
-let private storedWithUsage sid worktree status updatedAt usage usageAt =
-    { SessionId = SessionId sid
+let private present
+    (service: SessionActivityService)
+    sid
+    worktree
+    (receivedAt: DateTimeOffset)
+    =
+    let report =
+        mkReport
+            sid
+            worktree
+            $"presence-{receivedAt.UtcTicks}"
+            (receivedAt.ToString("O"))
+            SessionPresent
+
+    match service.Present(report, receivedAt) with
+    | PresenceAcknowledge.Recorded identity -> identity
+    | PresenceAcknowledge.NotRecorded(_, reason) ->
+        Assert.Fail $"expected acknowledged presence, got: {reason}"
+        failwith "unreachable"
+
+/// A durable exact instance for one synthetic session, with no terminal origin and no usage gauge.
+let private instanceOf sid worktree status updatedAt lastSeen : StoredInstance =
+    { ProcessIdentity = syntheticProcessIdentityForSessionId sid
+      SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
       Provider = CopilotCli
-      Status = { status with ContextUsage = Some usage }
+      Status = status
       UpdatedAt = updatedAt
-      LastSeen = usageAt
-      ContextUsageAt = Some usageAt }
+      LifecycleAt = Some updatedAt
+      LastSeen = lastSeen
+      ContextUsageAt = None
+      ClosedAt = None }
+
+let private storedWithUsage sid worktree status updatedAt usage usageAt =
+    { instanceOf sid worktree { status with ContextUsage = Some usage } updatedAt usageAt with
+        ContextUsageAt = Some usageAt }
+
+type SessionActivityStore with
+    member store.LoadLiveStatuses(now: DateTimeOffset) =
+        store.LoadRecentInstances now
+
+    member store.StatusBySession(sessionId: SessionId) =
+        store.InstancesBySession sessionId
+        |> List.tryHead
+
+    member store.UpsertStatus(stored: StoredInstance) =
+        store.UpsertInstance stored |> ignore
+
+    member store.UpsertContextUsage(stored: StoredInstance) =
+        store.UpsertInstance stored
+
+type SessionActivityService with
+    /// Legacy fixture convenience for tests that intentionally create one process per durable
+    /// session. Exact-multiplicity tests use `ExactSnapshot` directly.
+    member service.LiveSnapshot() =
+        service.ExactSnapshot()
+        |> Map.values
+        |> Seq.map (fun instance ->
+            instance.SessionId, instance)
+        |> Map.ofSeq
 
 /// A service over a throwaway temp .db, with `knownWorktree` registered as a monitored path on a
 /// fresh scheduler agent. `seed` runs against the store before the service is constructed (used by
 /// the restart-rebuild test). Program owns the shared store, so the fixture disposes it after the
 /// service.
-let private withServiceSeededAndPath
+let private withServiceSeededAndPathUsingResolver
     (knownWorktree: string)
     (seed: SessionActivityStore -> unit)
+    (resolver: ProcessIdentityResolver)
     (action:
         SessionActivityService
             * MailboxProcessor<SchedulerState.StateMsg>
@@ -163,7 +262,12 @@ let private withServiceSeededAndPath
 
     agent.Post(SchedulerState.UpdateWorktreeList(RepoId "svc-test-repo", [ info ]))
 
-    let svc = new SessionActivityService(store, agent)
+    let svc =
+        new SessionActivityService(
+            store,
+            agent,
+            resolver
+        )
 
     try
         action (svc, agent, store, dbPath)
@@ -171,6 +275,13 @@ let private withServiceSeededAndPath
         (svc :> IDisposable).Dispose()
         (store :> IDisposable).Dispose()
         try Directory.Delete(dir, true) with _ -> ()
+
+let private withServiceSeededAndPath knownWorktree seed action =
+    withServiceSeededAndPathUsingResolver
+        knownWorktree
+        seed
+        processIdentityResolver
+        action
 
 let private withServiceSeeded knownWorktree seed action =
     withServiceSeededAndPath
@@ -187,47 +298,31 @@ let private withServiceAndPath knownWorktree action =
 let private eventCount dbPath =
     SqliteTestDatabase.scalarInt dbPath "SELECT count(*) FROM activity_events;"
 
-let private eventStatusCount dbPath eventId status =
+let private persistedEventIds dbPath =
     use connection = SqliteTestDatabase.openConnection dbPath
     use command = connection.CreateCommand()
     command.CommandText <-
-        "SELECT count(*) FROM activity_events WHERE event_id = $eventId AND status = $status;"
-    command.Parameters.AddWithValue("$eventId", eventId) |> ignore
-    command.Parameters.AddWithValue("$status", status) |> ignore
-    Convert.ToInt32(command.ExecuteScalar())
-
-type private PersistedEvent =
-    { EventId: string
-      Kind: string
-      Status: string
-      Skill: string option }
-
-let private persistedEvents dbPath =
-    use connection = SqliteTestDatabase.openConnection dbPath
-    use command = connection.CreateCommand()
-    command.CommandText <-
-        "SELECT event_id, kind, status, skill FROM activity_events ORDER BY ts, rowid;"
+        "SELECT event_id FROM activity_events ORDER BY ts, rowid;"
     use reader = command.ExecuteReader()
 
     let rec read rows =
         if reader.Read() then
-            let row =
-                { EventId = reader.GetString 0
-                  Kind = reader.GetString 1
-                  Status = reader.GetString 2
-                  Skill = if reader.IsDBNull 3 then None else Some(reader.GetString 3) }
-
-            read (row :: rows)
+            read (reader.GetString 0 :: rows)
         else
             List.rev rows
 
     read []
 
-/// The scheduler's live status for a session (fed via UpdateSessionStatus). GetState is a barrier,
+/// The scheduler's exact instance for a session. These fixtures create one process per durable
+/// session; exact-multiplicity behavior is covered separately.
 /// so calling it after a LiveSnapshot barrier guarantees the mailbox's feed has been applied.
 let private schedulerStatus (agent: MailboxProcessor<SchedulerState.StateMsg>) sid =
     let state = agent.PostAndReply SchedulerState.GetState
-    state.SessionStatuses |> Map.tryFind (SessionId sid)
+
+    state.SessionInstances
+    |> Map.values
+    |> Seq.tryFind (fun instance ->
+        instance.SessionId = SessionId sid)
 
 let private resumePathEvent path at =
     match path with
@@ -244,6 +339,34 @@ let private idleEvent kind =
     | "went_idle" -> WentIdle
     | other -> invalidArg (nameof kind) $"unknown idle event: {other}"
 
+let private handlerResponse
+    (handler: HttpHandler)
+    (requestBody: string)
+    =
+    let services = ServiceCollection()
+    services.AddGiraffe() |> ignore
+    use provider = services.BuildServiceProvider()
+    let context = DefaultHttpContext()
+    let requestBytes = Encoding.UTF8.GetBytes requestBody
+    use body = new MemoryStream(requestBytes)
+    use response = new MemoryStream()
+    context.RequestServices <- provider
+    context.Request.ContentType <- "application/json"
+    context.Request.ContentLength <- requestBytes.LongLength
+    context.Request.Body <- body
+    context.Response.Body <- response
+
+    let next: HttpFunc =
+        fun current -> Task.FromResult(Some current)
+
+    handler next context
+    |> _.GetAwaiter().GetResult()
+    |> ignore
+
+    response.Position <- 0L
+    use reader = new StreamReader(response)
+    context.Response.StatusCode, reader.ReadToEnd()
+
 
 // ── DTO → domain parse ────────────────────────────────────────────────────────
 [<TestFixture>]
@@ -252,8 +375,58 @@ let private idleEvent kind =
 type ParseReportTests() =
 
     [<Test>]
-    member _.``turn_started maps to TurnStarted``() =
-        Assert.That((parseOk (baseReq "turn_started")).Event, Is.EqualTo TurnStarted)
+    member _.``a missing request body is rejected``() =
+        let request = Unchecked.defaultof<SessionActivityRequest>
+        Assert.That(parseErr request, Is.EqualTo "missing body")
+
+    static member ValidMappingCases: obj array seq =
+        seq {
+            yield [| box "turn_started maps to TurnStarted"; box (baseReq "turn_started"); box TurnStarted |]
+            yield [| box "turn_ended maps to TurnEnded"; box (baseReq "turn_ended"); box TurnEnded |]
+            yield [| box "went_idle maps to WentIdle"; box (baseReq "went_idle"); box WentIdle |]
+            yield [| box "user_input_completed maps to UserInputCompleted"
+                     box (baseReq "user_input_completed")
+                     box (UserInputCompleted(ts "2026-03-01T10:00:00Z")) |]
+            yield [| box "user_prompt with a message maps to UserPrompt"
+                     box { baseReq "user_prompt" with message = msgDto "hello" "2026-03-01T10:00:00Z" }
+                     box (UserPrompt(msg "hello" "2026-03-01T10:00:00Z")) |]
+            yield [| box "assistant_message with a message maps to AssistantMessage"
+                     box { baseReq "assistant_message" with message = msgDto "hi there" "2026-03-01T10:00:00Z" }
+                     box (AssistantMessage(msg "hi there" "2026-03-01T10:00:00Z")) |]
+            yield [| box "intent_reported with a message maps to IntentReported"
+                     box { baseReq "intent_reported" with message = msgDto "investigating the fold" "2026-03-01T10:00:00Z" }
+                     box (IntentReported(msg "investigating the fold" "2026-03-01T10:00:00Z")) |]
+            yield [| box "title_reported with a message maps to TitleReported"
+                     box { baseReq "title_reported" with message = msgDto "Investigate Work Item 261312" "2026-03-01T10:00:00Z" }
+                     box (TitleReported(msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z")) |]
+            yield [| box "title_bootstrap with a message maps to TitleBootstrap"
+                     box { baseReq "title_bootstrap" with message = msgDto "Investigate Work Item 261312" "2026-03-01T10:00:00Z" }
+                     box (TitleBootstrap(msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z")) |]
+            yield [| box "skill_invoked with a skillName maps to SkillInvoked"
+                     box { baseReq "skill_invoked" with skillName = "investigate" }
+                     box (SkillInvoked "investigate") |]
+            yield [| box "awaiting_user_input carries the question when a message is present"
+                     box { baseReq "awaiting_user_input" with message = msgDto "Which file?" "2026-03-01T10:00:00Z" }
+                     box (AwaitingUserInput(Some(msg "Which file?" "2026-03-01T10:00:00Z"), ts "2026-03-01T10:00:00Z")) |]
+            yield [| box "awaiting_user_input with no message maps to AwaitingUserInput None"
+                     box (baseReq "awaiting_user_input")
+                     box (AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")) |]
+            yield [| box "awaiting_user_input with blank message text maps to AwaitingUserInput None"
+                     box { baseReq "awaiting_user_input" with message = msgDto "   " "2026-03-01T10:00:00Z" }
+                     box (AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")) |]
+            yield [| box "usage_info with tokens maps to UsageInfo"
+                     box { baseReq "usage_info" with currentTokens = 120000; tokenLimit = 200000 }
+                     box (UsageInfo(120000, 200000)) |]
+            yield [| box "usage_info clamps a negative currentTokens to zero"
+                     box { baseReq "usage_info" with currentTokens = -5; tokenLimit = 200000 }
+                     box (UsageInfo(0, 200000)) |]
+        }
+
+    [<TestCaseSource("ValidMappingCases")>]
+    member _.``a report maps to the expected domain event``
+        (name: string, req: SessionActivityRequest, expected: SessionEvent)
+        =
+        Assert.That((parseOk req).Event, Is.EqualTo expected, name)
 
     [<Test>]
     member _.``optional terminal origin maps without changing the folded event``() =
@@ -284,20 +457,6 @@ type ParseReportTests() =
                     terminalSessionId = "not-a-terminal-id" }
 
         Assert.That(error, Does.Contain "terminalSessionId")
-
-    [<Test>]
-    member _.``turn_ended maps to TurnEnded``() =
-        Assert.That((parseOk (baseReq "turn_ended")).Event, Is.EqualTo TurnEnded)
-
-    [<Test>]
-    member _.``went_idle maps to WentIdle``() =
-        Assert.That((parseOk (baseReq "went_idle")).Event, Is.EqualTo WentIdle)
-
-    [<Test>]
-    member _.``user_input_completed maps to UserInputCompleted``() =
-        Assert.That(
-            (parseOk (baseReq "user_input_completed")).Event,
-            Is.EqualTo(UserInputCompleted(ts "2026-03-01T10:00:00Z")))
 
     [<TestCase("background_agent_started")>]
     [<TestCase("background_agent_finished")>]
@@ -341,98 +500,54 @@ type ParseReportTests() =
 
         Assert.That(parseErr req, Does.Contain $"{maxToolCallIdLength}")
 
-    [<Test>]
-    member _.``user_prompt with a message maps to UserPrompt carrying that message``() =
-        let req = { baseReq "user_prompt" with message = msgDto "hello" "2026-03-01T10:00:00Z" }
-        Assert.That((parseOk req).Event, Is.EqualTo(UserPrompt(msg "hello" "2026-03-01T10:00:00Z")))
+    static member RequiredFieldRejectionCases: obj array seq =
+        seq {
+            yield [| box "intent_reported without a message is rejected (never regresses to blank)"
+                     box (baseReq "intent_reported")
+                     box "message" |]
+            yield [| box "title_bootstrap without a message is rejected"
+                     box (baseReq "title_bootstrap")
+                     box "message" |]
+            yield [| box "an unknown kind is rejected (no catch-all)"
+                     box (baseReq "session_resumed")
+                     box "unknown kind" |]
+            yield [| box "user_prompt without a message is rejected"
+                     box (baseReq "user_prompt")
+                     box "message" |]
+            yield [| box "assistant_message with a blank message text is rejected"
+                     box { baseReq "assistant_message" with message = msgDto "   " "2026-03-01T10:00:00Z" }
+                     box "message" |]
+            yield [| box "skill_invoked without a skillName is rejected"
+                     box (baseReq "skill_invoked")
+                     box "skillName" |]
+            yield [| box "usage_info with a non-positive tokenLimit is rejected"
+                     box { baseReq "usage_info" with currentTokens = 100; tokenLimit = 0 }
+                     box "tokenLimit" |]
+            yield [| box "an unknown provider is rejected"
+                     box { baseReq "turn_started" with provider = "openai" }
+                     box "provider" |]
+            yield [| box "a malformed occurredAt is rejected"
+                     box { baseReq "turn_started" with occurredAt = "not-a-date" }
+                     box "timestamp" |]
+            yield [| box "a blank sessionId is rejected"
+                     box { baseReq "turn_started" with sessionId = "  " }
+                     box "sessionId" |]
+            yield [| box "an oversized sessionId is rejected"
+                     box { baseReq "turn_started" with sessionId = String('a', maxSessionIdLength + 1) }
+                     box (string maxSessionIdLength) |]
+            yield [| box "a blank eventId is rejected"
+                     box { baseReq "turn_started" with eventId = "" }
+                     box "eventId" |]
+            yield [| box "a blank worktreePath is rejected"
+                     box { baseReq "turn_started" with worktreePath = "" }
+                     box "worktreePath" |]
+        }
 
-    [<Test>]
-    member _.``assistant_message with a message maps to AssistantMessage``() =
-        let req = { baseReq "assistant_message" with message = msgDto "hi there" "2026-03-01T10:00:00Z" }
-        Assert.That((parseOk req).Event, Is.EqualTo(AssistantMessage(msg "hi there" "2026-03-01T10:00:00Z")))
-
-    [<Test>]
-    member _.``intent_reported with a message maps to IntentReported carrying that message``() =
-        let req = { baseReq "intent_reported" with message = msgDto "investigating the fold" "2026-03-01T10:00:00Z" }
-        Assert.That((parseOk req).Event, Is.EqualTo(IntentReported(msg "investigating the fold" "2026-03-01T10:00:00Z")))
-
-    [<Test>]
-    member _.``title_reported with a message maps to TitleReported carrying that message``() =
-        let req = { baseReq "title_reported" with message = msgDto "Investigate Work Item 261312" "2026-03-01T10:00:00Z" }
-        Assert.That((parseOk req).Event, Is.EqualTo(TitleReported(msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z")))
-
-    [<Test>]
-    member _.``title_bootstrap with a message maps to TitleBootstrap carrying that message``() =
-        let req = { baseReq "title_bootstrap" with message = msgDto "Investigate Work Item 261312" "2026-03-01T10:00:00Z" }
-        Assert.That((parseOk req).Event, Is.EqualTo(TitleBootstrap(msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z")))
-
-    [<Test>]
-    member _.``intent_reported without a message is rejected (never regresses to blank)``() =
-        Assert.That(parseErr (baseReq "intent_reported"), Does.Contain "message")
-
-    [<Test>]
-    member _.``title_bootstrap without a message is rejected``() =
-        Assert.That(parseErr (baseReq "title_bootstrap"), Does.Contain "message")
-
-    [<Test>]
-    member _.``skill_invoked with a skillName maps to SkillInvoked``() =
-        let req = { baseReq "skill_invoked" with skillName = "investigate" }
-        Assert.That((parseOk req).Event, Is.EqualTo(SkillInvoked "investigate"))
-
-    [<Test>]
-    member _.``awaiting_user_input carries the question when a message is present``() =
-        let req = { baseReq "awaiting_user_input" with message = msgDto "Which file?" "2026-03-01T10:00:00Z" }
-        Assert.That(
-            (parseOk req).Event,
-            Is.EqualTo(
-                AwaitingUserInput(
-                    Some(msg "Which file?" "2026-03-01T10:00:00Z"),
-                    ts "2026-03-01T10:00:00Z")))
-
-    [<Test>]
-    member _.``awaiting_user_input with no message maps to AwaitingUserInput None``() =
-        Assert.That(
-            (parseOk (baseReq "awaiting_user_input")).Event,
-            Is.EqualTo(AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
-
-    [<Test>]
-    member _.``an unknown kind is rejected (no catch-all)``() =
-        Assert.That(parseErr (baseReq "session_resumed"), Does.Contain "unknown kind")
-
-    [<Test>]
-    member _.``user_prompt without a message is rejected``() =
-        Assert.That(parseErr (baseReq "user_prompt"), Does.Contain "message")
-
-    [<Test>]
-    member _.``assistant_message with a blank message text is rejected``() =
-        let req = { baseReq "assistant_message" with message = msgDto "   " "2026-03-01T10:00:00Z" }
-        Assert.That(parseErr req, Does.Contain "message")
-
-    [<Test>]
-    member _.``skill_invoked without a skillName is rejected``() =
-        Assert.That(parseErr (baseReq "skill_invoked"), Does.Contain "skillName")
-
-    [<Test>]
-    member _.``usage_info with tokens maps to UsageInfo``() =
-        let req = { baseReq "usage_info" with currentTokens = 120000; tokenLimit = 200000 }
-        Assert.That((parseOk req).Event, Is.EqualTo(UsageInfo(120000, 200000)))
-
-    [<Test>]
-    member _.``usage_info clamps a negative currentTokens to zero``() =
-        let req = { baseReq "usage_info" with currentTokens = -5; tokenLimit = 200000 }
-        Assert.That((parseOk req).Event, Is.EqualTo(UsageInfo(0, 200000)))
-
-    [<Test>]
-    member _.``usage_info with a non-positive tokenLimit is rejected``() =
-        Assert.That(parseErr { baseReq "usage_info" with currentTokens = 100; tokenLimit = 0 }, Does.Contain "tokenLimit")
-
-    [<Test>]
-    member _.``an unknown provider is rejected``() =
-        Assert.That(parseErr { baseReq "turn_started" with provider = "openai" }, Does.Contain "provider")
-
-    [<Test>]
-    member _.``a malformed occurredAt is rejected``() =
-        Assert.That(parseErr { baseReq "turn_started" with occurredAt = "not-a-date" }, Does.Contain "timestamp")
+    [<TestCaseSource("RequiredFieldRejectionCases")>]
+    member _.``an invalid report is rejected with a diagnostic fragment``
+        (name: string, req: SessionActivityRequest, expectedFragment: string)
+        =
+        Assert.That(parseErr req, Does.Contain expectedFragment, name)
 
     [<Test>]
     member _.``an occurredAt far in the future is clamped to now (so freshness can still decay)``() =
@@ -483,13 +598,15 @@ type ParseReportTests() =
             effectiveActivity status,
             Is.EqualTo(Some(AgentActivity.SessionTitle("Investigate Work Item 261312", ts "2026-03-01T10:06:00Z"))))
 
-    [<Test>]
-    member _.``a blank sessionId is rejected``() =
-        Assert.That(parseErr { baseReq "turn_started" with sessionId = "  " }, Does.Contain "sessionId")
+    static member SupportedSessionIdCases: string seq =
+        seq {
+            "session-123"
+            "018F7E43-251D-7DD2-BB7D-8949D7A5688A"
+            "copilot.session_42:resume"
+            String('a', maxSessionIdLength)
+        }
 
-    [<TestCase("session-123")>]
-    [<TestCase("018F7E43-251D-7DD2-BB7D-8949D7A5688A")>]
-    [<TestCase("copilot.session_42:resume")>]
+    [<TestCaseSource("SupportedSessionIdCases")>]
     member _.``a supported resume sessionId is preserved``(sessionId: string) =
         let report =
             parseOk
@@ -497,28 +614,6 @@ type ParseReportTests() =
                     sessionId = sessionId }
 
         Assert.That(report.SessionId, Is.EqualTo(SessionId sessionId))
-
-    [<Test>]
-    member _.``a sessionId at the bounded identifier limit is preserved``() =
-        let sessionId = String('a', maxSessionIdLength)
-
-        let report =
-            parseOk
-                { baseReq "turn_started" with
-                    sessionId = sessionId }
-
-        Assert.That(report.SessionId, Is.EqualTo(SessionId sessionId))
-
-    [<Test>]
-    member _.``an oversized sessionId is rejected``() =
-        let sessionId = String('a', maxSessionIdLength + 1)
-
-        Assert.That(
-            parseErr
-                { baseReq "turn_started" with
-                    sessionId = sessionId },
-            Does.Contain(string maxSessionIdLength)
-        )
 
     [<TestCase("session/id")>]
     [<TestCase("session id")>]
@@ -548,14 +643,6 @@ type ParseReportTests() =
                     sessionId = sessionId },
             Does.Contain("[A-Za-z0-9._:-]")
         )
-
-    [<Test>]
-    member _.``a blank eventId is rejected``() =
-        Assert.That(parseErr { baseReq "turn_started" with eventId = "" }, Does.Contain "eventId")
-
-    [<Test>]
-    member _.``a blank worktreePath is rejected``() =
-        Assert.That(parseErr { baseReq "turn_started" with worktreePath = "" }, Does.Contain "worktreePath")
 
     [<Test>]
     member _.``the worktree path is normalized on the parsed report``() =
@@ -635,75 +722,513 @@ type TryAcceptReportTests() =
             | Rejected reason -> Assert.That(reason, Does.Contain "unknown kind")
             | other -> Assert.Fail $"expected Rejected, got {other}")
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type HandlerTests() =
+
+    [<Test>]
+    member _.``malformed JSON response does not expose binder exception details``() =
+        withService "C:/wt/a" (fun (service, _, _) ->
+            let statusCode, body =
+                handlerResponse service.Handler "{"
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    statusCode,
+                    Is.EqualTo StatusCodes.Status400BadRequest
+                )
+                Assert.That(
+                    JsonSerializer.Deserialize<string> body,
+                    Is.EqualTo "malformed JSON"
+                )))
+
+    [<Test>]
+    member _.``valid JSON with an invalid worktree path is rejected without blaming JSON binding``() =
+        let invalidPath =
+            "C:\\wt\\" + string (char 0) + "invalid"
+
+        let request =
+            { baseReq "turn_started" with
+                worktreePath = invalidPath }
+
+        withService "C:/wt/a" (fun (service, _, _) ->
+            let statusCode, body =
+                request
+                |> JsonSerializer.Serialize
+                |> handlerResponse service.Handler
+
+            Assert.Multiple(fun () ->
+                Assert.That(statusCode, Is.EqualTo StatusCodes.Status400BadRequest)
+                Assert.That(body, Does.Contain "invalid worktreePath")
+                Assert.That(body, Does.Not.Contain "malformed JSON")))
+
+    [<Test>]
+    member _.``post-binding failure returns a retryable server error``() =
+        let resolver =
+            ProcessIdentityResolver.create (fun _ ->
+                raise (InvalidOperationException "injected resolver failure"))
+
+        withServiceSeededAndPathUsingResolver
+            "C:/wt/a"
+            ignore
+            resolver
+            (fun (service, _, _, _) ->
+                let statusCode, body =
+                    baseReq "turn_started"
+                    |> JsonSerializer.Serialize
+                    |> handlerResponse service.Handler
+
+                use document = JsonDocument.Parse body
+                let response = document.RootElement
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        statusCode,
+                        Is.EqualTo StatusCodes.Status500InternalServerError
+                    )
+                    Assert.That(
+                        response.GetProperty("recorded").GetBoolean(),
+                        Is.False
+                    )
+                    Assert.That(
+                        response.GetProperty("monitored").GetBoolean(),
+                        Is.True
+                    )
+                    Assert.That(
+                        response.GetProperty("retryable").GetBoolean(),
+                        Is.True
+                    )
+                    Assert.That(
+                        response.GetProperty("reason").GetString(),
+                        Is.EqualTo "session activity processing failed"
+                    )))
+
 
 // ── single-writer mailbox: fold → persist → feed ──────────────────────────────
+
+/// The whole observable outcome of one ingested report sequence: the folded exact instance plus the
+/// durable history it appended. Scenarios state it as data, so a sequence that disturbs a field it
+/// should not touch fails the compare instead of slipping past a handful of assertions.
+type InstanceProjection =
+    { Status: SessionLevelStatus
+      Effective: SessionLevelStatus
+      Skill: string option
+      Intent: Message option
+      Title: Message option
+      LastUser: Message option
+      LastAssistant: Message option
+      AwaitingSince: DateTimeOffset option
+      InputCompletedAt: DateTimeOffset option
+      Usage: ContextUsage option
+      Clocks: Map<string, BackgroundAgentLifecycle>
+      UpdatedAt: DateTimeOffset
+      LastSeen: DateTimeOffset
+      Events: string list }
+
+/// Acknowledged presence, then a report sequence submitted in the listed — deliberately not always
+/// chronological — order.
+type IngestScenario =
+    { Name: string
+      PresentAt: string
+      Reports: (string * string * SessionEvent) list
+      Expected: InstanceProjection }
+
+let private projectionOf (instance: StoredInstance) events =
+    { Status = instance.Status.Status
+      Effective = effectiveStatus instance.Status
+      Skill = instance.Status.Skill
+      Intent = instance.Status.Intent
+      Title = instance.Status.Title
+      LastUser = instance.Status.LastUserMessage
+      LastAssistant = instance.Status.LastAssistantMessage
+      AwaitingSince = instance.Status.AwaitingUserSince
+      InputCompletedAt = instance.Status.UserInputCompletedAt
+      Usage = instance.Status.ContextUsage
+      Clocks = instance.Status.BackgroundAgentClocks
+      UpdatedAt = instance.UpdatedAt
+      LastSeen = instance.LastSeen
+      Events = events }
+
+/// The projection of a session that only acknowledged presence: an Idle shell with no content, no
+/// clocks and no history. Each scenario overrides exactly the fields its sequence changes.
+let private projected updatedAt lastSeen =
+    { Status = SessionLevelStatus.Idle
+      Effective = SessionLevelStatus.Idle
+      Skill = None
+      Intent = None
+      Title = None
+      LastUser = None
+      LastAssistant = None
+      AwaitingSince = None
+      InputCompletedAt = None
+      Usage = None
+      Clocks = Map.empty
+      UpdatedAt = ts updatedAt
+      LastSeen = ts lastSeen
+      Events = [] }
+
+let private bgStarted eventId occurredAt toolCallId =
+    eventId, occurredAt, BackgroundAgentStarted(toolCallId, ts occurredAt)
+
+let private bgFinished eventId occurredAt toolCallId =
+    eventId, occurredAt, BackgroundAgentFinished(toolCallId, ts occurredAt)
+
+let private clocks entries =
+    entries
+    |> List.map (fun (toolCallId, startedAt, finishedAt) ->
+        toolCallId,
+        { StartedAt = startedAt |> Option.map ts
+          FinishedAt = finishedAt |> Option.map ts })
+    |> Map.ofList
+
+let private usageOf currentTokens tokenLimit =
+    { CurrentTokens = currentTokens; TokenLimit = tokenLimit }
+
+/// Sequences that differ only by event kind, order and timing. Each names the ordering or
+/// idempotency rule it proves; the shared runner asserts the projection, the durable mirror and the
+/// scheduler feed together.
+let private ingestSequences =
+    [ { Name = "turn_started makes the session Working"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports = [ "e1", "2026-03-01T10:00:00Z", TurnStarted ]
+        Expected =
+          { projected "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z" with
+              Status = SessionLevelStatus.Working
+              Effective = SessionLevelStatus.Working
+              Events = [ "e1" ] } }
+
+      { Name = "a folded sequence surfaces the last user and assistant message"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports =
+          [ "e1", "2026-03-01T10:00:00Z", TurnStarted
+            "e2", "2026-03-01T10:00:01Z", UserPrompt(msg "do it" "2026-03-01T10:00:01Z")
+            "e3", "2026-03-01T10:00:02Z", AssistantMessage(msg "on it" "2026-03-01T10:00:02Z") ]
+        Expected =
+          { projected "2026-03-01T10:00:02Z" "2026-03-01T10:00:00Z" with
+              Status = SessionLevelStatus.Working
+              Effective = SessionLevelStatus.Working
+              LastUser = Some(msg "do it" "2026-03-01T10:00:01Z")
+              LastAssistant = Some(msg "on it" "2026-03-01T10:00:02Z")
+              InputCompletedAt = Some(ts "2026-03-01T10:00:02Z")
+              Events =
+                [ "e1"
+                  "e2"
+                  "e3" ] } }
+
+      { Name = "an earlier ask_user still parks the session after a newer idle"
+        PresentAt = "2026-03-01T10:00:01Z"
+        Reports =
+          [ "e2", "2026-03-01T10:00:01Z", WentIdle
+            "e1", "2026-03-01T10:00:00Z", AwaitingUserInput(None, ts "2026-03-01T10:00:00Z") ]
+        Expected =
+          { projected "2026-03-01T10:00:01Z" "2026-03-01T10:00:01Z" with
+              Effective = SessionLevelStatus.WaitingForUser
+              AwaitingSince = Some(ts "2026-03-01T10:00:00Z")
+              Events =
+                [ "e1"
+                  "e2" ] } }
+
+      { Name = "completing the ask_user wait settles the session Idle"
+        PresentAt = "2026-03-01T10:00:01Z"
+        Reports =
+          [ "e2", "2026-03-01T10:00:01Z", WentIdle
+            "e1", "2026-03-01T10:00:00Z", AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")
+            "e3", "2026-03-01T10:00:02Z", UserInputCompleted(ts "2026-03-01T10:00:02Z") ]
+        Expected =
+          { projected "2026-03-01T10:00:02Z" "2026-03-01T10:00:01Z" with
+              AwaitingSince = Some(ts "2026-03-01T10:00:00Z")
+              InputCompletedAt = Some(ts "2026-03-01T10:00:02Z")
+              Events =
+                [ "e1"
+                  "e2"
+                  "e3" ] } }
+
+      { Name = "a background start keeps an Idle base with a Working effect"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports = [ bgStarted "bg-start" "2026-03-01T10:00:00Z" "tool-1" ]
+        Expected =
+          { projected "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z" with
+              Effective = SessionLevelStatus.Working
+              Clocks = clocks [ "tool-1", Some "2026-03-01T10:00:00Z", None ]
+              Events = [ "bg-start" ] } }
+
+      { Name = "a terminal first stays inactive and an older late start cannot resurrect it"
+        PresentAt = "2026-03-01T10:00:05Z"
+        Reports =
+          [ bgFinished "bg-finish" "2026-03-01T10:00:05Z" "tool-1"
+            bgStarted "bg-start" "2026-03-01T10:00:04Z" "tool-1" ]
+        Expected =
+          { projected "2026-03-01T10:00:05Z" "2026-03-01T10:00:05Z" with
+              Clocks =
+                clocks [ "tool-1", Some "2026-03-01T10:00:04Z", Some "2026-03-01T10:00:05Z" ]
+              Events =
+                [ "bg-start"
+                  "bg-finish" ] } }
+
+      { Name = "an older terminal after a newer start cannot finish the active agent"
+        PresentAt = "2026-03-01T10:00:06Z"
+        Reports =
+          [ bgStarted "bg-start" "2026-03-01T10:00:06Z" "tool-1"
+            bgFinished "bg-finish" "2026-03-01T10:00:05Z" "tool-1" ]
+        Expected =
+          { projected "2026-03-01T10:00:06Z" "2026-03-01T10:00:06Z" with
+              Effective = SessionLevelStatus.Working
+              Clocks =
+                clocks [ "tool-1", Some "2026-03-01T10:00:06Z", Some "2026-03-01T10:00:05Z" ]
+              Events =
+                [ "bg-finish"
+                  "bg-start" ] } }
+
+      { Name = "heartbeats expire completed clocks but keep active agents and reject older starts"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports =
+          [ bgStarted "completed-start" "2026-03-01T10:00:00Z" "completed"
+            bgFinished "completed-finish" "2026-03-01T10:00:10Z" "completed"
+            bgStarted "active-start" "2026-03-01T10:00:20Z" "active"
+            "heartbeat-1", "2026-03-01T10:04:00Z", Heartbeat
+            "heartbeat-2", "2026-03-01T10:06:00Z", Heartbeat
+            bgStarted "expired-start" "2026-03-01T10:00:05Z" "completed" ]
+        Expected =
+          { projected "2026-03-01T10:00:20Z" "2026-03-01T10:06:00Z" with
+              Effective = SessionLevelStatus.Working
+              Clocks = clocks [ "active", Some "2026-03-01T10:00:20Z", None ]
+              Events =
+                [ "completed-start"
+                  "completed-finish"
+                  "active-start" ] } }
+
+      { Name = "a delayed finish records event-time history without regressing newer root work"
+        PresentAt = "2026-03-01T10:55:00Z"
+        Reports =
+          [ bgStarted "bg-start" "2026-03-01T10:55:00Z" "tool-1"
+            "heartbeat", "2026-03-01T10:59:00Z", Heartbeat
+            "root-start", "2026-03-01T11:00:00Z", TurnStarted
+            "root-skill", "2026-03-01T11:00:01Z", SkillInvoked "review"
+            bgFinished "bg-finish" "2026-03-01T10:56:00Z" "tool-1" ]
+        Expected =
+          { projected "2026-03-01T11:00:01Z" "2026-03-01T10:59:00Z" with
+              Status = SessionLevelStatus.Working
+              Effective = SessionLevelStatus.Working
+              Skill = Some "review"
+              Clocks =
+                clocks [ "tool-1", Some "2026-03-01T10:55:00Z", Some "2026-03-01T10:56:00Z" ]
+              Events =
+                [ "bg-start"
+                  "bg-finish"
+                  "root-start"
+                  "root-skill" ] } }
+
+      { Name = "a duplicate background event id changes neither lifecycle nor history"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports =
+          [ bgStarted "same-event" "2026-03-01T10:00:00Z" "tool-1"
+            bgFinished "same-event" "2026-03-01T10:10:00Z" "tool-1" ]
+        Expected =
+          { projected "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z" with
+              Effective = SessionLevelStatus.Working
+              Clocks = clocks [ "tool-1", Some "2026-03-01T10:00:00Z", None ]
+              Events = [ "same-event" ] } }
+
+      { Name = "a replayed event_id neither appends a row nor resurrects the earlier status"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports =
+          [ "e1", "2026-03-01T10:00:00Z", TurnStarted
+            "e2", "2026-03-01T10:00:05Z", WentIdle
+            "e1", "2026-03-01T10:00:00Z", TurnStarted ]
+        Expected =
+          { projected "2026-03-01T10:00:05Z" "2026-03-01T10:00:00Z" with
+              Events =
+                [ "e1"
+                  "e2" ] } }
+
+      { Name = "an out-of-order event is retained for idempotency but does not regress live state"
+        PresentAt = "2026-03-01T10:00:05Z"
+        Reports =
+          [ "e2", "2026-03-01T10:00:05Z", TurnStarted
+            "e1", "2026-03-01T10:00:00Z", AssistantMessage(msg "stale" "2026-03-01T10:00:00Z") ]
+        Expected =
+          { projected "2026-03-01T10:00:05Z" "2026-03-01T10:00:05Z" with
+              Status = SessionLevelStatus.Working
+              Effective = SessionLevelStatus.Working
+              Events =
+                [ "e1"
+                  "e2" ] } }
+
+      { Name = "an older title bootstrap cannot overwrite a newer live title"
+        PresentAt = "2026-03-01T10:00:10Z"
+        Reports =
+          [ "e1", "2026-03-01T10:00:10Z", TitleReported(msg "New live title" "2026-03-01T10:00:10Z")
+            "tb1", "2026-03-01T10:00:05Z", TitleBootstrap(msg "Old snapshot" "2026-03-01T10:00:05Z") ]
+        Expected =
+          { projected "2026-03-01T10:00:10Z" "2026-03-01T10:00:10Z" with
+              Title = Some(msg "New live title" "2026-03-01T10:00:10Z")
+              Events = [ "e1" ] } }
+
+      { Name = "a newer intent arriving first does not block an older lifecycle transition"
+        PresentAt = "2026-03-01T10:00:06Z"
+        Reports =
+          [ "i1", "2026-03-01T10:00:06Z", IntentReported(msg "Implementing the fix" "2026-03-01T10:00:06Z")
+            "e1", "2026-03-01T10:00:05Z", TurnStarted ]
+        Expected =
+          { projected "2026-03-01T10:00:06Z" "2026-03-01T10:00:06Z" with
+              Status = SessionLevelStatus.Working
+              Effective = SessionLevelStatus.Working
+              Intent = Some(msg "Implementing the fix" "2026-03-01T10:00:06Z")
+              Events =
+                [ "e1"
+                  "i1" ] } }
+
+      { Name = "a title arriving after a newer lifecycle event still updates the activity field"
+        PresentAt = "2026-03-01T10:00:04Z"
+        Reports =
+          [ "t1", "2026-03-01T10:00:04Z", TitleReported(msg "Initial title" "2026-03-01T10:00:04Z")
+            "e1", "2026-03-01T10:00:06Z", TurnStarted
+            "t2", "2026-03-01T10:00:05Z", TitleReported(msg "Updated title" "2026-03-01T10:00:05Z") ]
+        Expected =
+          { projected "2026-03-01T10:00:06Z" "2026-03-01T10:00:04Z" with
+              Status = SessionLevelStatus.Working
+              Effective = SessionLevelStatus.Working
+              Title = Some(msg "Updated title" "2026-03-01T10:00:05Z")
+              Events =
+                [ "t1"
+                  "t2"
+                  "e1" ] } }
+
+      { Name = "a real event never regresses last_seen below a fresher heartbeat"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports =
+          [ "e1", "2026-03-01T10:00:00Z", AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")
+            "hb1", "2026-03-01T10:02:00Z", Heartbeat
+            "e2", "2026-03-01T10:01:00Z", UserPrompt(msg "go" "2026-03-01T10:01:00Z") ]
+        Expected =
+          { projected "2026-03-01T10:01:00Z" "2026-03-01T10:02:00Z" with
+              Status = SessionLevelStatus.Working
+              Effective = SessionLevelStatus.Working
+              LastUser = Some(msg "go" "2026-03-01T10:01:00Z")
+              LastAssistant = Some(msg "hi" "2026-03-01T10:00:00Z")
+              InputCompletedAt = Some(ts "2026-03-01T10:01:00Z")
+              Events =
+                [ "e1"
+                  "e2" ] } }
+
+      { Name = "a usage gauge records ContextUsage without moving the status clock or appending"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports =
+          [ "e1", "2026-03-01T10:00:00Z", TurnStarted
+            "u1", "2026-03-01T10:00:05Z", UsageInfo(120000, 200000) ]
+        Expected =
+          { projected "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z" with
+              Status = SessionLevelStatus.Working
+              Effective = SessionLevelStatus.Working
+              Usage = Some(usageOf 120000 200000)
+              Events = [ "e1" ] } }
+
+      { Name = "a later usage report does not block a slightly-earlier status transition"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports =
+          [ "e1", "2026-03-01T10:00:00Z", TurnStarted
+            "u1", "2026-03-01T10:00:05Z", UsageInfo(120000, 200000)
+            "e2", "2026-03-01T10:00:03Z", TurnEnded ]
+        Expected =
+          { projected "2026-03-01T10:00:03Z" "2026-03-01T10:00:00Z" with
+              Usage = Some(usageOf 120000 200000)
+              Events =
+                [ "e1"
+                  "e2" ] } }
+
+      { Name = "a usage snapshot arriving after a newer status event is not discarded"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports =
+          [ "e1", "2026-03-01T10:00:00Z", TurnStarted
+            "e2", "2026-03-01T10:00:05Z", TurnEnded
+            "u1", "2026-03-01T10:00:03Z", UsageInfo(50000, 200000) ]
+        Expected =
+          { projected "2026-03-01T10:00:05Z" "2026-03-01T10:00:00Z" with
+              Usage = Some(usageOf 50000 200000)
+              Events =
+                [ "e1"
+                  "e2" ] } }
+
+      { Name = "an out-of-order older usage snapshot does not clobber a fresher gauge"
+        PresentAt = "2026-03-01T10:00:00Z"
+        Reports =
+          [ "e1", "2026-03-01T10:00:00Z", TurnStarted
+            "u2", "2026-03-01T10:00:10Z", UsageInfo(150000, 200000)
+            "u1", "2026-03-01T10:00:05Z", UsageInfo(80000, 200000) ]
+        Expected =
+          { projected "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z" with
+              Status = SessionLevelStatus.Working
+              Effective = SessionLevelStatus.Working
+              Usage = Some(usageOf 150000 200000)
+              Events = [ "e1" ] } } ]
+
+/// A retained durable row the restart rebuild leaves out of the live map, plus the report that must
+/// revive it. The two revival paths differ only in the report kind and whether the reporter
+/// re-announces presence first.
+type RehydrationScenario =
+    { Name: string
+      PresentAt: string option
+      Report: string * string * SessionEvent
+      ExpectedUsage: ContextUsage option }
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type IngestTests() =
 
-    [<Test>]
-    member _.``ingesting turn_started makes the session Working in the live map``() =
-        withService "C:/wt/a" (fun (svc, _, _) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            let live = svc.LiveSnapshot()
-            Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo SessionLevelStatus.Working))
+    static member SequenceCases: TestCaseData seq =
+        ingestSequences
+        |> Seq.map (fun scenario -> TestCaseData(scenario).SetName(scenario.Name))
 
-    [<Test>]
-    member _.``an ingested status is fed to the scheduler``() =
-        withService "C:/wt/a" (fun (svc, agent, _) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.LiveSnapshot() |> ignore // barrier: the mailbox has posted UpdateSessionStatus by now
-            match schedulerStatus agent "s1" with
-            | Some stored -> Assert.That(stored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
-            | None -> Assert.Fail "scheduler never received the session status")
+    static member RehydrationCases: TestCaseData seq =
+        [ { Name = "a heartbeat rehydrates a retained durable session after restart"
+            PresentAt = None
+            Report = "hb1", "2026-03-01T10:30:00Z", Heartbeat
+            ExpectedUsage = None }
+          { Name = "usage rehydrates a retained durable session after restart"
+            PresentAt = Some "2026-03-01T10:30:00Z"
+            Report = "u1", "2026-03-01T10:30:00Z", UsageInfo(120000, 200000)
+            ExpectedUsage = Some(usageOf 120000 200000) } ]
+        |> Seq.map (fun scenario -> TestCaseData(scenario).SetName(scenario.Name))
 
-    [<Test>]
-    member _.``a folded sequence surfaces the last user + assistant message and status``() =
-        withService "C:/wt/a" (fun (svc, _, _) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:01Z" (UserPrompt(msg "do it" "2026-03-01T10:00:01Z")))
-            svc.Submit(mkReport "s1" "C:/wt/a" "e3" "2026-03-01T10:00:02Z" (AssistantMessage(msg "on it" "2026-03-01T10:00:02Z")))
-            let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
-            Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Working)
-            Assert.That(s.LastUserMessage, Is.EqualTo(Some(msg "do it" "2026-03-01T10:00:01Z")))
-            Assert.That(s.LastAssistantMessage, Is.EqualTo(Some(msg "on it" "2026-03-01T10:00:02Z"))))
+    [<TestCaseSource("SequenceCases")>]
+    member _.``an ingested report sequence projects the expected instance and history``
+        (scenario: IngestScenario)
+        =
+        withServiceAndPath "C:/wt/a" (fun (svc, agent, store, dbPath) ->
+            present svc "s1" "C:/wt/a" (ts scenario.PresentAt) |> ignore
 
-    [<Test>]
-    member _.``ask_user state is correct when idle arrives before the earlier request``() =
-        withService "C:/wt/a" (fun (svc, _, store) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:01Z" WentIdle)
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "e1"
-                    "2026-03-01T10:00:00Z"
-                    (AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
+            scenario.Reports
+            |> List.iter (fun (eventId, occurredAt, event) ->
+                svc.Submit(mkReport "s1" "C:/wt/a" eventId occurredAt event))
 
-            let waiting = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+
             Assert.Multiple(fun () ->
-                Assert.That(effectiveStatus waiting.Status, Is.EqualTo SessionLevelStatus.WaitingForUser)
-                Assert.That(waiting.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:01Z")))
+                Assert.That(projectionOf live (persistedEventIds dbPath), Is.EqualTo scenario.Expected)
+                Assert.That(
+                    store.StatusBySession(SessionId "s1"),
+                    Is.EqualTo(Some live),
+                    "the durable mirror holds the same exact instance"
+                )
+                Assert.That(
+                    schedulerStatus agent "s1",
+                    Is.EqualTo(Some live),
+                    "the card path is fed the same exact instance"
+                )))
 
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "e3"
-                    "2026-03-01T10:00:02Z"
-                    (UserInputCompleted(ts "2026-03-01T10:00:02Z")))
-
-            let idle = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
-            Assert.Multiple(fun () ->
-                Assert.That(effectiveStatus idle.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(effectiveStatus persisted.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(idle.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:02Z"))))
+    [<Test>]
+    member _.``a history report without presence is dropped``() =
+        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            Assert.That(svc.LiveSnapshot(), Is.Empty)
+            Assert.That(eventCount dbPath, Is.Zero))
 
     [<Test>]
     member _.``a system reminder cannot release a pending ask_user wait``() =
         withService "C:/wt/a" (fun (svc, agent, _) ->
+            present svc "s1" "C:/wt/a" (ts "2026-03-01T10:00:00Z") |> ignore
             svc.Submit(
                 mkReport
                     "s1"
@@ -726,8 +1251,10 @@ type IngestTests() =
             Assert.That(status, Is.EqualTo SessionLevelStatus.WaitingForUser))
 
     [<Test>]
-    member _.``a background start as the first report creates a Working shell and publishes the authoritative row``() =
-        withService "C:/wt/a" (fun (svc, agent, store) ->
+    member _.``the first history report publishes the authoritative worktree representative``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            let worktree = WorktreePath(PathUtils.normalizePath "C:/wt/a")
+            present svc "s1" "C:/wt/a" (ts "2026-03-01T10:00:00Z") |> ignore
             svc.Submit(
                 mkReport
                     "s1"
@@ -735,244 +1262,23 @@ type IngestTests() =
                     "bg-start"
                     "2026-03-01T10:00:00Z"
                     (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
+            svc.LiveSnapshot() |> ignore
 
-            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             let persisted = store.StatusBySession(SessionId "s1") |> Option.get
-            let latestSessionId =
-                store.LatestSessionIdForWorktree(WorktreePath(PathUtils.normalizePath "C:/wt/a"))
-            let retained = store.RetainedByWorktree() |> Map.find (PathUtils.normalizePath "C:/wt/a")
+            let retained = store.RetainedByWorktree() |> Map.find (WorktreePath.value worktree)
 
             Assert.Multiple(fun () ->
-                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Idle, "the parent base is an Idle shell")
-                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
                 Assert.That(
-                    live.Status.BackgroundAgentClocks,
-                    Is.EqualTo(
-                        Map.ofList
-                            [ "tool-1",
-                              { StartedAt = Some(ts "2026-03-01T10:00:00Z")
-                                FinishedAt = None } ]))
-                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
-                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
-                Assert.That(persisted.Status.BackgroundAgentClocks, Is.Empty)
-                Assert.That(
-                    persisted,
-                    Is.EqualTo(
-                        { live with
-                            Status.BackgroundAgentClocks = Map.empty }
-                    )
+                    store.LatestSessionIdForWorktree worktree,
+                    Is.EqualTo(Some(SessionId "s1"))
                 )
-                Assert.That(latestSessionId, Is.EqualTo(Some "s1"))
-                Assert.That(retained, Is.EqualTo persisted)
-                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
-
-    [<Test>]
-    member _.``a terminal first stays inactive and an older late start cannot resurrect it``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, agent, store, dbPath) ->
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "bg-finish"
-                    "2026-03-01T10:00:05Z"
-                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:05Z")))
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "bg-start"
-                    "2026-03-01T10:00:04Z"
-                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:04Z")))
-
-            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
-            let events = persistedEvents dbPath
-
-            Assert.Multiple(fun () ->
-                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(retained.SessionId, Is.EqualTo persisted.SessionId)
+                Assert.That(retained.UpdatedAt, Is.EqualTo persisted.UpdatedAt)
                 Assert.That(
-                    live.Status.BackgroundAgentClocks["tool-1"],
-                    Is.EqualTo(
-                        { StartedAt = Some(ts "2026-03-01T10:00:04Z")
-                          FinishedAt = Some(ts "2026-03-01T10:00:05Z") }))
-                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z"))
-                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"))
-                Assert.That(
-                    persisted,
-                    Is.EqualTo(
-                        { live with
-                            Status.BackgroundAgentClocks = Map.empty }
-                    )
-                )
-                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))
-                Assert.That(events |> List.map _.Status, Is.EqualTo([ "working"; "idle" ]))))
-
-    [<Test>]
-    member _.``heartbeats expire completed clocks without removing active agents or accepting older starts``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, agent, _, dbPath) ->
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "completed-start"
-                    "2026-03-01T10:00:00Z"
-                    (BackgroundAgentStarted("completed", ts "2026-03-01T10:00:00Z")))
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "completed-finish"
-                    "2026-03-01T10:00:10Z"
-                    (BackgroundAgentFinished("completed", ts "2026-03-01T10:00:10Z")))
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "active-start"
-                    "2026-03-01T10:00:20Z"
-                    (BackgroundAgentStarted("active", ts "2026-03-01T10:00:20Z")))
-            svc.Submit(mkReport "s1" "C:/wt/a" "heartbeat-1" "2026-03-01T10:04:00Z" Heartbeat)
-            svc.Submit(mkReport "s1" "C:/wt/a" "heartbeat-2" "2026-03-01T10:06:00Z" Heartbeat)
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "expired-start"
-                    "2026-03-01T10:00:05Z"
-                    (BackgroundAgentStarted("completed", ts "2026-03-01T10:00:05Z")))
-
-            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            let events = persistedEvents dbPath
-
-            Assert.Multiple(fun () ->
-                Assert.That(
-                    live.Status.BackgroundAgentClocks,
-                    Is.EqualTo(
-                        Map.ofList
-                            [ "active",
-                              { StartedAt = Some(ts "2026-03-01T10:00:20Z")
-                                FinishedAt = None } ])
-                )
-                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
-                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:06:00Z"))
-                Assert.That(events |> List.exists (fun row -> row.EventId = "expired-start"), Is.False)
-                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
-
-    [<Test>]
-    member _.``an older terminal after a newer start cannot finish the active agent``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, agent, store, dbPath) ->
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "bg-start"
-                    "2026-03-01T10:00:06Z"
-                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:06Z")))
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "bg-finish"
-                    "2026-03-01T10:00:05Z"
-                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:05Z")))
-
-            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
-            let events = persistedEvents dbPath
-
-            Assert.Multiple(fun () ->
-                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
-                Assert.That(
-                    live.Status.BackgroundAgentClocks["tool-1"],
-                    Is.EqualTo(
-                        { StartedAt = Some(ts "2026-03-01T10:00:06Z")
-                          FinishedAt = Some(ts "2026-03-01T10:00:05Z") }))
-                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:06Z"))
-                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z"))
-                Assert.That(persisted.Status.BackgroundAgentClocks, Is.Empty)
-                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))
-                Assert.That(events |> List.map _.Status, Is.EqualTo([ "idle"; "working" ]))))
-
-    [<Test>]
-    member _.``a delayed finish within retention records event-time history without regressing newer root work``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, agent, store, dbPath) ->
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "bg-start"
-                    "2026-03-01T10:55:00Z"
-                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:55:00Z")))
-            svc.Submit(mkReport "s1" "C:/wt/a" "root-start" "2026-03-01T11:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "root-skill" "2026-03-01T11:00:01Z" (SkillInvoked "review"))
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "bg-finish"
-                    "2026-03-01T10:56:00Z"
-                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:56:00Z")))
-
-            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
-            let finishRow =
-                persistedEvents dbPath
-                |> List.find (fun row -> row.EventId = "bg-finish")
-
-            Assert.Multiple(fun () ->
-                Assert.That(finishRow.Status, Is.EqualTo "idle")
-                Assert.That(finishRow.Skill, Is.EqualTo(None))
-                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
-                Assert.That(live.Status.Skill, Is.EqualTo(Some "review"))
-                Assert.That(
-                    live.Status.BackgroundAgentClocks["tool-1"],
-                    Is.EqualTo(
-                        { StartedAt = Some(ts "2026-03-01T10:55:00Z")
-                          FinishedAt = Some(ts "2026-03-01T10:56:00Z") }))
-                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
-                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
-                Assert.That(
-                    persisted,
-                    Is.EqualTo(
-                        { live with
-                            Status.BackgroundAgentClocks = Map.empty }
-                    )
-                )
-                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
-
-    [<Test>]
-    member _.``a duplicate background event id changes neither lifecycle nor history``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "same-event"
-                    "2026-03-01T10:00:00Z"
-                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "same-event"
-                    "2026-03-01T10:10:00Z"
-                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:10:00Z")))
-
-            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            let events = persistedEvents dbPath
-
-            Assert.Multiple(fun () ->
-                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
-                Assert.That(
-                    live.Status.BackgroundAgentClocks,
-                    Is.EqualTo(
-                        Map.ofList
-                            [ "tool-1",
-                              { StartedAt = Some(ts "2026-03-01T10:00:00Z")
-                                FinishedAt = None } ]))
-                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
-                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
-                Assert.That(events |> List.map _.Kind, Is.EqualTo([ "background_agent_started" ]))))
+                    retained.Status.BackgroundAgentClocks,
+                    Is.Empty,
+                    "the retained worktree representative carries no per-process clocks"
+                )))
 
     [<TestCase("status", "turn_ended")>]
     [<TestCase("status", "went_idle")>]
@@ -984,7 +1290,7 @@ type IngestTests() =
     [<TestCase("activity", "went_idle")>]
     [<TestCase("background", "turn_ended")>]
     [<TestCase("background", "went_idle")>]
-    member _.``the first report after a stale crash closes old agents and later idle settles``(
+    member _.``the first history report after renewed presence closes old agents and later idle settles``(
         resumePath: string,
         terminalKind: string
     ) =
@@ -993,6 +1299,7 @@ type IngestTests() =
         let oldStart = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
 
         withService worktree (fun (svc, agent, store) ->
+            present svc "s1" worktree oldStart |> ignore
             svc.Submit(
                 mkReport
                     "s1"
@@ -1001,18 +1308,21 @@ type IngestTests() =
                     (oldStart.ToString("O"))
                     (BackgroundAgentStarted("crashed-tool", oldStart)))
             svc.LiveSnapshot() |> ignore
+            present svc "s1" worktree now |> ignore
             svc.Submit(mkReport "s1" worktree "resume" (now.ToString("O")) (resumePathEvent resumePath now))
             let resumed = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             let durableAfterResume = store.StatusBySession(SessionId "s1") |> Option.get
 
             Assert.Multiple(fun () ->
                 Assert.That(
-                    resumed.Status.BackgroundAgentClocks
-                    |> Map.containsKey "crashed-tool",
+                    resumed.Status.BackgroundAgentClocks |> Map.containsKey "crashed-tool",
                     Is.False,
                     "the live fold drops the crashed agent"
                 )
-                Assert.That(durableAfterResume.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(
+                    durableAfterResume.Status.BackgroundAgentClocks,
+                    Is.EqualTo resumed.Status.BackgroundAgentClocks
+                )
                 Assert.That(resumed.LastSeen, Is.EqualTo now, "the resume report refreshes liveness only after cleanup")
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some resumed)))
 
@@ -1040,6 +1350,7 @@ type IngestTests() =
         let startedAt = now.AddSeconds(-30.0)
 
         withService worktree (fun (svc, _, store) ->
+            present svc "s1" worktree startedAt |> ignore
             svc.Submit(
                 mkReport
                     "s1"
@@ -1055,12 +1366,12 @@ type IngestTests() =
                 Assert.That(
                     live.Status.BackgroundAgentClocks,
                     Is.EqualTo(
-                        Map.ofList
-                            [ "tool-1",
-                              { StartedAt = Some startedAt
-                                FinishedAt = None } ])
+                        Map.ofList [ "tool-1", { StartedAt = Some startedAt; FinishedAt = None } ])
                 )
-                Assert.That(durable.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(
+                    durable.Status.BackgroundAgentClocks,
+                    Is.EqualTo live.Status.BackgroundAgentClocks
+                )
                 Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)))
 
     [<Test>]
@@ -1070,6 +1381,7 @@ type IngestTests() =
         let oldStart = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
 
         withService worktree (fun (svc, _, store) ->
+            present svc "s1" worktree oldStart |> ignore
             svc.Submit(
                 mkReport
                     "s1"
@@ -1088,11 +1400,7 @@ type IngestTests() =
             let resumed = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.That(
                 resumed.Status.BackgroundAgentClocks,
-                Is.EqualTo(
-                    Map.ofList
-                        [ "tool-1",
-                          { StartedAt = Some now
-                            FinishedAt = None } ])
+                Is.EqualTo(Map.ofList [ "tool-1", { StartedAt = Some now; FinishedAt = None } ])
             )
 
             svc.Submit(
@@ -1109,29 +1417,30 @@ type IngestTests() =
             Assert.Multiple(fun () ->
                 Assert.That(effectiveStatus settled.Status, Is.EqualTo SessionLevelStatus.Idle)
                 Assert.That(effectiveStatus durable.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(durable.Status.BackgroundAgentClocks, Is.Empty)))
+                Assert.That(
+                    durable.Status.BackgroundAgentClocks,
+                    Is.EqualTo settled.Status.BackgroundAgentClocks
+                )))
 
     [<Test>]
     member _.``background lifecycle preserves parent activity and footer fields``() =
         let parent =
-            { SessionId = SessionId "s1"
-              TerminalSessionId = None
-              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
-              Provider = CopilotCli
-              Status =
+            { instanceOf
+                "s1"
+                "C:/wt/a"
                 { Status = SessionLevelStatus.Idle
                   Skill = Some "review"
                   Intent = Some(msg "reviewing the implementation" "2026-03-01T09:55:00Z")
                   Title = Some(msg "Review lifecycle integration" "2026-03-01T09:56:00Z")
                   LastUserMessage = Some(msg "review this" "2026-03-01T09:57:00Z")
                   LastAssistantMessage = Some(msg "on it" "2026-03-01T09:58:00Z")
-                  ContextUsage = Some { CurrentTokens = 50000; TokenLimit = 200000 }
+                  ContextUsage = Some(usageOf 50000 200000)
                   AwaitingUserSince = None
                   UserInputCompletedAt = None
                   BackgroundAgentClocks = Map.empty }
-              UpdatedAt = ts "2026-03-01T09:59:00Z"
-              LastSeen = ts "2026-03-01T09:59:00Z"
-              ContextUsageAt = Some(ts "2026-03-01T09:58:30Z") }
+                (ts "2026-03-01T09:59:00Z")
+                (ts "2026-03-01T09:59:00Z") with
+                ContextUsageAt = Some(ts "2026-03-01T09:58:30Z") }
 
         withServiceSeeded
             "C:/wt/a"
@@ -1149,57 +1458,22 @@ type IngestTests() =
                 let persisted = store.StatusBySession(SessionId "s1") |> Option.get
 
                 Assert.Multiple(fun () ->
-                    Assert.That(live.Status.Skill, Is.EqualTo parent.Status.Skill)
-                    Assert.That(live.Status.Intent, Is.EqualTo parent.Status.Intent)
-                    Assert.That(live.Status.Title, Is.EqualTo parent.Status.Title)
-                    Assert.That(live.Status.LastUserMessage, Is.EqualTo parent.Status.LastUserMessage)
-                    Assert.That(live.Status.LastAssistantMessage, Is.EqualTo parent.Status.LastAssistantMessage)
-                    Assert.That(live.Status.ContextUsage, Is.EqualTo parent.Status.ContextUsage)
+                    Assert.That(
+                        { live.Status with BackgroundAgentClocks = Map.empty },
+                        Is.EqualTo parent.Status,
+                        "a background start leaves every parent field untouched"
+                    )
                     Assert.That(live.ContextUsageAt, Is.EqualTo parent.ContextUsageAt)
                     Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
                     Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
-                    Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
-                    Assert.That(
-                        persisted,
-                        Is.EqualTo(
-                            { live with
-                                Status.BackgroundAgentClocks = Map.empty }
-                        )
-                    )
+                    Assert.That(live.LastSeen, Is.EqualTo parent.LastSeen)
+                    Assert.That(persisted, Is.EqualTo live)
                     Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
-
-    [<Test>]
-    member _.``background lifecycle history records the resulting effective status``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "bg-start"
-                    "2026-03-01T10:00:00Z"
-                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
-            svc.Submit(
-                mkReport
-                    "s1"
-                    "C:/wt/a"
-                    "bg-finish"
-                    "2026-03-01T10:00:05Z"
-                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:05Z")))
-            svc.LiveSnapshot() |> ignore
-
-            let history =
-                persistedEvents dbPath
-                |> List.map (fun row -> row.Kind, row.Status)
-
-            Assert.That(
-                history,
-                Is.EqualTo(
-                    [ "background_agent_started", "working"
-                      "background_agent_finished", "idle" ])))
 
     [<Test>]
     member _.``ingested events are persisted to the durable mirror``() =
         withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
+            present svc "s1" "C:/wt/a" (ts "2026-03-01T10:00:00Z") |> ignore
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
             svc.LiveSnapshot() |> ignore
             let loaded = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z")
@@ -1207,35 +1481,10 @@ type IngestTests() =
             Assert.That(eventCount dbPath, Is.EqualTo 1))
 
     [<Test>]
-    member _.``a duplicate event_id is a no-op: no second event row, status unchanged``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" WentIdle)
-            svc.LiveSnapshot() |> ignore
-            // Replay the first event verbatim.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            let live = svc.LiveSnapshot()
-            Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo SessionLevelStatus.Idle, "replay must not resurrect Working")
-            Assert.That(eventCount dbPath, Is.EqualTo 2, "the duplicate event_id must be deduped"))
-
-    [<Test>]
-    member _.``an out-of-order event is retained for idempotency but does not regress live state``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" TurnStarted)
-            svc.LiveSnapshot() |> ignore
-            // An older, distinct event arrives late.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "stale" "2026-03-01T10:00:00Z")))
-            let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
-            Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Working)
-            Assert.That(s.LastAssistantMessage, Is.EqualTo None, "the stale message must not overwrite live state")
-            Assert.That(eventCount dbPath, Is.EqualTo 2)
-            let stored = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun s -> s.SessionId = SessionId "s1")
-            Assert.That(stored.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z")))
-
-    [<Test>]
     member _.``title bootstrap persists without an activity event and cannot block an earlier lifecycle event``() =
         withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
             let title = msg "Investigate Intent Title Runtime" "2026-03-01T10:00:05Z"
+            present svc "s1" "C:/wt/a" title.At |> ignore
             svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:00:05Z" (TitleBootstrap title))
 
             let hydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
@@ -1244,7 +1493,7 @@ type IngestTests() =
             Assert.That(hydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "a bootstrap-only session is retained durably")
             Assert.That(eventCount dbPath, Is.Zero, "bootstrap is not an activity event")
             let durable = store.LoadLiveStatuses(ts "2026-03-01T09:00:00Z") |> List.find (fun s -> s.SessionId = SessionId "s1")
-            Assert.That(durable.Status.Title, Is.EqualTo(Some title), "bootstrap title is persisted in session_status")
+            Assert.That(durable.Status.Title, Is.EqualTo(Some title), "bootstrap title is persisted on the exact instance")
 
             // A replayed lifecycle event has an older SDK timestamp but must still apply after the
             // newer join-time hydration report.
@@ -1259,41 +1508,34 @@ type IngestTests() =
     [<Test>]
     member _.``title bootstrap revives a retained durable session without losing footer state``() =
         let retained =
-            { SessionId = SessionId "s1"
-              TerminalSessionId = None
-              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
-              Provider = CopilotCli
-              Status =
-                { Status = SessionLevelStatus.Working
-                  Skill = Some "review"
-                  Intent = Some(msg "reviewing the fix" "2026-03-01T07:58:00Z")
-                  Title = Some(msg "Old title" "2026-03-01T07:59:00Z")
-                  LastUserMessage = Some(msg "resume this" "2026-03-01T07:58:30Z")
-                  LastAssistantMessage = Some(msg "working on it" "2026-03-01T07:59:30Z")
-                  ContextUsage = None
-                  AwaitingUserSince = None
-                  UserInputCompletedAt = None
-                  BackgroundAgentClocks = Map.empty }
-              UpdatedAt = ts "2026-03-01T08:00:00Z"
-              LastSeen = ts "2026-03-01T08:00:00Z"
-              ContextUsageAt = None }
+            instanceOf
+                "s1"
+                "C:/wt/a"
+                { emptyStatus with
+                    Status = SessionLevelStatus.Working
+                    Skill = Some "review"
+                    Intent = Some(msg "reviewing the fix" "2026-03-01T07:58:00Z")
+                    Title = Some(msg "Old title" "2026-03-01T07:59:00Z")
+                    LastUserMessage = Some(msg "resume this" "2026-03-01T07:58:30Z")
+                    LastAssistantMessage = Some(msg "working on it" "2026-03-01T07:59:30Z") }
+                (ts "2026-03-01T08:00:00Z")
+                (ts "2026-03-01T08:00:00Z")
 
         withServiceSeededAndPath
             "C:/wt/a"
             (fun store -> store.UpsertStatus retained)
             (fun (svc, _, store, dbPath) ->
                 let title = msg "Current metadata title" "2026-03-01T10:30:00Z"
+                present svc "s1" "C:/wt/a" (ts "2026-03-01T10:30:00Z") |> ignore
                 svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:30:00Z" (TitleBootstrap title))
 
                 let hydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
                 Assert.Multiple(fun () ->
-                    Assert.That(hydrated.Status.Status, Is.EqualTo SessionLevelStatus.Working)
-                    Assert.That(hydrated.Status.Skill, Is.EqualTo(Some "review"))
-                    Assert.That(hydrated.Status.Intent, Is.EqualTo retained.Status.Intent)
-                    Assert.That(hydrated.Status.Title, Is.EqualTo(Some title))
-                    Assert.That(hydrated.Status.LastUserMessage, Is.EqualTo retained.Status.LastUserMessage)
-                    Assert.That(hydrated.Status.LastAssistantMessage, Is.EqualTo retained.Status.LastAssistantMessage)
-                    Assert.That(hydrated.Status.BackgroundAgentClocks, Is.Empty)
+                    Assert.That(
+                        hydrated.Status,
+                        Is.EqualTo { retained.Status with Title = Some title },
+                        "bootstrap replaces only the title on the retained fold"
+                    )
                     Assert.That(hydrated.UpdatedAt, Is.EqualTo retained.UpdatedAt)
                     Assert.That(hydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:30:00Z")))
 
@@ -1301,62 +1543,16 @@ type IngestTests() =
                 Assert.That(durable, Is.EqualTo hydrated, "mailbox and durable store must use the same hydrated row")
                 Assert.That(eventCount dbPath, Is.Zero)
 
-                svc.Submit(mkReport "s1" "C:/wt/a" "idle" "2026-03-01T10:30:01Z" WentIdle)
+                svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:31:00Z" WentIdle)
                 let settled = svc.LiveSnapshot() |> Map.find (SessionId "s1")
                 Assert.That(effectiveStatus settled.Status, Is.EqualTo SessionLevelStatus.Idle))
-
-    [<Test>]
-    member _.``an older title bootstrap cannot overwrite a newer live title``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
-            let liveTitle = msg "New live title" "2026-03-01T10:00:10Z"
-            let staleSnapshot = msg "Old snapshot" "2026-03-01T10:00:05Z"
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:10Z" (TitleReported liveTitle))
-            svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:00:05Z" (TitleBootstrap staleSnapshot))
-
-            let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            Assert.That(s.Status.Title, Is.EqualTo(Some liveTitle))
-            Assert.That(s.UpdatedAt, Is.EqualTo DateTimeOffset.MinValue, "title reports do not advance the lifecycle clock")
-            Assert.That(eventCount dbPath, Is.EqualTo 1))
-
-    [<Test>]
-    member _.``a newer intent arriving first does not block an older lifecycle transition``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
-            let intent = msg "Implementing the fix" "2026-03-01T10:00:06Z"
-            svc.Submit(mkReport "s1" "C:/wt/a" "i1" "2026-03-01T10:00:06Z" (IntentReported intent))
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:05Z" TurnStarted)
-
-            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            Assert.Multiple(fun () ->
-                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
-                Assert.That(live.Status.Intent, Is.EqualTo(Some intent))
-                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "intent must not advance the lifecycle clock")
-                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z"), "the newer report still advances openness"))
-            Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some live))
-            Assert.That(eventCount dbPath, Is.EqualTo 2))
-
-    [<Test>]
-    member _.``a title arriving after a newer lifecycle event still updates the activity field``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
-            let oldTitle = msg "Initial title" "2026-03-01T10:00:04Z"
-            let newTitle = msg "Updated title" "2026-03-01T10:00:05Z"
-            svc.Submit(mkReport "s1" "C:/wt/a" "t1" "2026-03-01T10:00:04Z" (TitleReported oldTitle))
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:06Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "t2" "2026-03-01T10:00:05Z" (TitleReported newTitle))
-
-            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            Assert.Multiple(fun () ->
-                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
-                Assert.That(live.Status.Title, Is.EqualTo(Some newTitle))
-                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:06Z"), "title must preserve the lifecycle clock")
-                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z")))
-            Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some live))
-            Assert.That(eventCount dbPath, Is.EqualTo 3))
 
     [<Test>]
     member _.``a heartbeat bumps last_seen for openness without appending, moving updated_at, or changing status``() =
         withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
             let terminalSessionId =
                 TerminalSessionId "dddddddddddddddddddddddddddddddd"
+            present svc "s1" "C:/wt/a" (ts "2026-03-01T10:00:00Z") |> ignore
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")))
             svc.LiveSnapshot() |> ignore
             // A later liveness heartbeat: newer timestamp, but pure openness — not a status event.
@@ -1381,8 +1577,7 @@ type IngestTests() =
         withService "C:/wt/a" (fun (svc, _, store) ->
             let terminalSessionId =
                 TerminalSessionId "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-            let withOrigin (report: SessionActivityReport) =
-                { report with TerminalSessionId = Some terminalSessionId }
+            present svc "s1" "C:/wt/a" (ts "2026-03-01T10:00:00Z") |> ignore
             let submitAndAssertOrigin report =
                 svc.Submit report
                 let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
@@ -1392,49 +1587,40 @@ type IngestTests() =
                     Assert.That(live.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
                     Assert.That(persisted.TerminalSessionId, Is.EqualTo(Some terminalSessionId)))
 
-            mkReport "s1" "C:/wt/a" "started" "2026-03-01T10:00:00Z" TurnStarted
-            |> withOrigin
+            { mkReport "s1" "C:/wt/a" "started" "2026-03-01T10:00:00Z" TurnStarted with
+                TerminalSessionId = Some terminalSessionId }
             |> submitAndAssertOrigin
 
-            mkReport "s1" "C:/wt/a" "heartbeat" "2026-03-01T10:01:00Z" Heartbeat
-            |> submitAndAssertOrigin
+            [ mkReport "s1" "C:/wt/a" "heartbeat" "2026-03-01T10:01:00Z" Heartbeat
+              mkReport "s1" "C:/wt/a" "usage" "2026-03-01T10:02:00Z" (UsageInfo(1000, 2000))
+              mkReport
+                  "s1"
+                  "C:/wt/a"
+                  "bootstrap"
+                  "2026-03-01T10:03:00Z"
+                  (TitleBootstrap(msg "Terminal session" "2026-03-01T10:03:00Z"))
+              mkReport
+                  "s1"
+                  "C:/wt/a"
+                  "intent"
+                  "2026-03-01T10:04:00Z"
+                  (IntentReported(msg "Preserve ownership" "2026-03-01T10:04:00Z"))
+              mkReport "s1" "C:/wt/a" "ended" "2026-03-01T10:05:00Z" TurnEnded ]
+            |> List.iter submitAndAssertOrigin)
 
-            mkReport "s1" "C:/wt/a" "usage" "2026-03-01T10:02:00Z" (UsageInfo(1000, 2000))
-            |> submitAndAssertOrigin
-
-            mkReport
-                "s1"
-                "C:/wt/a"
-                "bootstrap"
-                "2026-03-01T10:03:00Z"
-                (TitleBootstrap(msg "Terminal session" "2026-03-01T10:03:00Z"))
-            |> submitAndAssertOrigin
-
-            mkReport
-                "s1"
-                "C:/wt/a"
-                "intent"
-                "2026-03-01T10:04:00Z"
-                (IntentReported(msg "Preserve ownership" "2026-03-01T10:04:00Z"))
-            |> submitAndAssertOrigin
-
-            mkReport "s1" "C:/wt/a" "ended" "2026-03-01T10:05:00Z" TurnEnded
-            |> submitAndAssertOrigin)
-
-    [<Test>]
-    member _.``a heartbeat rehydrates a retained durable session after restart``() =
+    [<TestCaseSource("RehydrationCases")>]
+    member _.``a retained session outside the restart window is revived by its next report``
+        (scenario: RehydrationScenario)
+        =
         let retained =
-            { SessionId = SessionId "s1"
-              TerminalSessionId = None
-              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
-              Provider = CopilotCli
-              Status =
+            instanceOf
+                "s1"
+                "C:/wt/a"
                 { emptyStatus with
                     Status = SessionLevelStatus.WaitingForUser
                     LastAssistantMessage = Some(msg "Which option?" "2026-03-01T08:00:00Z") }
-              UpdatedAt = ts "2026-03-01T08:00:00Z"
-              LastSeen = ts "2026-03-01T08:00:00Z"
-              ContextUsageAt = None }
+                (ts "2026-03-01T08:00:00Z")
+                (ts "2026-03-01T08:00:00Z")
 
         withServiceSeeded
             "C:/wt/a"
@@ -1447,179 +1633,63 @@ type IngestTests() =
                     "the restart rebuild excludes retained sessions outside the idle window"
                 )
 
-                svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:30:00Z" Heartbeat)
+                scenario.PresentAt
+                |> Option.iter (fun at -> present svc "s1" "C:/wt/a" (ts at) |> ignore)
+
+                let eventId, occurredAt, event = scenario.Report
+                svc.Submit(mkReport "s1" "C:/wt/a" eventId occurredAt event)
                 let rehydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
 
                 Assert.Multiple(fun () ->
                     Assert.That(rehydrated.Status.Status, Is.EqualTo SessionLevelStatus.WaitingForUser)
-                    Assert.That(rehydrated.Status.LastAssistantMessage, Is.EqualTo retained.Status.LastAssistantMessage)
+                    Assert.That(
+                        rehydrated.Status.LastAssistantMessage,
+                        Is.EqualTo retained.Status.LastAssistantMessage
+                    )
+                    Assert.That(rehydrated.Status.ContextUsage, Is.EqualTo scenario.ExpectedUsage)
+                    Assert.That(
+                        rehydrated.ContextUsageAt,
+                        Is.EqualTo(scenario.ExpectedUsage |> Option.map (fun _ -> ts occurredAt))
+                    )
                     Assert.That(rehydrated.UpdatedAt, Is.EqualTo retained.UpdatedAt)
-                    Assert.That(rehydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:30:00Z")))
-
-                Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some rehydrated))
-
-                match schedulerStatus agent "s1" with
-                | Some fed -> Assert.That(fed, Is.EqualTo rehydrated)
-                | None -> Assert.Fail "the rehydrated session was not fed to the scheduler")
+                    Assert.That(rehydrated.LastSeen, Is.EqualTo(ts occurredAt))
+                    Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some rehydrated))
+                    Assert.That(
+                        schedulerStatus agent "s1",
+                        Is.EqualTo(Some rehydrated),
+                        "the rehydrated session is fed to the scheduler"
+                    )))
 
     [<Test>]
     member _.``a heartbeat for a session with no prior event is ignored``() =
         withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
             svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:00:00Z" Heartbeat)
-            let live = svc.LiveSnapshot()
-            Assert.That(live.ContainsKey(SessionId "s1"), Is.False, "a heartbeat never creates a session")
+            Assert.That(svc.LiveSnapshot().ContainsKey(SessionId "s1"), Is.False, "a heartbeat never creates a session")
             Assert.That(eventCount dbPath, Is.Zero))
-
-    [<Test>]
-    member _.``a real event never regresses last_seen below a fresher heartbeat``() =
-        withService "C:/wt/a" (fun (svc, _, store) ->
-            // Establish the session, then a heartbeat advances openness to 10:02.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")))
-            svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:02:00Z" Heartbeat)
-            svc.LiveSnapshot() |> ignore
-            // A real, IN-ORDER event (updated_at advances past e1) whose OccurredAt predates the
-            // heartbeat: it must fold, but must NOT pull last_seen back before the heartbeat.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:01:00Z" (UserPrompt(msg "go" "2026-03-01T10:01:00Z")))
-            let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:02:00Z"), "last_seen stays monotonic (kept at the heartbeat)")
-            Assert.That(s.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:01:00Z"), "the real event still advances the write clock")
-            Assert.That(s.Status.LastUserMessage, Is.EqualTo(Some(msg "go" "2026-03-01T10:01:00Z")), "the real event still folds")
-            let stored = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun r -> r.SessionId = SessionId "s1")
-            Assert.That(stored.LastSeen, Is.EqualTo(ts "2026-03-01T10:02:00Z"), "durable last_seen is monotonic too"))
-
-    [<Test>]
-    member _.``an out-of-order event row records its own status, not the newest live status``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
-            // Newest applied: turn_ended -> Idle.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" TurnEnded)
-            svc.LiveSnapshot() |> ignore
-            // An older assistant_message arrives late; its OWN effect is Working, not the newest Idle.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "stale" "2026-03-01T10:00:00Z")))
-            svc.LiveSnapshot() |> ignore
-            Assert.That(
-                eventStatusCount dbPath "e1" "working",
-                Is.EqualTo 1,
-                "out-of-order row reflects the event's own effect, not the newest Idle"
-            ))
-
-    [<Test>]
-    member _.``a usage_info gauge updates ContextUsage without moving the status clock or appending an event``() =
-        withServiceAndPath "C:/wt/a" (fun (svc, agent, _, dbPath) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.LiveSnapshot() |> ignore
-            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:05Z" (UsageInfo(120000, 200000)))
-            let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            Assert.That(s.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }), "the gauge is recorded")
-            Assert.That(s.Status.Status, Is.EqualTo SessionLevelStatus.Working, "a gauge never changes status")
-            Assert.That(s.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"), "a gauge must not move the status last-write-wins clock")
-            Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "the gauge bumps openness")
-            Assert.That(eventCount dbPath, Is.EqualTo 1, "a usage_info must not append to activity_events")
-            // The card path (scheduler) sees the gauge.
-            match schedulerStatus agent "s1" with
-            | Some fed -> Assert.That(fed.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }))
-            | None -> Assert.Fail "the gauge was not fed to the scheduler")
-
-    [<Test>]
-    member _.``usage rehydrates a retained durable session after restart``() =
-        let retained =
-            { SessionId = SessionId "s1"
-              TerminalSessionId = None
-              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
-              Provider = CopilotCli
-              Status =
-                { emptyStatus with
-                    Status = SessionLevelStatus.WaitingForUser
-                    LastAssistantMessage = Some(msg "Which option?" "2026-03-01T08:00:00Z") }
-              UpdatedAt = ts "2026-03-01T08:00:00Z"
-              LastSeen = ts "2026-03-01T08:00:00Z"
-              ContextUsageAt = None }
-        let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
-
-        withServiceSeeded
-            "C:/wt/a"
-            (fun store -> store.UpsertStatus retained)
-            (fun (svc, agent, store) ->
-                svc.Start()
-                Assert.That(
-                    svc.LiveSnapshot().ContainsKey(SessionId "s1"),
-                    Is.False,
-                    "the restart rebuild excludes retained sessions outside the idle window"
-                )
-
-                svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:30:00Z" (UsageInfo(usage.CurrentTokens, usage.TokenLimit)))
-                let rehydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-
-                Assert.Multiple(fun () ->
-                    Assert.That(rehydrated.Status.Status, Is.EqualTo SessionLevelStatus.WaitingForUser)
-                    Assert.That(rehydrated.Status.LastAssistantMessage, Is.EqualTo retained.Status.LastAssistantMessage)
-                    Assert.That(rehydrated.Status.ContextUsage, Is.EqualTo(Some usage))
-                    Assert.That(rehydrated.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:30:00Z")))
-                    Assert.That(rehydrated.UpdatedAt, Is.EqualTo retained.UpdatedAt)
-                    Assert.That(rehydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:30:00Z")))
-
-                Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some rehydrated))
-
-                match schedulerStatus agent "s1" with
-                | Some fed -> Assert.That(fed, Is.EqualTo rehydrated)
-                | None -> Assert.Fail "the rehydrated session was not fed to the scheduler")
-
-    [<Test>]
-    member _.``a later usage report does not block a slightly-earlier status transition``() =
-        withService "C:/wt/a" (fun (svc, _, _) ->
-            // The gauge (10:00:05) is NEWER than the turn_ended (10:00:03) but arrives first. Sharing the
-            // status clock would reject the turn_ended as out-of-order and leave the card stuck Working.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:05Z" (UsageInfo(120000, 200000)))
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:03Z" TurnEnded)
-            let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
-            Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Idle, "the turn still ends despite the newer gauge")
-            Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }), "the gauge is preserved across the transition"))
-
-    [<Test>]
-    member _.``a usage snapshot arriving after a newer status event is not discarded``() =
-        withService "C:/wt/a" (fun (svc, _, _) ->
-            // The gauge (10:00:03) is OLDER than the turn_ended (10:00:05) and arrives after it. Sharing
-            // the status clock would reject it as out-of-order and drop the snapshot.
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" TurnEnded)
-            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:03Z" (UsageInfo(50000, 200000)))
-            let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
-            Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 50000; TokenLimit = 200000 }), "the gauge survives a newer status event")
-            Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Idle, "the gauge never changes status"))
-
-    [<Test>]
-    member _.``an out-of-order older usage snapshot does not clobber a fresher gauge``() =
-        withService "C:/wt/a" (fun (svc, _, _) ->
-            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s1" "C:/wt/a" "u2" "2026-03-01T10:00:10Z" (UsageInfo(150000, 200000)))
-            // A delayed OLDER snapshot arrives last; its own usage LWW clock rejects it.
-            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:05Z" (UsageInfo(80000, 200000)))
-            let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
-            Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 150000; TokenLimit = 200000 }), "the fresher gauge is kept"))
 
     [<Test>]
     member _.``a usage_info for a session with no prior status is dropped``() =
         withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
             svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:00Z" (UsageInfo(120000, 200000)))
-            let live = svc.LiveSnapshot()
-            Assert.That(live.ContainsKey(SessionId "s1"), Is.False, "a gauge never creates a session")
+            Assert.That(svc.LiveSnapshot().ContainsKey(SessionId "s1"), Is.False, "a gauge never creates a session")
             Assert.That(eventCount dbPath, Is.Zero))
 
     [<Test>]
     member _.``usage recreates a pruned row from the retained live session``() =
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-pruned-context-worktree")
-        let normalizedWorktree = WorktreePath(PathUtils.normalizePath worktree)
         let report eventId occurredAt event =
-            { SessionId = SessionId "s1"
+            { ParentProcessId = syntheticProcessIdForSessionId "s1"
+              SessionId = SessionId "s1"
               TerminalSessionId = None
-              WorktreePath = normalizedWorktree
+              WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
               Provider = CopilotCli
               EventId = EventId eventId
               OccurredAt = occurredAt
               Event = event }
 
         withService worktree (fun (svc, _, store) ->
+            present svc "s1" worktree (now.AddMinutes(-1.0)) |> ignore
             svc.Submit(report "started" (now.AddMinutes(-1.0)) TurnStarted)
             svc.LiveSnapshot() |> ignore
             store.PruneOld now |> ignore
@@ -1629,8 +1699,7 @@ type IngestTests() =
             let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             let persisted = store.LoadLiveStatuses now |> List.find (fun row -> row.SessionId = SessionId "s1")
             Assert.That(persisted, Is.EqualTo(live))
-            Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 90000; TokenLimit = 200000 })))
-
+            Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some(usageOf 90000 200000))))
 
 // ── restart rebuild ───────────────────────────────────────────────────────────
 [<TestFixture>]
@@ -1642,66 +1711,49 @@ type RestartRebuildTests() =
     member _.``Start rebuilds live status and context usage from the store and feeds the scheduler``() =
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
-        let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+        let usage = usageOf 120000 200000
         let usageAt = now.AddSeconds(-30.0)
         let status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
+        let seeded = storedWithUsage "s1" worktree status (now.AddMinutes(-1.0)) usage usageAt
 
-        let seed (store: SessionActivityStore) =
-            storedWithUsage "s1" worktree status (now.AddMinutes(-1.0)) usage usageAt
-            |> store.UpsertContextUsage
-            |> ignore
+        withServiceSeeded
+            worktree
+            (fun store -> store.UpsertContextUsage seeded |> ignore)
+            (fun (svc, agent, _) ->
+                svc.Start()
+                // The in-memory fold map is primed, so a later event folds onto the rebuilt state —
+                // and the card path (scheduler) sees the rebuilt row before any new event arrives.
+                let restored = svc.LiveSnapshot() |> Map.find (SessionId "s1")
 
-        withServiceSeeded worktree seed (fun (svc, agent, _) ->
-            svc.Start()
-            // The in-memory fold map is primed, so a subsequent event folds onto the rebuilt state.
-            let live = svc.LiveSnapshot()
-            let restored = live |> Map.find (SessionId "s1")
-            Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
-            Assert.That(restored.Status.Skill, Is.EqualTo(Some "investigate"))
-            Assert.That(restored.Status.ContextUsage, Is.EqualTo(Some usage))
-            Assert.That(restored.ContextUsageAt, Is.EqualTo(Some usageAt))
-            // And the card path (scheduler) sees it immediately, before any new event.
-            match schedulerStatus agent "s1" with
-            | Some stored ->
-                Assert.That(stored.Status.Skill, Is.EqualTo(Some "investigate"))
-                Assert.That(stored.Status.ContextUsage, Is.EqualTo(Some usage))
-            | None -> Assert.Fail "restart rebuild did not feed the scheduler")
+                Assert.Multiple(fun () ->
+                    Assert.That(restored, Is.EqualTo seeded)
+                    Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some seeded))))
 
     [<Test>]
-    member _.``Start forgets background lifecycle and publishes the persisted base status``() =
+    member _.``Start restores exact background lifecycle with the persisted base status``() =
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-background-worktree")
-        let status =
-            fold
-                emptyStatus
-                (BackgroundAgentStarted("tool-1", now.AddSeconds(-45.0)))
+        let status = fold emptyStatus (BackgroundAgentStarted("tool-1", now.AddSeconds(-45.0)))
+        let seeded = instanceOf "s1" worktree status (now.AddMinutes(-1.0)) (now.AddSeconds(-30.0))
 
-        let seed (store: SessionActivityStore) =
-            store.UpsertStatus
-                { SessionId = SessionId "s1"
-                  TerminalSessionId = None
-                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
-                  Provider = CopilotCli
-                  Status = status
-                  UpdatedAt = now.AddMinutes(-1.0)
-                  LastSeen = now.AddSeconds(-30.0)
-                  ContextUsageAt = None }
-
-        withServiceSeeded worktree seed (fun (svc, agent, _) ->
+        withServiceSeeded worktree (fun store -> store.UpsertStatus seeded) (fun (svc, agent, _) ->
             svc.Start()
             let restored = svc.LiveSnapshot() |> Map.find (SessionId "s1")
 
             Assert.Multiple(fun () ->
                 Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(effectiveStatus restored.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(restored.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(effectiveStatus restored.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(
+                    restored.Status.BackgroundAgentClocks,
+                    Is.EqualTo status.BackgroundAgentClocks
+                )
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some restored))))
 
     [<Test>]
     member _.``An older usage report after restart cannot replace the restored snapshot``() =
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
-        let usage = { CurrentTokens = 150000; TokenLimit = 200000 }
+        let usage = usageOf 150000 200000
         let usageAt = now.AddMinutes(-1.0)
         let status = { emptyStatus with Status = SessionLevelStatus.Working }
 
@@ -1712,37 +1764,34 @@ type RestartRebuildTests() =
 
         withServiceSeeded worktree seed (fun (svc, _, _) ->
             svc.Start()
-            svc.Submit
-                { SessionId = SessionId "s1"
-                  TerminalSessionId = None
-                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
-                  Provider = CopilotCli
-                  EventId = EventId "older-usage"
-                  OccurredAt = usageAt.AddSeconds(-30.0)
-                  Event = UsageInfo(80000, 200000) }
+            svc.Submit(
+                mkReport
+                    "s1"
+                    worktree
+                    "older-usage"
+                    (usageAt.AddSeconds(-30.0).ToString("O"))
+                    (UsageInfo(80000, 200000)))
 
             let restored = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            Assert.That(restored.Status.ContextUsage, Is.EqualTo(Some usage))
-            Assert.That(restored.ContextUsageAt, Is.EqualTo(Some usageAt)))
+
+            Assert.Multiple(fun () ->
+                Assert.That(restored.Status.ContextUsage, Is.EqualTo(Some usage))
+                Assert.That(restored.ContextUsageAt, Is.EqualTo(Some usageAt))))
 
     [<Test>]
     member _.``A status event revives all retained state outside the live restart window``() =
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-retained-context-worktree")
-        let normalizedWorktree = WorktreePath(PathUtils.normalizePath worktree)
-        let usage = { CurrentTokens = 110000; TokenLimit = 200000 }
+        let usage = usageOf 110000 200000
         let usageAt = now - idleWindow - TimeSpan.FromMinutes 5.0
+
         let status =
-            { Status = SessionLevelStatus.Idle
-              Skill = Some "investigate"
-              Intent = Some { Text = "diagnosing context persistence"; At = usageAt.AddMinutes(-4.0) }
-              Title = Some { Text = "Persist context info"; At = usageAt.AddMinutes(-3.0) }
-              LastUserMessage = Some { Text = "keep the context"; At = usageAt.AddMinutes(-2.0) }
-              LastAssistantMessage = Some { Text = "working on it"; At = usageAt.AddMinutes(-1.0) }
-              ContextUsage = None
-              AwaitingUserSince = None
-              UserInputCompletedAt = None
-              BackgroundAgentClocks = Map.empty }
+            { emptyStatus with
+                Skill = Some "investigate"
+                Intent = Some { Text = "diagnosing context persistence"; At = usageAt.AddMinutes(-4.0) }
+                Title = Some { Text = "Persist context info"; At = usageAt.AddMinutes(-3.0) }
+                LastUserMessage = Some { Text = "keep the context"; At = usageAt.AddMinutes(-2.0) }
+                LastAssistantMessage = Some { Text = "working on it"; At = usageAt.AddMinutes(-1.0) } }
 
         let seed (store: SessionActivityStore) =
             storedWithUsage "s1" worktree status (usageAt.AddMinutes(-1.0)) usage usageAt
@@ -1751,46 +1800,39 @@ type RestartRebuildTests() =
 
         withServiceSeeded worktree seed (fun (svc, agent, _) ->
             svc.Start()
-            Assert.That((svc.LiveSnapshot()).ContainsKey(SessionId "s1"), Is.False)
+            Assert.That(svc.LiveSnapshot().ContainsKey(SessionId "s1"), Is.False)
 
-            svc.Submit
-                { SessionId = SessionId "s1"
-                  TerminalSessionId = None
-                  WorktreePath = normalizedWorktree
-                  Provider = CopilotCli
-                  EventId = EventId "revive"
-                  OccurredAt = now
-                  Event = TurnStarted }
-
+            svc.Submit(mkReport "s1" worktree "revive" (now.ToString("O")) TurnStarted)
             let revived = svc.LiveSnapshot() |> Map.find (SessionId "s1")
-            Assert.That(revived.Status.Status, Is.EqualTo(SessionLevelStatus.Working))
-            Assert.That(revived.Status.Skill, Is.EqualTo(status.Skill))
-            Assert.That(revived.Status.Intent, Is.EqualTo(status.Intent))
-            Assert.That(revived.Status.Title, Is.EqualTo(status.Title))
-            Assert.That(revived.Status.LastUserMessage, Is.EqualTo(status.LastUserMessage))
-            Assert.That(revived.Status.LastAssistantMessage, Is.EqualTo(status.LastAssistantMessage))
-            Assert.That(revived.Status.ContextUsage, Is.EqualTo(Some usage))
-            Assert.That(revived.ContextUsageAt, Is.EqualTo(Some usageAt))
-            Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some revived)))
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    revived.Status,
+                    Is.EqualTo
+                        { status with
+                            Status = SessionLevelStatus.Working
+                            ContextUsage = Some usage },
+                    "the revived fold keeps every retained field"
+                )
+                Assert.That(revived.ContextUsageAt, Is.EqualTo(Some usageAt))
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some revived))))
 
     [<Test>]
     member _.``a session quiet longer than the idle window is not rebuilt as live``() =
-        let now = DateTimeOffset.UtcNow
+        let quietAt = DateTimeOffset.UtcNow - idleWindow - TimeSpan.FromMinutes 5.0
 
         let seed (store: SessionActivityStore) =
-            store.UpsertStatus
-                { SessionId = SessionId "stale"
-                  TerminalSessionId = None
-                  WorktreePath = WorktreePath "C:/wt/a"
-                  Provider = CopilotCli
-                  Status = { emptyStatus with Status = SessionLevelStatus.Working }
-                  UpdatedAt = now - idleWindow - TimeSpan.FromMinutes 5.0
-                  LastSeen = now - idleWindow - TimeSpan.FromMinutes 5.0
-                  ContextUsageAt = None }
+            instanceOf
+                "stale"
+                "C:/wt/a"
+                { emptyStatus with Status = SessionLevelStatus.Working }
+                quietAt
+                quietAt
+            |> store.UpsertStatus
 
         withServiceSeeded "C:/wt/a" seed (fun (svc, _, _) ->
             svc.Start()
-            Assert.That((svc.LiveSnapshot()).ContainsKey(SessionId "stale"), Is.False))
+            Assert.That(svc.LiveSnapshot().ContainsKey(SessionId "stale"), Is.False))
 
 
 // ── exact terminal ownership queries ─────────────────────────────────────────
@@ -1800,17 +1842,20 @@ type RestartRebuildTests() =
 type TerminalOwnershipQueryTests() =
 
     let ownedStored terminalSessionId sessionId lastSeen =
-        { SessionId = SessionId sessionId
+        { ProcessIdentity = syntheticProcessIdentityForSessionId sessionId
+          SessionId = SessionId sessionId
           TerminalSessionId = Some terminalSessionId
           WorktreePath = WorktreePath "C:/wt/a"
           Provider = CopilotCli
           Status = { emptyStatus with Status = SessionLevelStatus.Idle }
           UpdatedAt = lastSeen
+          LifecycleAt = Some lastSeen
           LastSeen = lastSeen
-          ContextUsageAt = None }
+          ContextUsageAt = None
+          ClosedAt = None }
 
     [<Test>]
-    member _.``terminal activity merge materializes only requested origins from a large live map``() =
+    member _.``terminal activity projection materializes only requested origins from a large live map``() =
         let requested =
             TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -1823,153 +1868,114 @@ type TerminalOwnershipQueryTests() =
             [ 1..5000 ]
             |> List.map (fun index ->
                 let sessionId = $"unrelated-{index}"
-                SessionId sessionId, ownedStored unrelated sessionId at)
+                let instance = ownedStored unrelated sessionId at
+                instance.ProcessIdentity, instance)
             |> Map.ofList
-            |> Map.add
-                (SessionId "requested")
-                (ownedStored requested "requested" at)
+            |> fun instances ->
+                let requestedInstance =
+                    ownedStored requested "requested" at
 
-        let merged =
-            mergeCurrentAndDurableStatuses
+                instances
+                |> Map.add
+                    requestedInstance.ProcessIdentity
+                    requestedInstance
+
+        let projected =
+            statusesForTerminalOrigins
                 (Set.singleton requested)
                 live
-                Seq.empty
 
         Assert.That(
-            merged |> List.map _.SessionId,
+            projected |> List.map _.SessionId,
             Is.EqualTo([ SessionId "requested" ])
         )
 
     [<Test>]
     member _.``terminal snapshot titles use each exact terminal's representative activity``() =
-        let terminalA =
-            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-        let terminalB =
-            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-
-        let unrelated =
-            TerminalSessionId "cccccccccccccccccccccccccccccccc"
-
         let now = ts "2026-03-01T10:05:00Z"
-        let message text at = Some { Text = text; At = at }
+        let at clock = ts $"2026-03-01T{clock}Z"
+        let message text clock = Some { Text = text; At = at clock }
 
         let stored terminalSessionId sessionId status updatedAt lastSeen intent title =
             { ownedStored terminalSessionId sessionId lastSeen with
-                Status =
-                    { emptyStatus with
-                        Status = status
-                        Intent = intent
-                        Title = title }
+                Status = { emptyStatus with Status = status; Intent = intent; Title = title }
                 UpdatedAt = updatedAt }
 
-        let snapshot =
-            { Tabs =
-                [ { Id = EmbeddedTerminalId(TerminalSessionId.value terminalA)
-                    Worktree = WorktreePath "C:/wt/a"
-                    ReportedActivity = None
-                    Lifecycle = EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61001/" }
-                  { Id = EmbeddedTerminalId(TerminalSessionId.value terminalB)
-                    Worktree = WorktreePath "C:/wt/a"
-                    ReportedActivity = None
-                    Lifecycle = EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61002/" } ] }
+        let tab terminalSessionId port =
+            { Id = EmbeddedTerminalId(TerminalSessionId.value terminalSessionId)
+              Worktree = WorktreePath "C:/wt/a"
+              ReportedActivity = None
+              Lifecycle = EmbeddedTerminalLifecycle.Running $"http://127.0.0.1:{port}/" }
+
+        let closed =
+            { stored terminalA "closed-a" SessionLevelStatus.Working (at "10:04:50") (at "10:04:50")
+                  (message "Closed terminal activity" "10:04:50") None with
+                ClosedAt = Some(at "10:04:55") }
 
         let decorated =
-            snapshot
+            { Tabs = [ tab terminalA 61001; tab terminalB 61002 ] }
             |> withReportedActivity
                 now
-                [ stored
-                      terminalA
-                      "idle-a"
-                      SessionLevelStatus.Idle
-                      (ts "2026-03-01T10:03:00Z")
-                      (ts "2026-03-01T10:04:00Z")
-                      (message "Idle terminal work" (ts "2026-03-01T10:03:00Z"))
-                      None
-                  stored
-                      terminalA
-                      "working-a"
-                      SessionLevelStatus.Working
-                      (ts "2026-03-01T10:02:00Z")
-                      (ts "2026-03-01T10:04:30Z")
-                      (message "Implementing exact terminal titles" (ts "2026-03-01T10:04:30Z"))
-                      None
-                  stored
-                      terminalB
-                      "working-b"
-                      SessionLevelStatus.Working
-                      (ts "2026-03-01T10:04:00Z")
-                      (ts "2026-03-01T10:04:30Z")
-                      None
-                      (message "Session title only" (ts "2026-03-01T10:04:00Z"))
-                  stored
-                      unrelated
-                      "unrelated"
-                      SessionLevelStatus.Working
-                      (ts "2026-03-01T10:04:30Z")
-                      (ts "2026-03-01T10:04:30Z")
-                      (message "Wrong terminal" (ts "2026-03-01T10:04:30Z"))
-                      None ]
+                [ stored terminalA "idle-a" SessionLevelStatus.Idle (at "10:03:00") (at "10:04:00")
+                      (message "Idle terminal work" "10:03:00") None
+                  stored terminalA "working-a" SessionLevelStatus.Working (at "10:02:00") (at "10:04:30")
+                      (message "Implementing exact terminal titles" "10:04:30") None
+                  stored terminalB "working-b" SessionLevelStatus.Working (at "10:04:00") (at "10:04:30")
+                      None (message "Session title only" "10:04:00")
+                  closed
+                  stored terminalB "stale-b" SessionLevelStatus.Working (at "10:04:50")
+                      (now - openWindow - TimeSpan.FromSeconds 1.0)
+                      (message "Stale terminal activity" "10:04:50") None
+                  stored terminalC "unrelated" SessionLevelStatus.Working (at "10:04:30") (at "10:04:30")
+                      (message "Wrong terminal" "10:04:30") None ]
 
         Assert.That(
-            decorated.Tabs
-            |> List.map (fun tab -> tab.Id, tab.ReportedActivity),
+            decorated.Tabs |> List.map (fun tab -> tab.Id, tab.ReportedActivity),
             Is.EqualTo(
-                [ (EmbeddedTerminalId(TerminalSessionId.value terminalA),
-                   Some "Implementing exact terminal titles")
-                  (EmbeddedTerminalId(TerminalSessionId.value terminalB),
-                   Some "Session title only") ]
+                [ EmbeddedTerminalId(TerminalSessionId.value terminalA),
+                  Some "Implementing exact terminal titles"
+                  EmbeddedTerminalId(TerminalSessionId.value terminalB), Some "Session title only" ]
             )
         )
 
     [<Test>]
-    member _.``service live cache evicts sessions outside the idle window``() =
-        let oldTerminal =
-            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-        let freshTerminal =
-            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    member _.``stale durable terminal history is not a replacement candidate``() =
+        let oldTerminal = terminalA
+        let freshTerminal = terminalB
+        let at = ts "2026-03-01T12:01:00Z"
 
         let withOrigin terminalSessionId (report: SessionActivityReport) =
             { report with TerminalSessionId = Some terminalSessionId }
 
         withService "C:/wt/a" (fun (service, _, _) ->
+            present service "old" "C:/wt/a" (ts "2026-03-01T10:00:00Z") |> ignore
             mkReport "old" "C:/wt/a" "old-event" "2026-03-01T10:00:00Z" TurnStarted
             |> withOrigin oldTerminal
             |> service.Submit
 
+            present service "fresh" "C:/wt/a" at |> ignore
             mkReport "fresh" "C:/wt/a" "fresh-event" "2026-03-01T12:01:00Z" TurnStarted
             |> withOrigin freshTerminal
             |> service.Submit
 
             let live = service.LiveSnapshot()
-            let retained =
-                queryOwnedOk
-                    service
-                    (ts "2026-03-01T12:01:00Z")
-                    (Set.singleton oldTerminal)
+            let retained = queryOwnedOk service at (Set.singleton oldTerminal)
+
+            let _, shutdownTargets, resumeCommands =
+                queryReplacementPlanOk service at [ replacementTerminal oldTerminal "C:/wt/a" ]
+                |> requireReplacementReady
 
             Assert.Multiple(fun () ->
-                Assert.That(
-                    live |> Map.keys |> Seq.toList,
-                    Is.EqualTo([ SessionId "fresh" ])
-                )
+                Assert.That(live |> Map.keys |> Seq.toList, Is.EqualTo([ SessionId "fresh" ]))
                 Assert.That(retained.OpenSessions, Is.Empty)
-                Assert.That(
-                    retained.ResumableSessionIds,
-                    Is.EqualTo(Map.ofList [ oldTerminal, SessionId "old" ])
-                )))
+                Assert.That(shutdownTargets, Is.Empty)
+                Assert.That(resumeCommands, Is.Empty)))
 
     [<Test>]
     member _.``epoch pruning keeps retained and current origins and never reuses sequence values``() =
-        let current =
-            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-        let retained =
-            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-
-        let expired =
-            TerminalSessionId "cccccccccccccccccccccccccccccccc"
+        let current = terminalA
+        let retained = terminalB
+        let expired = terminalC
 
         let initial =
             emptyTerminalOriginEpochState
@@ -2015,26 +2021,16 @@ type TerminalOwnershipQueryTests() =
 
     [<Test>]
     member _.``retention sweep removes stale live state and inactive terminal epochs``() =
-        let current =
-            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-        let expired =
-            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-
+        let current = terminalA
+        let expired = terminalB
         let oldAt = ts "2026-01-01T10:00:00Z"
         let now = oldAt + retentionPeriod + TimeSpan.FromDays 1.0
 
         withService "C:/wt/a" (fun (service, _, store) ->
             queryActivityOk service (Set.singleton current) |> ignore
 
-            mkReport
-                "expired"
-                "C:/wt/a"
-                "expired-event"
-                "2026-01-01T10:00:00Z"
-                TurnStarted
-            |> fun report ->
-                { report with TerminalSessionId = Some expired }
+            { mkReport "expired" "C:/wt/a" "expired-event" "2026-01-01T10:00:00Z" TurnStarted with
+                TerminalSessionId = Some expired }
             |> service.Submit
 
             service.LiveSnapshot() |> ignore
@@ -2051,10 +2047,8 @@ type TerminalOwnershipQueryTests() =
 
     [<Test>]
     member _.``replacement policy binds the provider command to its exact terminal``() =
-        let ownedTerminal =
-            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        let plainTerminal =
-            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let ownedTerminal = terminalA
+        let plainTerminal = terminalB
         let ownedPath = "C:/wt/owned"
         let terminals =
             [ replacementTerminal ownedTerminal ownedPath
@@ -2062,120 +2056,170 @@ type TerminalOwnershipQueryTests() =
 
         let snapshot: OwnedSessionSnapshot =
             { ActivityEpoch = 17L
-              OpenSessions = []
-              ResumableSessionIds =
-                Map.ofList
-                    [ ownedTerminal,
-                      SessionId "provider-owned-session" ] }
+              OpenSessions =
+                [ openSession ownedTerminal "provider-owned-session" SessionLevelStatus.Idle ]
+              PendingReconciliation = Set.empty
+              ReplacementSessionIds =
+                Map.ofList [ ownedTerminal, SessionId "provider-owned-session" ] }
 
         let resolveProvider (path: string) =
             Assert.That(
                 path,
                 Is.EqualTo ownedPath,
-                "only the resumable terminal selects a provider from its own worktree"
+                "only the live replacement terminal selects a provider from its own worktree"
             )
 
             Some CopilotCli
 
-        let epoch, commands =
+        let epoch, shutdownTargets, commands =
             replacementSessionPlan resolveProvider terminals snapshot
             |> requireReplacementReady
 
+        let expectedShutdownTarget: TerminalHostReplacement.ReplacementShutdownTarget =
+            { TerminalSessionId = ownedTerminal
+              WorktreePath = ownedPath
+              CopilotSessionId = SessionId "provider-owned-session"
+              ProcessIdentity = syntheticProcessIdentityForSessionId "provider-owned-session" }
+
         Assert.Multiple(fun () ->
             Assert.That(epoch, Is.EqualTo snapshot.ActivityEpoch)
+            Assert.That(shutdownTargets, Is.EqualTo([ expectedShutdownTarget ]))
             Assert.That(
                 commands,
-                Is.EqualTo(
-                    Map.ofList
-                        [ TerminalSessionId.value ownedTerminal,
-                          "copilot --yolo --resume 'provider-owned-session'" ]
-                ),
+                Is.EqualTo(resumeCommandsFor [ ownedTerminal, "provider-owned-session" ]),
                 "the unrelated terminal remains a plain shell"
             ))
 
     [<Test>]
-    member _.``every exact waiting session gates past freshness until input completes``() =
-        let terminalSessionId =
-            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        let worktreePath = "C:/wt/a"
-        let awaitingAt = ts "2026-03-01T10:00:00Z"
-        let completedAt = ts "2026-03-01T10:01:00Z"
-        let now = ts "2026-03-01T10:20:00Z"
-        let waiting =
-            { ownedStored terminalSessionId "waiting" awaitingAt with
-                Status =
-                    fold
-                        emptyStatus
-                        (AwaitingUserInput(None, awaitingAt)) }
+    member _.``one terminal keeps every exact shutdown target but selects one resume conversation``() =
+        let terminal = terminalA
+        let now = ts "2026-03-01T10:05:00Z"
+        let older =
+            { ownedStored terminal "older-conversation" now with
+                UpdatedAt = now.AddMinutes(-2.0) }
+        let newer =
+            { ownedStored terminal "newer-conversation" now with
+                UpdatedAt = now.AddMinutes(-1.0) }
 
-        let newerIdle =
-            ownedStored
-                terminalSessionId
-                "newer-idle"
-                (ts "2026-03-01T10:02:00Z")
+        let snapshot =
+            ownedSessionSnapshot now (Set.singleton terminal) (19L, [ older; newer ], Set.empty)
 
-        let snapshot sessions =
-            ownedSessionSnapshot
-                now
-                (Set.singleton terminalSessionId)
-                (31L, sessions)
-
-        let waitingSnapshot = snapshot [ waiting; newerIdle ]
-
-        Assert.That(
+        let _, shutdownTargets, resumeCommands =
             replacementSessionPlan
                 (fun _ -> Some CopilotCli)
-                [ replacementTerminal terminalSessionId worktreePath ]
-                waitingSnapshot,
-            Is.EqualTo
-                TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle,
-            "most-recent selection applies to resume identity, not to the all-session idle gate"
-        )
-
-        let completed =
-            { waiting with
-                Status =
-                    fold
-                        waiting.Status
-                        (UserInputCompleted completedAt)
-                UpdatedAt = completedAt
-                LastSeen = completedAt }
-
-        let completedSnapshot = snapshot [ completed; newerIdle ]
-        let epoch, resumeCommands =
-            replacementSessionPlan
-                (fun _ -> Some CopilotCli)
-                [ replacementTerminal terminalSessionId worktreePath ]
-                completedSnapshot
+                [ replacementTerminal terminal "C:/wt/a" ]
+                snapshot
             |> requireReplacementReady
 
+        let bothProcesses = Set.ofList [ older.ProcessIdentity; newer.ProcessIdentity ]
+
         Assert.Multiple(fun () ->
-            Assert.That(epoch, Is.EqualTo completedSnapshot.ActivityEpoch)
+            Assert.That(
+                snapshot.OpenSessions |> List.map _.ProcessIdentity |> Set.ofList,
+                Is.EqualTo bothProcesses,
+                "every physical process remains an exact shutdown target"
+            )
+            Assert.That(
+                snapshot.ReplacementSessionIds,
+                Is.EqualTo(Map.ofList [ terminal, SessionId "newer-conversation" ]),
+                "only the greatest-activity conversation is selected for automatic Resume"
+            )
+            Assert.That(
+                shutdownTargets |> List.map _.ProcessIdentity |> Set.ofList,
+                Is.EqualTo bothProcesses,
+                "both physical processes must be returned as independent shutdown targets"
+            )
             Assert.That(
                 resumeCommands,
+                Is.EqualTo(resumeCommandsFor [ terminal, "newer-conversation" ]),
+                "only the selected durable conversation receives an automatic Resume command"
+            ))
+
+    [<Test>]
+    member _.``replacement queries per-instance reconciliation immediately without a global startup delay``() =
+        let now = ts "2026-03-01T10:00:00Z"
+        let terminal = replacementTerminal terminalA "C:/wt/a"
+
+        // Test-boundary mutation records whether the policy query was invoked.
+        let mutable queried = false
+
+        let result =
+            queryReplacementPlan
+                (fun _ -> Some CopilotCli)
+                (fun _ ->
+                    queried <- true
+                    Ok(7L, [], Set.empty))
+                now
+                [ terminal ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(queried, Is.True)
+            Assert.That(
+                result,
                 Is.EqualTo(
-                    Map.ofList
-                        [ TerminalSessionId.value terminalSessionId,
-                          "copilot --yolo --resume 'newer-idle'" ]
+                    Ok(TerminalHostReplacement.ReplacementSessionPlan.Ready(7L, [], Map.empty))
+                    : Result<TerminalHostReplacement.ReplacementSessionPlan, string>
                 )
             ))
 
     [<Test>]
+    member _.``fresh waiting session gates until input completes``() =
+        let terminalSessionId = terminalA
+        let worktreePath = "C:/wt/a"
+        let awaitingAt = ts "2026-03-01T10:00:00Z"
+        let completedAt = ts "2026-03-01T10:01:00Z"
+        let now = ts "2026-03-01T10:02:30Z"
+        let waiting =
+            { ownedStored terminalSessionId "waiting" awaitingAt with
+                Status = fold emptyStatus (AwaitingUserInput(None, awaitingAt)) }
+
+        let newerIdle =
+            ownedStored terminalSessionId "newer-idle" (ts "2026-03-01T10:02:00Z")
+
+        let planFor sessions =
+            ownedSessionSnapshot now (Set.singleton terminalSessionId) (31L, sessions, Set.empty)
+            |> fun snapshot ->
+                snapshot,
+                replacementSessionPlan
+                    (fun _ -> Some CopilotCli)
+                    [ replacementTerminal terminalSessionId worktreePath ]
+                    snapshot
+
+        let _, waitingPlan = planFor [ waiting; newerIdle ]
+
+        Assert.That(
+            waitingPlan,
+            Is.EqualTo TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle,
+            "most-recent selection applies to the live resume identity, not to the all-session idle gate"
+        )
+
+        let completed =
+            { waiting with
+                Status = fold waiting.Status (UserInputCompleted completedAt)
+                UpdatedAt = completedAt
+                LastSeen = completedAt }
+
+        let completedSnapshot, completedPlan = planFor [ completed; newerIdle ]
+        let epoch, shutdownTargets, resumeCommands = requireReplacementReady completedPlan
+
+        Assert.Multiple(fun () ->
+            Assert.That(epoch, Is.EqualTo completedSnapshot.ActivityEpoch)
+            Assert.That(shutdownTargets.Length, Is.EqualTo(2))
+            Assert.That(
+                resumeCommands,
+                Is.EqualTo(resumeCommandsFor [ terminalSessionId, "newer-idle" ])
+            ))
+
+    [<Test>]
     member _.``only exact current terminal origins join and advance their activity epoch``() =
-        let terminalA =
-            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        let terminalB =
-            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         let now = ts "2026-03-01T10:00:30Z"
-        let replacementTarget =
-            replacementTerminal terminalA "C:/wt/a"
-        let withOrigin
-            terminalSessionId
-            (report: SessionActivityReport)
-            : SessionActivityReport =
+        let replacementTarget = replacementTerminal terminalA "C:/wt/a"
+
+        let withOrigin terminalSessionId (report: SessionActivityReport) =
             { report with TerminalSessionId = Some terminalSessionId }
 
         withService "C:/wt/a" (fun (service, _, store) ->
+            present service "owned" "C:/wt/a" (ts "2026-03-01T10:00:00Z") |> ignore
             mkReport "owned" "C:/wt/a" "owned-idle" "2026-03-01T10:00:00Z" TurnEnded
             |> withOrigin terminalA
             |> service.Submit
@@ -2196,14 +2240,10 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(working.ActivityEpoch, Is.GreaterThan 0L)
                 Assert.That(
                     working.OpenSessions,
-                    Is.EqualTo(
-                        [ { TerminalSessionId = terminalA
-                            CopilotSessionId = SessionId "owned"
-                            Status = SessionLevelStatus.Working } ]
-                    )
+                    Is.EqualTo([ openSession terminalA "owned" SessionLevelStatus.Working ])
                 )
                 Assert.That(
-                    working.ResumableSessionIds,
+                    working.ReplacementSessionIds,
                     Is.EqualTo(Map.ofList [ terminalA, SessionId "owned" ])
                 )
                 Assert.That(
@@ -2212,9 +2252,16 @@ type TerminalOwnershipQueryTests() =
                         TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
                 ))
 
+            present
+                service
+                "same-worktree-unowned"
+                "C:/wt/a"
+                (ts "2026-03-01T10:00:10Z")
+            |> ignore
             mkReport "same-worktree-unowned" "C:/wt/a" "unowned" "2026-03-01T10:00:10Z" TurnStarted
             |> service.Submit
 
+            present service "other-terminal" "C:/wt/a" (ts "2026-03-01T10:00:11Z") |> ignore
             mkReport "other-terminal" "C:/wt/a" "other" "2026-03-01T10:00:11Z" TurnStarted
             |> withOrigin terminalB
             |> service.Submit
@@ -2246,7 +2293,7 @@ type TerminalOwnershipQueryTests() =
 
             let idle =
                 queryOwnedOk service now (Set.singleton terminalA)
-            let policyEpoch, resumeCommands =
+            let policyEpoch, shutdownTargets, resumeCommands =
                 queryReplacementPlanOk service now [ replacementTarget ]
                 |> requireReplacementReady
 
@@ -2255,12 +2302,12 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(idle.OpenSessions |> List.map _.Status, Is.EqualTo([ SessionLevelStatus.Idle ]))
                 Assert.That(policyEpoch, Is.EqualTo idle.ActivityEpoch)
                 Assert.That(
+                    shutdownTargets |> List.map _.ProcessIdentity,
+                    Is.EqualTo(idle.OpenSessions |> List.map _.ProcessIdentity)
+                )
+                Assert.That(
                     resumeCommands,
-                    Is.EqualTo(
-                        Map.ofList
-                            [ TerminalSessionId.value terminalA,
-                              "copilot --yolo --resume 'owned'" ]
-                    ),
+                    Is.EqualTo(resumeCommandsFor [ terminalA, "owned" ]),
                     "the session orchestration layer selects the provider-specific resume command"
                 )
                 Assert.That(
@@ -2274,7 +2321,7 @@ type TerminalOwnershipQueryTests() =
 
             let retained =
                 queryOwnedOk service now (Set.singleton terminalA)
-            let retainedEpoch, retainedCommands =
+            let retainedEpoch, retainedTargets, retainedCommands =
                 queryReplacementPlanOk service now [ replacementTarget ]
                 |> requireReplacementReady
 
@@ -2282,73 +2329,88 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(retained.ActivityEpoch, Is.GreaterThan idle.ActivityEpoch)
                 Assert.That(
                     retained.OpenSessions,
-                    Is.EqualTo(
-                        [ { TerminalSessionId = terminalA
-                            CopilotSessionId = SessionId "owned"
-                            Status = SessionLevelStatus.Idle } ]
-                    ),
+                    Is.EqualTo([ openSession terminalA "owned" SessionLevelStatus.Idle ]),
                     "an omitted origin keeps the session attached to its exact terminal"
                 )
                 Assert.That(
-                    retained.ResumableSessionIds,
+                    retained.ReplacementSessionIds,
                     Is.EqualTo(Map.ofList [ terminalA, SessionId "owned" ])
                 )
                 Assert.That(retainedEpoch, Is.EqualTo retained.ActivityEpoch)
                 Assert.That(
-                    retainedCommands,
-                    Is.EqualTo(
-                        Map.ofList
-                            [ TerminalSessionId.value terminalA,
-                              "copilot --yolo --resume 'owned'" ]
-                    )
-                )))
+                    retainedTargets |> List.map _.ProcessIdentity,
+                    Is.EqualTo(retained.OpenSessions |> List.map _.ProcessIdentity)
+                )
+                Assert.That(retainedCommands, Is.EqualTo(resumeCommandsFor [ terminalA, "owned" ]))))
 
     [<Test>]
-    member _.``retained owned session remains resumable after restart without becoming open``() =
-        let terminalSessionId =
-            TerminalSessionId "cccccccccccccccccccccccccccccccc"
+    member _.``startup reconciliation lets a surviving session reassert before replacement``() =
+        let terminalSessionId = terminalC
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-owned-resume-worktree")
-        let retained updatedAt sessionId =
-            { SessionId = SessionId sessionId
-              TerminalSessionId = Some terminalSessionId
-              WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
-              Provider = CopilotCli
-              Status = { emptyStatus with Status = SessionLevelStatus.Idle }
-              UpdatedAt = updatedAt
-              LastSeen = now - idleWindow - TimeSpan.FromMinutes 10.0
-              ContextUsageAt = None }
+        let replacementTarget = replacementTerminal terminalSessionId worktree
 
         let seed (store: SessionActivityStore) =
-            store.UpsertStatus(retained (now.AddHours(-5.0)) "older")
-            store.UpsertStatus(retained (now.AddHours(-4.0)) "latest")
+            { instanceOf
+                "surviving"
+                worktree
+                { emptyStatus with Status = SessionLevelStatus.Idle }
+                (now.AddMinutes(-1.0))
+                (now.AddMinutes(-1.0)) with
+                TerminalSessionId = Some terminalSessionId }
+            |> store.UpsertStatus
 
         withServiceSeeded worktree seed (fun (service, _, _) ->
             service.Start()
-            Assert.That(service.LiveSnapshot(), Is.Empty)
+            Assert.That(service.ExactSnapshot().Count, Is.EqualTo 1)
+            Assert.That(
+                queryReplacementPlanOk service now [ replacementTarget ],
+                Is.EqualTo TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+            )
+
+            let representedAt = now.AddMinutes(1.0)
+
+            let presence =
+                { mkReport
+                    "surviving"
+                    worktree
+                    "surviving-presence"
+                    (representedAt.ToString("O"))
+                    SessionPresent with
+                    TerminalSessionId = Some terminalSessionId }
+
+            match service.Present(presence, representedAt) with
+            | PresenceAcknowledge.Recorded _ -> ()
+            | PresenceAcknowledge.NotRecorded(_, reason) -> Assert.Fail reason
+
+            Assert.That(
+                service.LiveSnapshot() |> Map.keys |> Seq.toList,
+                Is.EqualTo([ SessionId "surviving" ])
+            )
 
             let snapshot =
-                queryOwnedOk service now (Set.singleton terminalSessionId)
-            let policyEpoch, resumeCommands =
-                queryReplacementPlanOk
-                    service
-                    now
-                    [ replacementTerminal terminalSessionId worktree ]
+                queryOwnedOk service representedAt (Set.singleton terminalSessionId)
+
+            let policyEpoch, shutdownTargets, resumeCommands =
+                queryReplacementPlanOk service representedAt [ replacementTarget ]
                 |> requireReplacementReady
 
             Assert.Multiple(fun () ->
-                Assert.That(snapshot.ActivityEpoch, Is.Zero)
-                Assert.That(snapshot.OpenSessions, Is.Empty)
+                Assert.That(snapshot.ActivityEpoch, Is.GreaterThan 0L)
                 Assert.That(
-                    snapshot.ResumableSessionIds,
-                    Is.EqualTo(Map.ofList [ terminalSessionId, SessionId "latest" ])
+                    snapshot.OpenSessions,
+                    Is.EqualTo([ openSession terminalSessionId "surviving" SessionLevelStatus.Idle ])
                 )
-                Assert.That(policyEpoch, Is.Zero)
+                Assert.That(
+                    snapshot.ReplacementSessionIds,
+                    Is.EqualTo(Map.ofList [ terminalSessionId, SessionId "surviving" ])
+                )
+                Assert.That(policyEpoch, Is.EqualTo snapshot.ActivityEpoch)
+                Assert.That(
+                    shutdownTargets |> List.map _.ProcessIdentity,
+                    Is.EqualTo(snapshot.OpenSessions |> List.map _.ProcessIdentity)
+                )
                 Assert.That(
                     resumeCommands,
-                    Is.EqualTo(
-                        Map.ofList
-                            [ TerminalSessionId.value terminalSessionId,
-                              "copilot --yolo --resume 'latest'" ]
-                    )
+                    Is.EqualTo(resumeCommandsFor [ terminalSessionId, "surviving" ])
                 )))

@@ -76,29 +76,44 @@ let internal cancelPendingLaunch worktreePath =
 /// status row for another worktree carries a session id this worktree never registered — so the
 /// snapshot is consumed unfiltered.
 let internal resolveTarget
-    (sessionStatuses: StoredStatus seq)
+    (sessionInstances: StoredInstance seq)
     (worktreePath: string)
     (filename: string)
     =
     async {
         match CanvasDocKinds.classify filename with
-        | AgentDoc -> return! CanvasDocOwnership.getOwner worktreePath filename
+        | AgentDoc ->
+            let! owner = CanvasDocOwnership.getOwner worktreePath filename
+
+            return
+                match owner with
+                | None -> None
+                | Some value ->
+                    match SessionId.create value with
+                    | Ok sessionId -> Some sessionId
+                    | Error error ->
+                        Log.log "CanvasBridge" $"Ignored invalid persisted canvas owner: {error}"
+                        None
         | SystemView ->
             let now = DateTime.UtcNow
 
             let liveSessions =
-                SessionBridge.sessionsForWorktree worktreePath
-                |> List.filter (SessionBridge.isSessionAlive now)
+                SessionBridge.canvasSessionsForWorktreeAt now worktreePath
 
-            let liveSessionIds = liveSessions |> List.choose _.SessionId |> Set.ofList
+            let liveSessionIds =
+                liveSessions
+                |> List.choose _.SessionId
+                |> Set.ofList
 
             let mostRecentlyActive =
-                sessionStatuses
+                sessionInstances
                 |> Seq.filter (fun stored ->
-                    liveSessionIds |> Set.contains (SessionId.value stored.SessionId))
+                    stored.ClosedAt.IsNone
+                    && WorktreePath.value stored.WorktreePath = worktreePath
+                    && liveSessionIds.Contains stored.SessionId)
                 |> List.ofSeq
-                |> StoredStatus.tryMostRecentActivity
-                |> Option.map (_.SessionId >> SessionId.value)
+                |> StoredInstance.tryMostRecentActivity
+                |> Option.map _.SessionId
 
             let freshestReachable () =
                 liveSessions
@@ -117,15 +132,15 @@ type internal CanvasSendOutcome =
     | QueuedNeedingSession of CanvasMessageResult
 
 /// Route one canvas interaction.
-let internal sendMessage (sessionStatuses: StoredStatus seq) (request: CanvasMessageRequest) =
+let internal sendMessage (sessionInstances: StoredInstance seq) (request: CanvasMessageRequest) =
     async {
         let worktreePath = WorktreePath.value request.WorktreePath
-        let! target = resolveTarget sessionStatuses worktreePath request.Filename
+        let! target = resolveTarget sessionInstances worktreePath request.Filename
 
         let! sendResult =
             SessionBridge.send
                 { WorktreePath = worktreePath
-                  SessionId = target
+                  Target = SessionBridge.SendTarget.ofSessionId target
                   Prompt = SessionBridge.Prompt.canvasFor request.Filename request.Payload }
 
         let result =
@@ -140,14 +155,6 @@ let internal sendMessage (sessionStatuses: StoredStatus seq) (request: CanvasMes
             | None, SystemView -> QueuedNeedingSession result
             | _ -> Routed result
     }
-
-let registerSession worktreePath injectUrl sessionId =
-    let normalizedSessionId =
-        match sessionId with
-        | Some value when not (String.IsNullOrWhiteSpace value) -> Some value
-        | _ -> None
-
-    SessionBridge.registerSession worktreePath injectUrl normalizedSessionId
 
 let drainPending worktreePath =
     SessionBridge.drainPendingCanvas worktreePath

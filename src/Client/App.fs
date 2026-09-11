@@ -697,7 +697,11 @@ let update msg model =
             | Error _ -> EmbeddedTerminalCloseFailed)
             (fun _ -> EmbeddedTerminalCloseFailed)
     | EmbeddedTerminalCloseFailed ->
-        model, fetchEmbeddedTerminals worktreeApi
+        model,
+        Cmd.batch [
+            fetchEmbeddedTerminals worktreeApi
+            fetchWorktrees ()
+        ]
     | ToggleTerminalPane ->
         match model.Workspace.Mode with
         | WorkspaceLayout.Mode.OnePane ->
@@ -714,7 +718,7 @@ let update msg model =
                     before
                     snapshot
                     model.ActiveEmbeddedTerminals },
-        Cmd.none
+        fetchWorktrees ()
     | OpenEditor path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 

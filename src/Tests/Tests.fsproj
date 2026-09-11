@@ -37,8 +37,12 @@
     <Compile Include="GithubFixtureTests.fs" />
     <Compile Include="AzDoFixtureTests.fs" />
     <Compile Include="SessionActivityTests.fs" />
+    <Compile Include="LifecycleDiagnosticsTests.fs" />
+    <Compile Include="SessionActivityMigrationFixture.fs" />
     <Compile Include="SessionActivityStoreTests.fs" />
+    <Compile Include="SessionActivityMigrationTests.fs" />
     <Compile Include="SessionActivityServiceTests.fs" />
+    <Compile Include="SessionActivityExactInstanceTests.fs" />
     <Compile Include="UserMessageFormattingTests.fs" />
     <Compile Include="CodingToolPushSourceTests.fs" />
     <Compile Include="CodingToolOrchestratorTests.fs" />

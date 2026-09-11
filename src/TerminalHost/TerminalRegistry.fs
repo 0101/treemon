@@ -2,99 +2,203 @@ namespace TerminalHost
 
 open System
 
-type private HostedTerminal =
-    { Record: TerminalRecord
-      Process: TerminalProcess
-      DataPlane: TerminalDataPlane
-      OpenedOrder: int64 }
-
-type private RegistryState =
-    { Entries: Map<string, HostedTerminal>
-      Revision: int64
-      NextOpenedOrder: int64
-      Stopped: bool }
+type private HostedTerminal = { Record: TerminalRecord; Process: TerminalProcess; DataPlane: TerminalDataPlane; OpenedOrder: int64 }
+type private PendingTerminalCleanup = { Process: TerminalProcess; DataPlane: TerminalDataPlane option }
+type private RegistryState = { Entries: Map<string, HostedTerminal>; PendingCleanups: Map<string, PendingTerminalCleanup>; Revision: int64; NextOpenedOrder: int64; Stopped: bool }
 
 type private RegistryMessage =
     | Start of CanonicalWorktree * AsyncReplyChannel<Result<RegistrySnapshot, string>>
     | List of AsyncReplyChannel<RegistrySnapshot>
     | Close of string * AsyncReplyChannel<RegistrySnapshot>
-    | Shutdown of AsyncReplyChannel<unit>
+    | Shutdown of AsyncReplyChannel<bool>
     | UpstreamExited of string
 
-type TerminalRegistry =
-    private
-        | TerminalRegistry of MailboxProcessor<RegistryMessage>
+type TerminalRegistry = private | TerminalRegistry of MailboxProcessor<RegistryMessage>
 
 [<RequireQualifiedAccess>]
 module TerminalRegistry =
-    let [<Literal>] private ReplyTimeoutMilliseconds = 60_000
-    let [<Literal>] private ShutdownReplyTimeoutMilliseconds = 300_000
+    type private TerminalCloseFailure =
+        | ProcessPreparationFailed of string
+        | ProcessCleanupFailed of string
 
+    type private HostedStartResult =
+        | Hosted of HostedTerminal
+        | Rejected of string
+        | RejectedWithCleanup of string * string * PendingTerminalCleanup
+
+    let private ReplyTimeoutMilliseconds, ShutdownReplyTimeoutMilliseconds = 60_000, 300_000
     // Bounds concurrent terminal teardowns during shutdown/pruning, so closing many terminals stays
     // well inside the server's replacement wait instead of running serially.
-    let [<Literal>] private ShutdownParallelism = 16
-    let [<Literal>] private MaximumTerminals = 1024
+    let private ShutdownParallelism, MaximumTerminals = 256, 1024
 
     let private snapshot state =
         { Revision = state.Revision
-          Terminals =
-            state.Entries |> Map.values
-            |> Seq.sortBy _.OpenedOrder
-            |> Seq.map _.Record
-            |> Seq.toList }
+          Terminals = state.Entries |> Map.values |> Seq.sortBy _.OpenedOrder |> Seq.map _.Record |> Seq.toList }
 
-    let private stopAndClose dataPlane terminalProcess =
+    let private closeTerminal sessionId (dataPlane: TerminalDataPlane option) (terminalProcess: TerminalProcess) =
         async {
-            try
-                do! dataPlane.Stop()
-            finally
-                terminalProcess.Close()
+            let! result, dataPlaneFailed =
+                match
+                    try terminalProcess.BeginClose()
+                    with _ -> Error "terminal process cleanup preparation failed"
+                with
+                | Error error ->
+                    async.Return(Error(ProcessPreparationFailed error), false)
+                | Ok complete ->
+                    async {
+                        let! dataPlaneStopped =
+                            match dataPlane with
+                            | None -> async.Return true
+                            | Some running ->
+                                async {
+                                    let! stopped = running.Stop() |> Async.Catch
+
+                                    return
+                                        match stopped with
+                                        | Choice1Of2() -> true
+                                        | Choice2Of2 _ -> false
+                                }
+
+                        let cleanup =
+                            try complete()
+                            with _ -> Error "process cleanup failed"
+
+                        return
+                            (match cleanup with
+                             | Ok() -> Ok()
+                             | Error error -> Error(ProcessCleanupFailed error)),
+                            not dataPlaneStopped
+                    }
+
+            TerminalHostDiagnostics.write (
+                TerminalHostDiagnostic.TerminalClose
+                    { TerminalSessionId = sessionId
+                      Outcome =
+                        match result, dataPlaneFailed with
+                        | Ok(), false ->
+                            TerminalCloseOutcome.Completed
+                        | Ok(), true ->
+                            TerminalCloseOutcome.DataPlaneFailed
+                        | Error(ProcessPreparationFailed _), _ ->
+                            TerminalCloseOutcome.ProcessPreparationFailed
+                        | Error(ProcessCleanupFailed _), _ ->
+                            TerminalCloseOutcome.ProcessCleanupFailed }
+            )
+
+            return result
         }
 
-    let private closeAll entries =
-        entries
-        |> Map.values
-        |> Seq.map (fun terminal -> stopAndClose terminal.DataPlane terminal.Process)
-        |> fun computations -> Async.Parallel(computations, maxDegreeOfParallelism = ShutdownParallelism)
-        |> Async.Ignore
+    let private cleanupFailureMessage =
+        function
+        | ProcessPreparationFailed error
+        | ProcessCleanupFailed error -> error
 
-    let private removeAfterClose state (key, terminal) =
+    let private pendingCleanupMessage startupError cleanupError =
+        $"{startupError}; terminal cleanup remains pending: {cleanupError}"
+
+    let private closeCleanupBatch (cleanups: Map<string, PendingTerminalCleanup>) =
+        cleanups
+        |> Map.toList
+        |> List.map (fun (sessionId, cleanup) ->
+            async {
+                let! result = closeTerminal sessionId cleanup.DataPlane cleanup.Process
+                return sessionId, cleanup, result
+            })
+        |> fun work -> Async.Parallel(work, maxDegreeOfParallelism = ShutdownParallelism)
+
+    let private closeAll (entries: Map<string, HostedTerminal>) =
         async {
-            do! stopAndClose terminal.DataPlane terminal.Process
+            let! results =
+                entries
+                |> Map.map (fun _ terminal ->
+                    { Process = terminal.Process
+                      DataPlane = Some terminal.DataPlane })
+                |> closeCleanupBatch
 
-            return { state with Entries = Map.remove key state.Entries; Revision = state.Revision + 1L }
+            return
+                results
+                |> Array.choose (function
+                    | key, _, Ok() -> Some key
+                    | _, _, Error _ -> None)
+                |> Set.ofArray
         }
 
-    let private pruneExited state =
+    let private retryPendingCleanups (state: RegistryState) =
         async {
-            let exited, live =
-                state.Entries
-                |> Map.partition (fun _ terminal -> terminal.Process.HasExited())
+            let! results = closeCleanupBatch state.PendingCleanups
 
-            do! closeAll exited
+            let remaining =
+                results
+                |> Array.choose (function
+                    | sessionId, cleanup, Error _ -> Some(sessionId, cleanup)
+                    | _, _, Ok() -> None)
+                |> Map.ofArray
 
-            if Map.isEmpty exited then
+            return { state with PendingCleanups = remaining }
+        }
+
+    let private removeAfterClose (state: RegistryState) (key, terminal: HostedTerminal) =
+        async {
+            match! closeTerminal key (Some terminal.DataPlane) terminal.Process with
+            | Error _ ->
                 return state
+            | Ok() ->
+                return { state with Entries = Map.remove key state.Entries; Revision = state.Revision + 1L }
+        }
+
+    let private pruneExited (state: RegistryState) =
+        async {
+            let exited, _ = state.Entries |> Map.partition (fun _ terminal -> terminal.Process.HasExited())
+            let! closed = closeAll exited
+            if Set.isEmpty closed then return state
             else
-                return { state with Entries = live; Revision = state.Revision + 1L }
+                return
+                    { state with
+                        Entries = state.Entries |> Map.filter (fun key _ -> not (Set.contains key closed))
+                        Revision = state.Revision + 1L }
+        }
+
+    let private maintain (state: RegistryState) =
+        async {
+            let! afterPendingCleanup = retryPendingCleanups state
+            return! pruneExited afterPendingCleanup
         }
 
     let private respond (channel: AsyncReplyChannel<'value>) value state =
-        channel.Reply value
-        state
+        channel.Reply value; state
 
     let private recoverMessage state message =
         async {
             try
                 match message with
-                | Start(_, reply) ->
-                    return respond reply (Error "Terminal registry operation failed") state
+                | Start(_, reply) -> return respond reply (Error "Terminal registry operation failed") state
                 | List reply
                 | Close(_, reply) -> return respond reply (snapshot state) state
-                | Shutdown reply -> return respond reply () state
+                | Shutdown reply -> return respond reply false state
                 | UpstreamExited _ -> return state
-            with _ ->
-                return state
+            with _ -> return state
+        }
+
+    let private rejectAfterCleanup
+        sessionId
+        startupError
+        (dataPlane: TerminalDataPlane option)
+        (terminalProcess: TerminalProcess)
+        =
+        async {
+            match! closeTerminal sessionId dataPlane terminalProcess with
+            | Ok() ->
+                return Rejected startupError
+            | Error cleanupFailure ->
+                return
+                    RejectedWithCleanup(
+                        pendingCleanupMessage
+                            startupError
+                            (cleanupFailureMessage cleanupFailure),
+                        sessionId,
+                        { Process = terminalProcess
+                          DataPlane = dataPlane }
+                    )
         }
 
     let private startHosted starter dataPlaneStarter notify worktree openedOrder =
@@ -102,71 +206,98 @@ module TerminalRegistry =
             let sessionId = Guid.NewGuid().ToString("N")
 
             match! starter sessionId worktree with
-            | Error error -> return Error error
+            | Error(TerminalLaunchFailure.LaunchFailed error) ->
+                return Rejected error
+            | Error(TerminalLaunchFailure.CleanupPending(startupError, cleanupError, terminalProcess)) ->
+                return
+                    RejectedWithCleanup(
+                        pendingCleanupMessage startupError cleanupError,
+                        sessionId,
+                        { Process = terminalProcess
+                          DataPlane = None }
+                    )
             | Ok terminalProcess when terminalProcess.HasExited() ->
-                terminalProcess.Close()
-                return Error "ttyd exited during terminal startup"
+                return!
+                    rejectAfterCleanup
+                        sessionId
+                        "ttyd exited during terminal startup"
+                        None
+                        terminalProcess
             | Ok terminalProcess ->
                 let! dataPlaneResult =
-                    async {
-                        try
-                            return! dataPlaneStarter sessionId terminalProcess.TtydPort (fun () -> notify sessionId)
-                        with error ->
-                            terminalProcess.Close()
-                            return raise error
-                    }
+                    dataPlaneStarter
+                        sessionId
+                        terminalProcess.TtydPort
+                        (fun () -> notify sessionId)
+                    |> Async.Catch
 
                 match dataPlaneResult with
-                | Error error ->
-                    terminalProcess.Close()
-                    return Error error
-                | Ok dataPlane when terminalProcess.HasExited() ->
-                    do! stopAndClose dataPlane terminalProcess
-                    return Error "ttyd exited during terminal startup"
-                | Ok dataPlane ->
+                | Choice2Of2 _ ->
+                    return!
+                        rejectAfterCleanup
+                            sessionId
+                            "Terminal registry operation failed"
+                            None
+                            terminalProcess
+                | Choice1Of2(Error error) ->
+                    return!
+                        rejectAfterCleanup
+                            sessionId
+                            error
+                            None
+                            terminalProcess
+                | Choice1Of2(Ok dataPlane) when terminalProcess.HasExited() ->
+                    return!
+                        rejectAfterCleanup
+                            sessionId
+                            "ttyd exited during terminal startup"
+                            (Some dataPlane)
+                            terminalProcess
+                | Choice1Of2(Ok dataPlane) ->
                     return
-                        Ok
-                            { Record =
-                                { SessionId = sessionId
-                                  WorktreePath = CanonicalWorktree.path worktree
-                                  AttachmentEndpoint = dataPlane.AttachmentEndpoint }
-                              Process = terminalProcess; DataPlane = dataPlane
-                              OpenedOrder = openedOrder }
+                        Hosted
+                            { Record = { SessionId = sessionId; WorktreePath = CanonicalWorktree.path worktree; AttachmentEndpoint = dataPlane.AttachmentEndpoint }
+                              Process = terminalProcess; DataPlane = dataPlane; OpenedOrder = openedOrder }
         }
 
     let create starter dataPlaneStarter =
         let initial =
-            { Entries = Map.empty; Revision = 0L
-              NextOpenedOrder = 0L; Stopped = false }
+            { Entries = Map.empty
+              PendingCleanups = Map.empty
+              Revision = 0L
+              NextOpenedOrder = 0L
+              Stopped = false }
 
         let processMessage (inbox: MailboxProcessor<RegistryMessage>) state message =
             async {
-                let! current = pruneExited state
+                let! current =
+                    match message with
+                    | Start _
+                    | List _ -> maintain state
+                    | Close _ | Shutdown _ | UpstreamExited _ -> async.Return state
 
                 match message with
-                | Start(_, reply) when current.Stopped ->
-                    return respond reply (Error "Terminal host is shutting down") current
-                | Start(_, reply) when current.Entries.Count >= MaximumTerminals ->
+                | Start(_, reply) when current.Stopped -> return respond reply (Error "Terminal host is shutting down") current
+                | Start(_, reply) when current.Entries.Count + current.PendingCleanups.Count >= MaximumTerminals ->
                     return respond reply (Error "Terminal host has reached its terminal limit") current
                 | Start(worktree, reply) ->
-                    match!
-                        startHosted
-                            starter
-                            dataPlaneStarter
-                            (UpstreamExited >> inbox.Post)
-                            worktree
-                            current.NextOpenedOrder
-                    with
-                    | Error error -> return respond reply (Error error) current
-                    | Ok terminal ->
+                    match! startHosted starter dataPlaneStarter (UpstreamExited >> inbox.Post) worktree current.NextOpenedOrder with
+                    | Rejected error ->
+                        return respond reply (Error error) current
+                    | RejectedWithCleanup(error, sessionId, cleanup) ->
                         let updated =
                             { current with
-                                Entries =
-                                    current.Entries
-                                    |> Map.add terminal.Record.SessionId terminal
+                                PendingCleanups =
+                                    current.PendingCleanups
+                                    |> Map.add sessionId cleanup }
+
+                        return respond reply (Error error) updated
+                    | Hosted terminal ->
+                        let updated =
+                            { current with
+                                Entries = current.Entries |> Map.add terminal.Record.SessionId terminal
                                 Revision = current.Revision + 1L
                                 NextOpenedOrder = current.NextOpenedOrder + 1L }
-
                         return respond reply (Ok(snapshot updated)) updated
                 | List reply -> return respond reply (snapshot current) current
                 | Close(sessionId, reply) ->
@@ -176,34 +307,41 @@ module TerminalRegistry =
                         let! updated = removeAfterClose current (sessionId, terminal)
                         return respond reply (snapshot updated) updated
                 | Shutdown reply ->
-                    do! closeAll current.Entries
+                    let! afterPendingCleanup = retryPendingCleanups current
+                    let! closed = closeAll afterPendingCleanup.Entries
+                    let remaining =
+                        afterPendingCleanup.Entries
+                        |> Map.filter (fun key _ -> not (Set.contains key closed))
+
+                    let clean =
+                        remaining.IsEmpty
+                        && Map.isEmpty afterPendingCleanup.PendingCleanups
 
                     let updated =
-                        { current with
-                            Entries = Map.empty
-                            Revision = current.Revision + if Map.isEmpty current.Entries then 0L else 1L
-                            Stopped = true }
+                        { afterPendingCleanup with
+                            Entries = remaining
+                            Revision = afterPendingCleanup.Revision + if closed.IsEmpty then 0L else 1L
+                            Stopped = clean }
 
-                    return respond reply () updated
+                    return
+                        respond
+                            reply
+                            clean
+                            updated
                 | UpstreamExited sessionId ->
                     match Map.tryFind sessionId current.Entries with
                     | None -> return current
                     | Some terminal ->
                         return! removeAfterClose current (sessionId, terminal)
             }
-
         let mailbox = ResilientMailbox.start "TerminalRegistry" initial recoverMessage processMessage
-
         TerminalRegistry mailbox
 
     let start (TerminalRegistry mailbox) worktree =
         ResilientMailbox.ask ReplyTimeoutMilliseconds (fun reply -> Start(worktree, reply)) mailbox
-
     let list (TerminalRegistry mailbox) =
         ResilientMailbox.ask ReplyTimeoutMilliseconds List mailbox
-
     let close (TerminalRegistry mailbox) sessionId =
         ResilientMailbox.ask ReplyTimeoutMilliseconds (fun reply -> Close(sessionId, reply)) mailbox
-
     let shutdown (TerminalRegistry mailbox) =
         ResilientMailbox.ask ShutdownReplyTimeoutMilliseconds Shutdown mailbox
