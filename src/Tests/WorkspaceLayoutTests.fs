@@ -31,6 +31,11 @@ type WorkspaceLayoutTests() =
     let widthButtons (page: IPage) =
         page.Locator(".header-controls .workspace-width-btn")
 
+    let waitForWorkspaceWidthSave (page: IPage) (action: unit -> Task) =
+        page.RunAndWaitForResponseAsync(
+            Func<Task>(action),
+            Func<IResponse, bool>(fun response -> response.Url.EndsWith("/IWorktreeApi/saveWorkspaceWidth")))
+
     let assertShares (page: IPage) shares =
         task {
             for selector, expected in shares do
@@ -142,9 +147,7 @@ type WorkspaceLayoutTests() =
             let! labels = buttons.AllTextContentsAsync()
             Assert.That(labels, Is.EqualTo([| "1:1:1"; "1:2:1"; "2:2:1" |]))
             let! saved =
-                this.Page.RunAndWaitForResponseAsync(
-                    (fun () -> buttons.Nth(index).ClickAsync()),
-                    Func<IResponse, bool>(fun response -> response.Url.EndsWith("/IWorktreeApi/saveWorkspaceWidth")))
+                waitForWorkspaceWidthSave this.Page (fun () -> buttons.Nth(index).ClickAsync())
             Assert.That(saved.Ok, Is.True, "The selected ratio must be accepted by the persistence API")
             let total = terminal + canvas + dashboard
             do! assertShares this.Page [
@@ -173,6 +176,70 @@ type WorkspaceLayoutTests() =
             do! assertShares this.Page [ pane, 0.5; ".dashboard", 0.5 ]
             do! buttons.Nth(1).ClickAsync()
             do! assertShares this.Page [ pane, 2.0 / 3.0; ".dashboard", 1.0 / 3.0 ]
+        }
+
+    [<Test>]
+    member this.``Terminal-only default wide choice restores two-two-one when Canvas opens``() =
+        task {
+            do! focusFirstCard this.Page
+            do! showTerminal this.Page
+            let buttons = widthButtons this.Page
+            let! initial = this.Page.Locator(".workspace-width-btn.active").AllTextContentsAsync()
+            Assert.That(initial, Is.EqualTo([| "1:1" |]))
+
+            let! saved =
+                waitForWorkspaceWidthSave this.Page (fun () -> buttons.Nth(1).ClickAsync())
+            Assert.That(saved.Ok, Is.True, "The terminal-wide selection must be accepted by the persistence API")
+
+            do! ensureCanvasPaneOpen this.Page
+            let! labels = buttons.AllTextContentsAsync()
+            let! active = this.Page.Locator(".workspace-width-btn.active").AllTextContentsAsync()
+            Assert.Multiple(fun () ->
+                Assert.That(labels, Is.EqualTo([| "1:1:1"; "1:2:1"; "2:2:1" |]))
+                Assert.That(active, Is.EqualTo([| "2:2:1" |])))
+            do! assertShares this.Page [
+                ".terminal-pane", 0.4
+                ".canvas-pane", 0.4
+                ".dashboard", 0.2
+            ]
+        }
+
+    [<Test>]
+    member this.``Workspace ratio buttons support keyboard activation and pressed state``() =
+        task {
+            do! focusFirstCard this.Page
+            do! ensureCanvasPaneOpen this.Page
+            do! showTerminal this.Page
+            let buttons = widthButtons this.Page
+            let! ratioButtonsAreFocusable =
+                buttons.EvaluateAllAsync<bool>(
+                    "buttons => buttons.length === 3 && buttons.every(button => button.tabIndex === 0)")
+            let! unrelatedButtonsStayOutOfTabOrder =
+                this.Page
+                    .Locator(".header-controls > .ctrl-btn")
+                    .EvaluateAllAsync<bool>(
+                        "buttons => buttons.length > 0 && buttons.every(button => button.tabIndex === -1)")
+            Assert.Multiple(fun () ->
+                Assert.That(ratioButtonsAreFocusable, Is.True)
+                Assert.That(unrelatedButtonsStayOutOfTabOrder, Is.True))
+
+            do! Assertions.Expect(buttons.First).ToHaveAttributeAsync("aria-pressed", "true")
+            do! Assertions.Expect(buttons.Nth(2)).ToHaveAttributeAsync("aria-pressed", "false")
+            do! buttons.Nth(2).FocusAsync()
+            do! Assertions.Expect(buttons.Nth(2)).ToBeFocusedAsync()
+            let! enterSaved =
+                waitForWorkspaceWidthSave this.Page (fun () -> buttons.Nth(2).PressAsync("Enter"))
+            Assert.That(enterSaved.Ok, Is.True)
+            do! Assertions.Expect(buttons.First).ToHaveAttributeAsync("aria-pressed", "false")
+            do! Assertions.Expect(buttons.Nth(2)).ToHaveAttributeAsync("aria-pressed", "true")
+
+            do! buttons.First.FocusAsync()
+            do! Assertions.Expect(buttons.First).ToBeFocusedAsync()
+            let! spaceSaved =
+                waitForWorkspaceWidthSave this.Page (fun () -> buttons.First.PressAsync("Space"))
+            Assert.That(spaceSaved.Ok, Is.True)
+            do! Assertions.Expect(buttons.First).ToHaveAttributeAsync("aria-pressed", "true")
+            do! Assertions.Expect(buttons.Nth(2)).ToHaveAttributeAsync("aria-pressed", "false")
         }
 
     [<TestCase(true, 1)>]
@@ -222,6 +289,18 @@ type WorkspaceLayoutTests() =
             do! assertShares this.Page [ ".dashboard", 1.0 ]
         }
 
+    [<Test>]
+    member this.``Header hides centered mascot before controls overlap without changing desktop layout``() =
+        task {
+            do! this.Page.SetViewportSizeAsync(960, 900)
+            do! focusFirstCard this.Page
+            do! ensureCanvasPaneOpen this.Page
+            do! showTerminal this.Page
+            do! Assertions.Expect(this.Page.Locator(".header-center")).ToHaveCSSAsync("display", "none")
+            do! Assertions.Expect(widthButtons this.Page).ToHaveCountAsync(3)
+            do! Assertions.Expect(this.Page.Locator(".app-layout")).ToHaveCSSAsync("flex-direction", "row")
+        }
+
     [<TestCase(0)>]
     [<TestCase(1)>]
     [<TestCase(2)>]
@@ -248,10 +327,9 @@ type WorkspaceLayoutTests() =
                 this.Page.EvaluateAsync<bool>(
                     "() => document.documentElement.scrollWidth > document.documentElement.clientWidth")
             Assert.That(overflow, Is.False)
-            let! flex =
-                this.Page.EvaluateAsync<string[]>(
-                    "() => ['.terminal-pane', '.canvas-pane', '.dashboard'].map(s => getComputedStyle(document.querySelector(s)).flex)")
-            Assert.That(flex, Is.EqualTo([| "1 1 0px"; "1 1 0px"; "1 1 0px" |]), "Desktop ratios do not affect stacked panes")
+
+            for selector in [ ".terminal-pane"; ".canvas-pane"; ".dashboard" ] do
+                do! Assertions.Expect(this.Page.Locator(selector)).ToHaveCSSAsync("flex", "1 1 0px")
         }
 
     [<Test>]

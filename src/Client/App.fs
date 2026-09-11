@@ -1315,7 +1315,9 @@ let viewAppHeader model dispatch =
             let pane = if model.TerminalPaneOpen then "Terminal" else "Canvas"
             let wideWidth =
                 match model.Canvas.WorkspaceWidth with
-                | WorkspaceWidth.EqualThirds
+                | WorkspaceWidth.EqualThirds ->
+                    if model.TerminalPaneOpen then WorkspaceWidth.WidePanes
+                    else WorkspaceWidth.WideCanvas
                 | WorkspaceWidth.WideCanvas -> WorkspaceWidth.WideCanvas
                 | WorkspaceWidth.WidePanes -> WorkspaceWidth.WidePanes
             [ WorkspaceWidth.EqualThirds, "1:1", $"Equal split - {pane} and Dashboard"
@@ -1396,11 +1398,12 @@ let viewAppHeader model dispatch =
                                     prop.className "workspace-width-group"
                                     prop.children [
                                         for width, label, title in widthChoices do
+                                            let isSelected = width = model.Canvas.WorkspaceWidth
                                             Html.button [
                                                 prop.className (
-                                                    if width = model.Canvas.WorkspaceWidth then "ctrl-btn workspace-width-btn active"
+                                                    if isSelected then "ctrl-btn workspace-width-btn active"
                                                     else "ctrl-btn workspace-width-btn")
-                                                yield! noFocusProps
+                                                prop.ariaPressed isSelected
                                                 prop.onClick (fun _ -> dispatch (SetWorkspaceWidth width))
                                                 prop.title title
                                                 prop.text label
