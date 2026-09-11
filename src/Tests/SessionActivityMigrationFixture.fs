@@ -255,8 +255,7 @@ VALUES
 """
     command.ExecuteNonQuery() |> ignore
 
-/// A `session_instances` row keyed by exact process identity, the shape used to prove that
-/// reused PIDs are keyed by their distinct start ticks.
+/// A `session_instances` row keyed by exact process identity plus durable session ID.
 let insertExactInstance path processId processStartTicks sessionId =
     use connection = openConnection path
     use command = connection.CreateCommand()
@@ -274,17 +273,20 @@ VALUES
     command.Parameters.AddWithValue("$sessionId", (sessionId: string)) |> ignore
     command.ExecuteNonQuery() |> ignore
 
-/// An `activity_events` row keyed by exact process identity, the shape used to prove that event
-/// idempotency is scoped to one exact process identity rather than the durable session id.
-let insertExactEvent path processId processStartTicks eventId =
+/// An `activity_events` row keyed by one process-session binding.
+let insertExactEvent path processId processStartTicks sessionId eventId =
     use connection = openConnection path
     use command = connection.CreateCommand()
     command.CommandText <-
         """
-INSERT INTO activity_events (process_id, process_start_ticks, event_id, ts)
-VALUES ($processId, $processStartTicks, $eventId, '2026-09-04T10:00:00.0000000+00:00');
+INSERT INTO activity_events
+    (process_id, process_start_ticks, session_id, event_id, ts)
+VALUES
+    ($processId, $processStartTicks, $sessionId, $eventId,
+     '2026-09-04T10:00:00.0000000+00:00');
 """
     command.Parameters.AddWithValue("$processId", (processId: int)) |> ignore
     command.Parameters.AddWithValue("$processStartTicks", (processStartTicks: int64)) |> ignore
+    command.Parameters.AddWithValue("$sessionId", (sessionId: string)) |> ignore
     command.Parameters.AddWithValue("$eventId", (eventId: string)) |> ignore
     command.ExecuteNonQuery() |> ignore

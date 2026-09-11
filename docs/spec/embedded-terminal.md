@@ -545,7 +545,9 @@ Observed exited or PID-reused registrations are removed conditionally against th
 was probed, so a concurrent heartbeat cannot be deleted. Bulk shutdown bounds request and process
 probe concurrency, then waits through one 100-millisecond batch loop backed by one in-memory activity
 closure snapshot per interval and one shared 30-second deadline.
-The live `session.shutdown` event stops reporting heartbeats and closes that exact process instance.
+The live `session.shutdown` event stops that reporter's heartbeats and closes its process-session
+binding. The parent CLI process can remain alive and bind a new session without losing the prior
+session's durable history.
 
 Replacement snapshots terminal presentation, every exact shutdown target, and the single selected
 Resume identity per terminal before graceful shutdown. `TerminalSessionActivity` uses

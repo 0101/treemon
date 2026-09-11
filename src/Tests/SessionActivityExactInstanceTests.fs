@@ -294,6 +294,88 @@ type PresenceAcknowledgementTests() =
 type CloseProcessIsolationTests() =
 
     [<Test>]
+    member _.``A new session under the same process supersedes the prior binding``() =
+        let identity = exactIdentity 4300 5300L
+        let resolver = ProcessIdentityResolver.create (fun _ -> Ok(Some identity))
+        let owningTerminal = terminal "4300"
+        let at = ts "2026-09-04T10:00:00Z"
+
+        withService resolver (fun (service, store, dbPath) ->
+            present service 4300 "first-session" (Some owningTerminal) at
+            |> requirePresence
+            |> ignore
+
+            service.Submit(
+                report
+                    4300
+                    "first-session"
+                    (Some owningTerminal)
+                    "first-prompt"
+                    (at.AddMilliseconds(500.0))
+                    (UserPrompt
+                        { Text = "first prompt"
+                          At = at.AddMilliseconds(500.0) })
+            )
+
+            service.ExactSnapshot() |> ignore
+
+            present service 4300 "second-session" (Some owningTerminal) (at.AddSeconds(1.0))
+            |> requirePresence
+            |> ignore
+
+            service.Submit(
+                report
+                    4300
+                    "second-session"
+                    (Some owningTerminal)
+                    "second-prompt"
+                    (at.AddSeconds(2.0))
+                    (UserPrompt
+                        { Text = "second prompt"
+                          At = at.AddSeconds(2.0) })
+            )
+
+            service.Submit(
+                report
+                    4300
+                    "first-session"
+                    (Some owningTerminal)
+                    "late-first-shutdown"
+                    (at.AddSeconds(3.0))
+                    SessionClosed
+            )
+
+            service.ExactSnapshot() |> ignore
+
+            let first =
+                store.InstancesBySession(SessionId "first-session")
+                |> List.exactlyOne
+
+            let second =
+                store.InstancesBySession(SessionId "second-session")
+                |> List.exactlyOne
+
+            let retained = store.RetainedByWorktree()[WorktreePath.value exactWorktree]
+
+            Assert.Multiple(fun () ->
+                Assert.That(first.ClosedAt, Is.EqualTo(Some(at.AddSeconds(1.0))))
+                Assert.That(second.ClosedAt, Is.EqualTo None)
+                Assert.That(
+                    second.Status.LastUserMessage |> Option.map _.Text,
+                    Is.EqualTo(Some "second prompt")
+                )
+                Assert.That(retained.SessionId, Is.EqualTo(SessionId "second-session"))
+                Assert.That(
+                    store.InstanceByIdentity identity |> Option.map _.SessionId,
+                    Is.EqualTo(Some(SessionId "second-session"))
+                )
+                Assert.That(
+                    SqliteTestDatabase.scalarInt dbPath "SELECT count(*) FROM session_instances;",
+                    Is.EqualTo 2,
+                    "both durable session bindings must remain available"
+                )))
+
+    [<Test>]
     member _.``CloseProcess closes only the selected exact identity and rejects its reopening while a reused PID starts a fresh row``() =
         let first = exactIdentity 4301 5301L
         let second = exactIdentity 4302 5302L

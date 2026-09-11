@@ -48,11 +48,12 @@ shared state; no session-log parsing remains.
 - Background lifecycle is keyed by the SDK `toolCallId`. Start and terminal timestamps merge
   independently, so duplicate and out-of-order delivery is deterministic. Sub-agent content remains
   excluded; only explicit Copilot background-agent lifecycle affects the parent status.
-- Each CLI process is a distinct session instance identified by the exact Copilot process PID and
-  process-start identity resolved when its reporting extension connects. The complete lifecycle
-  fold, activity fields, liveness, closure, and terminal origin belong to that instance. A durable
-  Copilot `SessionId` may therefore have several simultaneous instances without shared mutable
-  state.
+- Each process-session binding is a distinct session instance identified by the exact Copilot
+  process PID/start identity plus durable `SessionId`. A CLI process may switch sessions without
+  exiting; acknowledged presence for the new session closes the prior binding and opens a new row.
+  The complete lifecycle fold, activity fields, liveness, closure, and terminal origin belong to
+  that binding. A durable `SessionId` may also have simultaneous bindings in several processes
+  without shared mutable state.
 - An instance is open while it has not been explicitly closed and its latest server-received
   presence observation is newer than `openWindow` (3 minutes). A defensive `stalenessTimeout`
   (5 minutes) can downgrade stale active conversation state, and `idleWindow` (2 hours) bounds the
@@ -64,11 +65,12 @@ shared state; no session-log parsing remains.
   cadence starts immediately after presence is acknowledged and cannot be delayed by replay. A
   heartbeat transport failure invalidates the in-flight replay generation and restarts the presence
   handshake.
-- A live `session.shutdown` stops heartbeats and closes its exact process instance. Terminal
-  lifecycle orchestration also closes every exact instance whose terminal teardown and survivor
-  verification completed, including when graceful SDK shutdown was unavailable, rejected, or timed
-  out. Both paths are monotonic: later reports from that closed process cannot reopen it. Resuming
-  the same durable session creates a new process identity and therefore a new open instance.
+- A live `session.shutdown` stops that reporter's heartbeats and closes its process-session binding.
+  The parent CLI process may remain alive and subsequently present another session; that new binding
+  supersedes the prior one without deleting its durable history. Terminal lifecycle orchestration
+  also closes every current binding whose terminal teardown and survivor verification completed,
+  including when graceful SDK shutdown was unavailable, rejected, or timed out. Closure remains
+  monotonic within each binding.
   Exact activity closure is not proof that the operating-system process has left its foreground
   terminal; replacement therefore submits Resume only into a terminal it recreated on a verified
   host after the previous host exited.
@@ -316,26 +318,30 @@ environment values, exception text, and raw reports are not diagnostic inputs.
 
 `SessionActivityStore` uses SQLite WAL with short-lived connections:
 
-- `session_instances` stores the complete folded state keyed by exact Copilot process identity:
-  durable session identity, optional terminal origin, worktree, provider, lifecycle state, activity,
-  messages, context gauge, independent clocks, receipt-time liveness, and monotonic closure.
+- `session_instances` stores the complete folded state keyed by exact Copilot process identity plus
+  durable session identity: optional terminal origin, worktree, provider, lifecycle state, activity,
+  messages, context gauge, independent clocks, receipt-time liveness, and binding-local monotonic
+  closure.
 - `resume_sessions` keeps only `session_id`, `worktree_path`, and `updated_at` for sessions that
   existed before this schema. It exists so explicit Resume can still select a pre-upgrade
   conversation; it carries no status, footer content, liveness, or process identity, and retention
   removes old rows.
-- `activity_events` stores only `(process_id, process_start_ticks, event_id)` plus `ts`. It is a
-  deduplication key set, not an audit log: folded state lives on `session_instances`, and canonical
-  Overview history uses direct 30-second snapshots.
+- `activity_events` stores only
+  `(process_id, process_start_ticks, session_id, event_id)` plus `ts`. It is a deduplication key set,
+  not an audit log: folded state lives on `session_instances`, and canonical Overview history uses
+  direct 30-second snapshots.
 - Background-agent start/finish clocks are stored on the process instance so server restart cannot
   misclassify an Idle parent with active delegated work.
 
 Store construction is one transaction: it creates the current tables, adds the per-instance
-lifecycle clock to older exact rows, copies the durable identity of any pre-upgrade `session_status`
-or prior `retained_sessions` row into `resume_sessions` (greatest `updated_at` per session), rebuilds
-`activity_events` down to its dedupe key, and drops the retired `session_status`,
-`retained_sessions`, and `worktree_representatives` tables. Process-keyed event rows keep their key
-and timestamp; rows keyed by event ID alone are discarded because their exact producer cannot be
-recovered. Repeating construction is a no-op and any failure rolls the whole upgrade back.
+lifecycle clock to older exact rows, expands process-only instance keys to process-session bindings,
+copies the durable identity of any pre-upgrade `session_status` or prior `retained_sessions` row
+into `resume_sessions` (greatest `updated_at` per session), rebuilds `activity_events` down to its
+binding-scoped dedupe key, and drops the retired `session_status`, `retained_sessions`, and
+`worktree_representatives` tables. Process-keyed event rows gain their session ID from the
+one-row-per-process schema they accompany; rows keyed by event ID alone are discarded because their
+exact producer cannot be recovered. Repeating construction is a no-op and any failure rolls the
+whole upgrade back.
 
 Pre-upgrade footer content — titles, intents, messages, skill, and context gauges — is deliberately
 not migrated. Immediately after upgrade a card can show no footer history until its worktree reports
@@ -355,10 +361,11 @@ reconstruction infrastructure is not part of this store.
 
 ### Worktree projection
 
-`SchedulerState.SessionInstances` is keyed by exact process identity and never deduplicates a
-durable `SessionId`. `CodingToolStatus.collapseByWorktree` is the single projection from those
-instances to card fields. `WorktreeApi` derives markers and aggregate status only from open exact
-instances, then separately joins each worktree's greatest durable
+`SchedulerState.SessionInstances` is keyed by exact process identity and keeps only that process's
+current session binding; superseded bindings remain durable in SQLite. It never deduplicates a
+durable `SessionId` across different processes. `CodingToolStatus.collapseByWorktree` is the single
+projection from current bindings to card fields. `WorktreeApi` derives markers and aggregate status
+only from open exact instances, then separately joins each worktree's greatest durable
 `(UpdatedAt, SessionId, ProcessIdentity)` exact instance for footer content. That representative and
 closed prior process instances remain eligible only for footer and explicit Resume history; they
 have no liveness, terminal-origin, or process-address fields in the application read model.
@@ -392,19 +399,19 @@ into lifecycle status.
 | Ask-user ordering | Persist independent request/completion clocks; do not keep lifecycle state in the extension. |
 | Liveness | Acknowledged presence and heartbeats update one process instance using server receipt time; heartbeat starts on acknowledgement and sends independently of replay; usage does not establish presence. |
 | Representative ordering | Use instance `(UpdatedAt, SessionId, ProcessIdentity)`; liveness gates openness and automatic replacement eligibility but never replaces lifecycle ordering. |
-| Multiple instances | Preserve concurrent CLI processes for one durable session as separate full fold rows; never let one event or heartbeat replace another instance's status, origin, or closure. |
+| Multiple instances | Preserve concurrent CLI processes and sequential sessions within one process as separate full fold rows; never let one binding's event or heartbeat replace another's status, origin, or closure. |
 | Ownership boundary | Session activity owns reporting, exact-instance state, liveness, and monotonic closure; embedded-terminal orchestration owns shutdown policy, authoritative teardown, fail-closed staged-host cleanup, and survivor cleanup. |
 | Startup reconciliation | Keep each recently open terminal-owned instance pending until that exact identity re-presents, dies, loses its terminal origin, or reaches `openWindow`; never use one global startup delay. |
 | Background agents | Persist per-tool start/finish clocks on each exact instance; WaitingForUser outranks background Working; stale-gap cleanup bounds abandoned clocks. |
 | Footer | Decouple from the status dot and merge the SQL-ranked greatest durable exact instance per worktree. |
 | Activity | Use freshest source-tagged intent/title; bootstrap title from metadata, never infer intent. |
 | Context usage | Persist the last-known gauge and ordering timestamp; do not append it to activity events. |
-| Persistence | Store exact process-instance folds in full; keep event rows as dedupe keys only and pre-upgrade history as bare resume identity; rebuild legacy schema transactionally. |
+| Persistence | Store exact process-session binding folds in full; keep event rows as binding-scoped dedupe keys only and pre-upgrade history as bare resume identity; rebuild legacy schema transactionally. |
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
 | Explicit Resume | Once invoked, query durable most-recent activity identity, then use bounded live exact-origin state only to reuse that target's running terminal instead of launching a duplicate process. |
 | Terminal origin | Validate and persist optional `TerminalSessionId` on the process instance; a focused terminal module derives exact ownership for tab activity, Resume idempotency, and replacement, never from worktree inference. |
-| Explicit close | Live `session.shutdown` or confirmed terminal teardown closes one exact process instance monotonically; heartbeat expiry remains the crash fallback. |
+| Explicit close | Live `session.shutdown` closes one process-session binding; confirmed terminal teardown closes the current binding for each exact process, and heartbeat expiry remains the crash fallback. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
 
 ## Key Files

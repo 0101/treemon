@@ -127,6 +127,30 @@ let internal applyPresence
         |> Option.map (preparePrior exact.ReceivedAt)
 
     match prior with
+    | Some existing when existing.SessionId <> exact.Report.SessionId ->
+        match resolvedTerminalOrigin existing exact.Report with
+        | Error reason -> Error(false, reason)
+        | Ok terminalSessionId ->
+            let next =
+                { createPresenceInstance exact with
+                    TerminalSessionId = terminalSessionId }
+
+            let persisted =
+                store.SupersedeInstance(
+                    existing,
+                    next,
+                    exact.ReceivedAt
+                )
+
+            Ok(
+                publishInstance
+                    scheduler
+                    exact.ReceivedAt
+                    (Some existing)
+                    state
+                    persisted,
+                persisted
+            )
     | Some existing when not (exactMetadataMatches existing exact.Report) ->
         Error(
             false,
@@ -194,6 +218,7 @@ let private isIndependentHistory =
 
 let private eventRow (exact: ExactReport) =
     { ProcessIdentity = exact.ProcessIdentity
+      SessionId = exact.Report.SessionId
       EventId = exact.Report.EventId
       Ts = exact.Report.OccurredAt }
 
@@ -394,6 +419,7 @@ let private applyClosure
             match
                 store.CloseInstance(
                     exact.ProcessIdentity,
+                    prior.SessionId,
                     exact.Report.OccurredAt,
                     terminalSessionId
                 )
@@ -503,11 +529,12 @@ let internal reconcilePending
                 current.ActivityEpochState
                 |> recordTerminalOriginActivity changedOrigins }
 
-    let closeDead identity instance current =
+    let closeDead identity (instance: StoredInstance) current =
         try
             match
                 store.CloseInstance(
                     identity,
+                    instance.SessionId,
                     now,
                     instance.TerminalSessionId
                 )

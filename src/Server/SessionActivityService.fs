@@ -318,6 +318,7 @@ type SessionActivityService internal
                                 match
                                     store.CloseInstance(
                                         identity,
+                                        prior.SessionId,
                                         closedAt,
                                         None
                                     )

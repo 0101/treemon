@@ -57,26 +57,27 @@ type ProcessIdentitySchemaTests() =
             Assert.That(ProcessIdentity.create 1 0L |> Result.isError, Is.True))
 
     [<Test>]
-    member _.``Session instances key reused PIDs by their distinct start ticks``() =
+    member _.``Session instances key process-session bindings while retaining PID start identity``() =
         withDbPath (fun path ->
             use _store = new SessionActivityStore(path)
 
             insertExactInstance path 7001 8001L "shared-session"
+            insertExactInstance path 7001 8001L "next-session"
             insertExactInstance path 7001 8002L "shared-session"
 
             Assert.Multiple(fun () ->
                 Assert.That(
                     primaryKeyColumns path "session_instances",
-                    Is.EqualTo([ "process_id"; "process_start_ticks" ])
+                    Is.EqualTo([ "process_id"; "process_start_ticks"; "session_id" ])
                 )
                 Assert.That(
                     indexColumns path "ix_instances_terminal_activity",
                     Is.EqualTo([ "terminal_session_id"; "updated_at"; "session_id" ])
                 )
-                Assert.That(scalarInt path "SELECT count(*) FROM session_instances;", Is.EqualTo 2))
+                Assert.That(scalarInt path "SELECT count(*) FROM session_instances;", Is.EqualTo 3))
 
             Assert.Throws<SqliteException>(fun () ->
-                insertExactInstance path 7001 8001L "other-session")
+                insertExactInstance path 7001 8001L "shared-session")
             |> ignore
 
             Assert.Throws<SqliteException>(fun () ->
@@ -88,28 +89,29 @@ type ProcessIdentitySchemaTests() =
             |> ignore)
 
     [<Test>]
-    member _.``Activity event idempotency is scoped to one exact process identity``() =
+    member _.``Activity event idempotency is scoped to one process-session binding``() =
         withDbPath (fun path ->
             use _store = new SessionActivityStore(path)
 
-            insertExactEvent path 7001 8001L "same-event"
-            insertExactEvent path 7001 8002L "same-event"
+            insertExactEvent path 7001 8001L "session-a" "same-event"
+            insertExactEvent path 7001 8001L "session-b" "same-event"
+            insertExactEvent path 7001 8002L "session-a" "same-event"
 
             Assert.Throws<SqliteException>(fun () ->
-                insertExactEvent path 7001 8001L "same-event")
+                insertExactEvent path 7001 8001L "session-a" "same-event")
             |> ignore
 
             Assert.Multiple(fun () ->
                 Assert.That(
                     primaryKeyColumns path "activity_events",
-                    Is.EqualTo([ "process_id"; "process_start_ticks"; "event_id" ])
+                    Is.EqualTo([ "process_id"; "process_start_ticks"; "session_id"; "event_id" ])
                 )
                 Assert.That(
                     tableColumns path "activity_events",
-                    Is.EqualTo([ "process_id"; "process_start_ticks"; "event_id"; "ts" ]),
+                    Is.EqualTo([ "process_id"; "process_start_ticks"; "session_id"; "event_id"; "ts" ]),
                     "event rows carry the dedupe key only"
                 )
-                Assert.That(scalarInt path "SELECT count(*) FROM activity_events;", Is.EqualTo 2)))
+                Assert.That(scalarInt path "SELECT count(*) FROM activity_events;", Is.EqualTo 3)))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -158,6 +160,7 @@ type SessionHistoryMigrationTests() =
 
             let eventRow =
                 { ProcessIdentity = currentWriterIdentity
+                  SessionId = stored.SessionId
                   EventId = EventId "current-writer-event"
                   Ts = ts "2026-09-04T10:00:00Z" }
 
@@ -204,17 +207,23 @@ type SessionHistoryMigrationTests() =
                 )
                 Assert.That(
                     tableColumns path "activity_events",
-                    Is.EqualTo([ "process_id"; "process_start_ticks"; "event_id"; "ts" ])
+                    Is.EqualTo([ "process_id"; "process_start_ticks"; "session_id"; "event_id"; "ts" ])
+                )
+                Assert.That(
+                    primaryKeyColumns path "session_instances",
+                    Is.EqualTo([ "process_id"; "process_start_ticks"; "session_id" ]),
+                    "the prior process-only table migrates to process-session bindings"
                 )
                 Assert.That(
                     scalarInt
                         path
                         "SELECT count(*) FROM activity_events
                          WHERE process_id = 9100 AND process_start_ticks = 9200
+                           AND session_id = 'prior-exact-session'
                            AND event_id = 'prior-event'
                            AND ts = '2026-09-04T09:58:00.0000000+00:00';",
                     Is.EqualTo 1,
-                    "process-keyed events keep their key and timestamp"
+                    "process-keyed events gain their owning session without losing their timestamp"
                 )
                 Assert.That(
                     retained["C:/wt/prior"].SessionId,
@@ -280,7 +289,7 @@ type SessionHistoryMigrationTests() =
                 Assert.That(scalarInt path "SELECT count(*) FROM activity_events;", Is.Zero)
                 Assert.That(
                     primaryKeyColumns path "activity_events",
-                    Is.EqualTo([ "process_id"; "process_start_ticks"; "event_id" ])
+                    Is.EqualTo([ "process_id"; "process_start_ticks"; "session_id"; "event_id" ])
                 )))
 
     [<Test>]
@@ -292,7 +301,7 @@ type SessionHistoryMigrationTests() =
              ())
 
             insertExactInstance path 7200 8200L "exact-session"
-            insertExactEvent path 7200 8200L "exact-event"
+            insertExactEvent path 7200 8200L "exact-session" "exact-event"
 
             (use _reopened = new SessionActivityStore(path)
              ())

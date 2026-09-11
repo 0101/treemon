@@ -12,7 +12,7 @@ open Tests.TestUtils
 open Tests.SessionActivityMigrationFixture
 
 // These exercise the SQLite (WAL) durable mirror behind the push-model live state: exact snapshot
-// replacement, process-scoped event dedupe, restart rebuild, durable resume lookup, and retention.
+// replacement, process-session event dedupe, restart rebuild, durable resume lookup, and retention.
 // Each test runs against a fresh temp .db file that is disposed + deleted in teardown.
 
 /// Like withStore but hands the raw db path to the test so it can construct + dispose multiple store
@@ -61,8 +61,9 @@ let private insertEvent dbPath (row: ActivityEventRow) =
     use cmd = conn.CreateCommand()
     cmd.CommandText <-
         """
-INSERT INTO activity_events (process_id, process_start_ticks, event_id, ts)
-VALUES ($processId, $processStartTicks, $eventId, $ts);
+INSERT INTO activity_events
+    (process_id, process_start_ticks, session_id, event_id, ts)
+VALUES ($processId, $processStartTicks, $sessionId, $eventId, $ts);
 """
     cmd.Parameters.AddWithValue("$processId", ProcessIdentity.processId row.ProcessIdentity) |> ignore
     cmd.Parameters.AddWithValue(
@@ -70,6 +71,7 @@ VALUES ($processId, $processStartTicks, $eventId, $ts);
         ProcessIdentity.processStartTimeUtcTicks row.ProcessIdentity
     )
     |> ignore
+    cmd.Parameters.AddWithValue("$sessionId", SessionId.value row.SessionId) |> ignore
     cmd.Parameters.AddWithValue("$eventId", EventId.value row.EventId) |> ignore
     cmd.Parameters.AddWithValue("$ts", row.Ts.ToUniversalTime().ToString("O")) |> ignore
     cmd.ExecuteNonQuery() |> ignore
@@ -113,6 +115,7 @@ let private withUsage
 let private eventOf eid sid t : ActivityEventRow =
     { ProcessIdentity =
         sid |> collisionResistantProcessIdentityForSessionId
+      SessionId = SessionId sid
       EventId = EventId eid
       Ts = ts t }
 

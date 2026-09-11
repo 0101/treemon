@@ -30,8 +30,8 @@ type RetainedSession =
       UpdatedAt: DateTimeOffset
       ContextUsageAt: DateTimeOffset option }
 
-/// One exact physical Copilot process. Lifecycle, content, usage, liveness, terminal origin, and
-/// closure retain independent clocks/fields on this row.
+/// One durable session binding to an exact physical Copilot process. A process can bind sequentially
+/// to several sessions, whose lifecycle and content remain separate rows.
 type StoredInstance =
     { ProcessIdentity: ProcessIdentity
       SessionId: SessionId
@@ -67,9 +67,10 @@ module StoredInstance =
         |> List.tryHead
 
 /// One accepted history-bearing event, reduced to its deduplication key. Event identity is scoped
-/// to the exact producer process; folded state lives on `session_instances`.
+/// to one process-session binding; folded state lives on `session_instances`.
 type ActivityEventRow =
     { ProcessIdentity: ProcessIdentity
+      SessionId: SessionId
       EventId: EventId
       Ts: DateTimeOffset }
 
@@ -524,8 +525,7 @@ VALUES
      $contextCurrent, $contextLimit, $contextAt,
      $awaitingUserSince, $userInputCompletedAt, $terminalSessionId,
      $backgroundAgentClocks, $closedAt)
-ON CONFLICT(process_id, process_start_ticks) DO UPDATE SET
-    session_id = excluded.session_id,
+ON CONFLICT(process_id, process_start_ticks, session_id) DO UPDATE SET
     worktree_path = excluded.worktree_path,
     provider = excluded.provider,
     status = excluded.status,
@@ -554,9 +554,9 @@ ON CONFLICT(process_id, process_start_ticks) DO UPDATE SET
 let private appendSql =
     """
 INSERT OR IGNORE INTO activity_events
-    (process_id, process_start_ticks, event_id, ts)
+    (process_id, process_start_ticks, session_id, event_id, ts)
 VALUES
-    ($processId, $processStartTicks, $eventId, $timestamp);
+    ($processId, $processStartTicks, $sessionId, $eventId, $timestamp);
 """
 
 let private closeSql =
@@ -565,7 +565,9 @@ UPDATE session_instances
 SET closed_at = COALESCE(closed_at, $closedAt),
     terminal_session_id = COALESCE($terminalSessionId, terminal_session_id)
 WHERE process_id = $processId
-  AND process_start_ticks = $processStartTicks;
+  AND process_start_ticks = $processStartTicks
+  AND session_id = $sessionId
+  AND closed_at IS NULL;
 """
 
 let private instanceByIdentitySql =
@@ -574,6 +576,17 @@ SELECT {instanceColumns}
 FROM session_instances
 WHERE process_id = $processId
   AND process_start_ticks = $processStartTicks
+ORDER BY closed_at IS NULL DESC, last_seen DESC, updated_at DESC, session_id DESC
+LIMIT 1;
+"""
+
+let private instanceByBindingSql =
+    $"""
+SELECT {instanceColumns}
+FROM session_instances
+WHERE process_id = $processId
+  AND process_start_ticks = $processStartTicks
+  AND session_id = $sessionId
 LIMIT 1;
 """
 
@@ -588,8 +601,17 @@ ORDER BY updated_at DESC, process_id DESC, process_start_ticks DESC;
 let private loadRecentInstancesSql =
     $"""
 SELECT {instanceColumns}
-FROM session_instances
-WHERE last_seen >= $cutoff
+FROM (
+    SELECT {instanceColumns},
+           ROW_NUMBER() OVER (
+               PARTITION BY process_id, process_start_ticks
+               ORDER BY last_seen DESC, updated_at DESC, session_id DESC
+           ) AS binding_rank
+    FROM session_instances
+    WHERE closed_at IS NULL
+      AND last_seen >= $cutoff
+)
+WHERE binding_rank = 1
 ORDER BY last_seen, process_id, process_start_ticks;
 """
 
@@ -712,6 +734,7 @@ let private bindInstance (command: SqliteCommand) (stored: StoredInstance) =
 // Microsoft.Data.Sqlite requires imperative parameter population on the caller's locally scoped, disposable command.
 let private bindEvent (command: SqliteCommand) (row: ActivityEventRow) =
     bindIdentity command row.ProcessIdentity
+    command.Parameters.AddWithValue("$sessionId", SessionId.value row.SessionId) |> ignore
     command.Parameters.AddWithValue("$eventId", EventId.value row.EventId) |> ignore
     command.Parameters.AddWithValue("$timestamp", isoUtc row.Ts) |> ignore
 
@@ -731,6 +754,24 @@ let private readInstanceByIdentity
     else
         Ok None
 
+let private readInstanceByBinding
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction option)
+    identity
+    sessionId
+    =
+    use command = connection.CreateCommand()
+    transaction |> Option.iter (fun value -> command.Transaction <- value)
+    command.CommandText <- instanceByBindingSql
+    bindIdentity command identity
+    command.Parameters.AddWithValue("$sessionId", SessionId.value sessionId) |> ignore
+    use reader = command.ExecuteReader()
+    if reader.Read() then
+        readInstance reader
+        |> Result.map Some
+    else
+        Ok None
+
 let private upsertInstance
     (connection: SqliteConnection)
     (transaction: SqliteTransaction option)
@@ -741,6 +782,29 @@ let private upsertInstance
     command.CommandText <- upsertInstanceSql
     bindInstance command stored
     command.ExecuteNonQuery() |> ignore
+
+let private closeInstance
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction)
+    identity
+    sessionId
+    closedAt
+    terminalSessionId
+    =
+    use command = connection.CreateCommand()
+    command.Transaction <- transaction
+    command.CommandText <- closeSql
+    bindIdentity command identity
+    command.Parameters.AddWithValue("$sessionId", SessionId.value sessionId) |> ignore
+    command.Parameters.AddWithValue("$closedAt", isoUtc closedAt) |> ignore
+    command.Parameters.AddWithValue(
+        "$terminalSessionId",
+        terminalSessionId
+        |> Option.map TerminalSessionId.value
+        |> optToDb
+    )
+    |> ignore
+    command.ExecuteNonQuery() > 0
 
 // --- Store ------------------------------------------------------------------------------------
 
@@ -790,18 +854,19 @@ type SessionActivityStore
             connection.Dispose()
             reraise ()
 
-    /// Insert or replace one exact process-instance snapshot. Closure is monotonic at the SQL
-    /// boundary even if a caller accidentally supplies ClosedAt=None after the row was closed.
+    /// Insert or replace one process-session binding snapshot. Closure is monotonic for that binding
+    /// even if a caller accidentally supplies ClosedAt=None after the row was closed.
     member _.UpsertInstance(stored: StoredInstance) =
         use connection = openConnection ()
         use transaction = connection.BeginTransaction()
         upsertInstance connection (Some transaction) stored
 
         let persisted =
-            readInstanceByIdentity
+            readInstanceByBinding
                 connection
                 (Some transaction)
                 stored.ProcessIdentity
+                stored.SessionId
             |> persistedValue
             |> Option.defaultWith (fun () ->
                 raisePersistedDataError
@@ -810,8 +875,8 @@ type SessionActivityStore
         transaction.Commit()
         persisted
 
-    /// Atomically append one process-scoped event and persist its folded exact-instance state.
-    /// A duplicate event ID for the same process is a complete no-op.
+    /// Atomically append one binding-scoped event and persist its folded exact-instance state.
+    /// A duplicate event ID for the same process-session binding is a complete no-op.
     member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredInstance) =
         use connection = openConnection ()
         use transaction = connection.BeginTransaction()
@@ -827,10 +892,11 @@ type SessionActivityStore
             if inserted then
                 upsertInstance connection (Some transaction) stored
 
-                readInstanceByIdentity
+                readInstanceByBinding
                     connection
                     (Some transaction)
                     stored.ProcessIdentity
+                    stored.SessionId
                 |> persistedValue
             else
                 None
@@ -838,36 +904,72 @@ type SessionActivityStore
         transaction.Commit()
         persisted
 
-    /// Monotonically close one known exact identity. Repeated closes retain the first closure time.
+    /// Monotonically close one known process-session binding. Repeated closes retain the first
+    /// closure time.
     member _.CloseInstance
         (
             identity: ProcessIdentity,
+            sessionId: SessionId,
             closedAt: DateTimeOffset,
             terminalSessionId: TerminalSessionId option
         ) =
         use connection = openConnection ()
         use transaction = connection.BeginTransaction()
-        use command = connection.CreateCommand()
-        command.Transaction <- transaction
-        command.CommandText <- closeSql
-        bindIdentity command identity
-        command.Parameters.AddWithValue("$closedAt", isoUtc closedAt) |> ignore
-        command.Parameters.AddWithValue(
-            "$terminalSessionId",
-            terminalSessionId
-            |> Option.map TerminalSessionId.value
-            |> optToDb
-        )
-        |> ignore
-
-        let updated = command.ExecuteNonQuery() = 1
+        let updated =
+            closeInstance
+                connection
+                transaction
+                identity
+                sessionId
+                closedAt
+                terminalSessionId
 
         let persisted =
             if updated then
-                readInstanceByIdentity connection (Some transaction) identity
+                readInstanceByBinding
+                    connection
+                    (Some transaction)
+                    identity
+                    sessionId
                 |> persistedValue
             else
                 None
+
+        transaction.Commit()
+        persisted
+
+    /// Atomically closes the prior binding and opens a different durable session under the same
+    /// still-running Copilot process.
+    member _.SupersedeInstance
+        (
+            prior: StoredInstance,
+            next: StoredInstance,
+            supersededAt: DateTimeOffset
+        ) =
+        use connection = openConnection ()
+        use transaction = connection.BeginTransaction()
+
+        closeInstance
+            connection
+            transaction
+            prior.ProcessIdentity
+            prior.SessionId
+            supersededAt
+            prior.TerminalSessionId
+        |> ignore
+
+        upsertInstance connection (Some transaction) next
+
+        let persisted =
+            readInstanceByBinding
+                connection
+                (Some transaction)
+                next.ProcessIdentity
+                next.SessionId
+            |> persistedValue
+            |> Option.defaultWith (fun () ->
+                raisePersistedDataError
+                    PersistedDataError.MissingPersistedInstance)
 
         transaction.Commit()
         persisted

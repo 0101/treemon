@@ -250,6 +250,7 @@ END;
 
              legacy.AppendAndUpsert(
                  { ProcessIdentity = identity
+                   SessionId = stored.SessionId
                    EventId = EventId "event-1"
                    Ts = anchor },
                  stored

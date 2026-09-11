@@ -75,11 +75,11 @@ type Message = { Text: string; At: DateTimeOffset }
 /// else the extension never sends, so the server has no "irrelevant event" branch to carry. These
 /// map 1:1 onto the wire `kind` values (see the handler).
 type SessionEvent =
-    /// Acknowledged bootstrap proving that this exact process instance exists. Presence owns
+    /// Acknowledged bootstrap proving that this exact process-session binding exists. Presence owns
     /// receipt-time liveness and is persisted before its caller receives success.
     | SessionPresent
-    /// Monotonic closure of this exact process instance. It does not erase durable conversation
-    /// content and cannot be reversed by a later report from the same process.
+    /// Monotonic closure of this process-session binding. It does not erase durable conversation
+    /// content; the same process can subsequently bind to a different session.
     | SessionClosed
     | TurnStarted
     /// A genuine user prompt after transport-level synthetic messages are filtered.

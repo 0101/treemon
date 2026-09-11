@@ -3,23 +3,19 @@ module Server.SessionActivityStoreSchema
 open System
 open Microsoft.Data.Sqlite
 
-let private activityEventsTableSql createClause tableName =
-    $"""
-{createClause} {tableName} (
-    process_id          INTEGER NOT NULL CHECK (process_id > 0),
-    process_start_ticks INTEGER NOT NULL CHECK (process_start_ticks > 0),
-    event_id            TEXT NOT NULL,
-    ts                  TEXT NOT NULL,
-    PRIMARY KEY (process_id, process_start_ticks, event_id)
-);
+let private sessionInstanceColumns =
+    """
+process_id, process_start_ticks, session_id, worktree_path, provider, status,
+current_skill, last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+intent_text, intent_ts, title_text, title_ts, updated_at, lifecycle_at, last_seen,
+context_current_tokens, context_token_limit, context_usage_at,
+awaiting_user_since, user_input_completed_at, terminal_session_id,
+background_agent_clocks, closed_at
 """
 
-let private minimalEventColumns =
-    Set.ofList [ "process_id"; "process_start_ticks"; "event_id"; "ts" ]
-
-let private schemaSql =
+let private sessionInstancesTableSql createClause tableName =
     $"""
-CREATE TABLE IF NOT EXISTS session_instances (
+{createClause} {tableName} (
     process_id                 INTEGER NOT NULL CHECK (process_id > 0),
     process_start_ticks        INTEGER NOT NULL CHECK (process_start_ticks > 0),
     session_id                 TEXT NOT NULL,
@@ -46,8 +42,28 @@ CREATE TABLE IF NOT EXISTS session_instances (
     terminal_session_id        TEXT,
     background_agent_clocks    TEXT NOT NULL DEFAULT '[]',
     closed_at                  TEXT,
-    PRIMARY KEY (process_id, process_start_ticks)
+    PRIMARY KEY (process_id, process_start_ticks, session_id)
 );
+"""
+
+let private activityEventsTableSql createClause tableName =
+    $"""
+{createClause} {tableName} (
+    process_id          INTEGER NOT NULL CHECK (process_id > 0),
+    process_start_ticks INTEGER NOT NULL CHECK (process_start_ticks > 0),
+    session_id          TEXT NOT NULL,
+    event_id            TEXT NOT NULL,
+    ts                  TEXT NOT NULL,
+    PRIMARY KEY (process_id, process_start_ticks, session_id, event_id)
+);
+"""
+
+let private minimalEventColumns =
+    Set.ofList [ "process_id"; "process_start_ticks"; "session_id"; "event_id"; "ts" ]
+
+let private schemaSql =
+    $"""
+{sessionInstancesTableSql "CREATE TABLE IF NOT EXISTS" "session_instances"}
 
 CREATE TABLE IF NOT EXISTS resume_sessions (
     session_id                 TEXT PRIMARY KEY,
@@ -129,17 +145,17 @@ let rec private readPrimaryKeyColumns (reader: SqliteDataReader) columns =
     else
         columns |> List.sortBy fst |> List.map snd
 
-let private activityEventsUsesProcessKey
+let private primaryKeyColumns
     (connection: SqliteConnection)
     (transaction: SqliteTransaction)
+    tableName
     =
     use command = connection.CreateCommand()
     command.Transaction <- transaction
-    command.CommandText <- "PRAGMA table_info(activity_events);"
+    command.CommandText <- $"PRAGMA table_info({tableName});"
     use reader = command.ExecuteReader()
 
     readPrimaryKeyColumns reader []
-    = [ "process_id"; "process_start_ticks"; "event_id" ]
 
 let private executeMigrationSql
     (connection: SqliteConnection)
@@ -167,9 +183,36 @@ let private ensureLifecycleColumn
             transaction
             "ALTER TABLE session_instances ADD COLUMN lifecycle_at TEXT;"
 
-/// Rebuilds `activity_events` down to its dedupe key. Rows already keyed by exact process identity
-/// keep their key and timestamp; rows keyed by event ID alone cannot prove which process produced
-/// them, so they are discarded rather than folded under a foreign identity.
+/// A Copilot process can switch durable sessions without exiting. Keep each process-session binding
+/// as a separate durable row while the in-memory service tracks only the current binding.
+let private rebuildSessionInstancesIfNeeded
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction)
+    =
+    let migrationTable = "session_instances_migration"
+
+    executeMigrationSql
+        connection
+        transaction
+        $"DROP TABLE IF EXISTS {migrationTable};"
+
+    if
+        primaryKeyColumns connection transaction "session_instances"
+        <> [ "process_id"; "process_start_ticks"; "session_id" ]
+    then
+        executeMigrationSql
+            connection
+            transaction
+            $"""
+{sessionInstancesTableSql "CREATE TABLE" migrationTable}
+INSERT INTO {migrationTable} ({sessionInstanceColumns})
+SELECT {sessionInstanceColumns} FROM session_instances;
+DROP TABLE session_instances;
+ALTER TABLE {migrationTable} RENAME TO session_instances;
+"""
+
+/// Rebuilds `activity_events` down to the process-session-scoped dedupe key. Legacy event rows that
+/// cannot prove their producer binding are discarded rather than folded under a foreign session.
 let private rebuildActivityEventsIfNeeded
     (connection: SqliteConnection)
     (transaction: SqliteTransaction)
@@ -181,12 +224,39 @@ let private rebuildActivityEventsIfNeeded
         transaction
         $"DROP TABLE IF EXISTS {migrationTable};"
 
-    if columnNames connection transaction "activity_events" <> minimalEventColumns then
+    let columns = columnNames connection transaction "activity_events"
+    let processEventColumns =
+        Set.ofList [ "process_id"; "process_start_ticks"; "event_id"; "ts" ]
+
+    if
+        columns <> minimalEventColumns
+        || primaryKeyColumns connection transaction "activity_events"
+           <> [ "process_id"; "process_start_ticks"; "session_id"; "event_id" ]
+    then
         let copyKeys =
-            if activityEventsUsesProcessKey connection transaction then
-                $"""
-INSERT INTO {migrationTable} (process_id, process_start_ticks, event_id, ts)
-SELECT process_id, process_start_ticks, event_id, ts FROM activity_events;
+            if Set.isSubset processEventColumns columns then
+                if Set.contains "session_id" columns then
+                    $"""
+INSERT INTO {migrationTable}
+    (process_id, process_start_ticks, session_id, event_id, ts)
+SELECT process_id, process_start_ticks, session_id, event_id, ts
+FROM activity_events;
+"""
+                else
+                    $"""
+INSERT INTO {migrationTable}
+    (process_id, process_start_ticks, session_id, event_id, ts)
+SELECT events.process_id, events.process_start_ticks, instances.session_id,
+       events.event_id, events.ts
+FROM activity_events AS events
+JOIN (
+    SELECT process_id, process_start_ticks, MIN(session_id) AS session_id
+    FROM session_instances
+    GROUP BY process_id, process_start_ticks
+    HAVING COUNT(*) = 1
+) AS instances
+  ON instances.process_id = events.process_id
+ AND instances.process_start_ticks = events.process_start_ticks;
 """
             else
                 ""
@@ -216,6 +286,7 @@ let internal initializeSchema (connection: SqliteConnection) =
     use transaction = connection.BeginTransaction()
     executeMigrationSql connection transaction schemaSql
     ensureLifecycleColumn connection transaction
+    rebuildSessionInstancesIfNeeded connection transaction
     retainResumeIdentity connection transaction "session_status"
     retainResumeIdentity connection transaction "retained_sessions"
     rebuildActivityEventsIfNeeded connection transaction
