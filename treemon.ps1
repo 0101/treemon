@@ -550,9 +550,14 @@ function Remove-OldRunLogs([int]$Keep) {
     }
 }
 
+function Install-TtydRuntime {
+    & (Join-Path $ScriptDir "scripts\setup-ttyd.ps1")
+}
+
 function Publish-ServerCandidate {
     $candidate = "$PublishDir.candidate-$([Guid]::NewGuid().ToString('N'))"
     try {
+        Install-TtydRuntime
         Write-Host "Publishing server candidate..." -ForegroundColor Cyan
         dotnet publish -c Release -o $candidate (Join-Path $ScriptDir "src\Server\Server.fsproj") |
             Out-Host
@@ -1359,6 +1364,6 @@ switch ($Command) {
         Install-Skill
     }
     "setup-ttyd" {
-        & (Join-Path $ScriptDir "scripts\setup-ttyd.ps1")
+        Install-TtydRuntime
     }
 }
