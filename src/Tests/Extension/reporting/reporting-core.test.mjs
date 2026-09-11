@@ -1,14 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  BACKGROUND_AGENT_CLOCK_RETENTION_MS,
   buildNonBlankMessageReport,
   buildReport,
+  compareReportsByOccurrence,
+  createReplayAccumulator,
   MAX_TOOL_CALL_ID_CHARS,
   mapSdkEvent,
+  mergeReplayReports,
+  reportForReplaySdkEvent,
   reportForSdkEvent,
 } from "../../../Extension/reporting/reporting-core.mjs";
 
 const context = {
+  parentProcessId: 4321,
   sessionId: "session-1",
   worktreePath: "worktree",
   provider: "copilot_cli",
@@ -27,6 +33,19 @@ function map(event) {
   );
 }
 
+function expectedReport(event, kind, extra = {}) {
+  return {
+    parentProcessId: context.parentProcessId,
+    sessionId: context.sessionId,
+    worktreePath: context.worktreePath,
+    provider: context.provider,
+    eventId: event?.id ?? context.eventId,
+    occurredAt: event?.timestamp ?? context.occurredAt,
+    kind,
+    ...extra,
+  };
+}
+
 test("terminal origin is carried on every mapped report and omitted when absent", () => {
   const event = {
     id: "terminal-origin",
@@ -39,6 +58,7 @@ test("terminal origin is carried on every mapped report and omitted when absent"
   assert.deepEqual(
     reportForSdkEvent({ ...context, terminalSessionId }, event),
     {
+      parentProcessId: 4321,
       sessionId: "session-1",
       terminalSessionId,
       worktreePath: "worktree",
@@ -55,74 +75,52 @@ test("terminal origin is carried on every mapped report and omitted when absent"
 });
 
 test("metadata summary maps to title_bootstrap without a live title event", () => {
-  assert.deepEqual(buildNonBlankMessageReport(context, "title_bootstrap", "Investigate Intent Title Runtime"), {
-    sessionId: "session-1",
-    worktreePath: "worktree",
-    provider: "copilot_cli",
-    eventId: "event-1",
-    occurredAt: "2026-07-20T12:31:02.493Z",
-    kind: "title_bootstrap",
-    message: {
-      text: "Investigate Intent Title Runtime",
-      at: "2026-07-20T12:31:02.493Z",
-    },
-  });
+  assert.deepEqual(
+    buildNonBlankMessageReport(context, "title_bootstrap", "Investigate Intent Title Runtime"),
+    expectedReport(null, "title_bootstrap", {
+      message: { text: "Investigate Intent Title Runtime", at: context.occurredAt },
+    }),
+  );
 });
 
 test("subagent.started maps before agentId filtering", () => {
-  assert.deepEqual(map({
+  const event = {
     id: "subagent-start",
     timestamp: "2026-07-20T12:32:00.000Z",
     type: "subagent.started",
     agentId: "agent-1",
     data: { toolCallId: "tool-1" },
-  }), {
-    sessionId: "session-1",
-    worktreePath: "worktree",
-    provider: "copilot_cli",
-    eventId: "subagent-start",
-    occurredAt: "2026-07-20T12:32:00.000Z",
-    kind: "background_agent_started",
-    toolCallId: "tool-1",
-  });
+  };
+
+  assert.deepEqual(
+    map(event),
+    expectedReport(event, "background_agent_started", { toolCallId: "tool-1" }),
+  );
 });
 
 test("subagent.completed and subagent.failed map to terminal lifecycle reports", () => {
-  assert.deepEqual([
-    map({
-      id: "subagent-completed",
-      timestamp: "2026-07-20T12:33:00.000Z",
-      type: "subagent.completed",
-      agentId: "agent-1",
-      data: { toolCallId: "tool-1" },
-    }),
-    map({
-      id: "subagent-failed",
-      timestamp: "2026-07-20T12:34:00.000Z",
-      type: "subagent.failed",
-      agentId: "agent-2",
-      data: { toolCallId: "tool-2" },
-    }),
-  ], [
-    {
-      sessionId: "session-1",
-      worktreePath: "worktree",
-      provider: "copilot_cli",
-      eventId: "subagent-completed",
-      occurredAt: "2026-07-20T12:33:00.000Z",
-      kind: "background_agent_finished",
-      toolCallId: "tool-1",
-    },
-    {
-      sessionId: "session-1",
-      worktreePath: "worktree",
-      provider: "copilot_cli",
-      eventId: "subagent-failed",
-      occurredAt: "2026-07-20T12:34:00.000Z",
-      kind: "background_agent_finished",
-      toolCallId: "tool-2",
-    },
-  ]);
+  const completed = {
+    id: "subagent-completed",
+    timestamp: "2026-07-20T12:33:00.000Z",
+    type: "subagent.completed",
+    agentId: "agent-1",
+    data: { toolCallId: "tool-1" },
+  };
+  const failed = {
+    id: "subagent-failed",
+    timestamp: "2026-07-20T12:34:00.000Z",
+    type: "subagent.failed",
+    agentId: "agent-2",
+    data: { toolCallId: "tool-2" },
+  };
+
+  assert.deepEqual(
+    [map(completed), map(failed)],
+    [
+      expectedReport(completed, "background_agent_finished", { toolCallId: "tool-1" }),
+      expectedReport(failed, "background_agent_finished", { toolCallId: "tool-2" }),
+    ],
+  );
 });
 
 test("background lifecycle requires a nonblank data.toolCallId", () => {
@@ -254,6 +252,195 @@ test("live and replay mapping preserve the same source identity", () => {
   assert.deepEqual(map(liveEvent), map(replayedEvent));
 });
 
+test("session shutdown is reported live but never replayed into a resumed process", () => {
+  const shutdown = {
+    id: "old-process-shutdown",
+    timestamp: "2026-09-04T16:00:00.000Z",
+    type: "session.shutdown",
+    data: { shutdownType: "routine" },
+  };
+
+  assert.deepEqual(
+    reportForSdkEvent(context, shutdown),
+    expectedReport(shutdown, "session_closed"),
+  );
+  assert.equal(reportForReplaySdkEvent(context, shutdown), null);
+});
+
+test("current-process replay preserves waiting and background truth across reconnect", () => {
+  const state = createReplayAccumulator();
+  const reports = [
+    buildReport({
+      ...context,
+      eventId: "turn-ended",
+      occurredAt: "2026-09-04T16:00:00.000Z",
+    }, "turn_ended"),
+    buildReport({
+      ...context,
+      eventId: "awaiting-user",
+      occurredAt: "2026-09-04T16:00:01.000Z",
+    }, "awaiting_user_input"),
+    {
+      ...buildReport({
+        ...context,
+        eventId: "background-start",
+        occurredAt: "2026-09-04T16:00:02.000Z",
+      }, "background_agent_started"),
+      toolCallId: "tool-current",
+    },
+  ];
+  reports.forEach(state.observe);
+
+  assert.deepEqual(
+    mergeReplayReports([reports[0]], state.snapshot()).map((report) => report.eventId),
+    ["turn-ended", "awaiting-user", "background-start"],
+  );
+});
+
+test("report occurrence ordering handles invalid dates and timestamp ties", () => {
+  const report = (eventId, occurredAt) => buildReport({
+    ...context,
+    eventId,
+    occurredAt,
+  }, "turn_started");
+  const invalidA = report("invalid-a", "not-a-date");
+  const invalidB = report("invalid-b", "also-not-a-date");
+  const sameTimeA = report("same-a", "2026-09-04T16:00:00.000Z");
+  const sameTimeB = report("same-b", "2026-09-04T16:00:00.000Z");
+
+  assert.equal(compareReportsByOccurrence(invalidA, sameTimeA), -1);
+  assert.equal(compareReportsByOccurrence(invalidA, invalidB), -1);
+  assert.equal(compareReportsByOccurrence(sameTimeB, sameTimeA), 1);
+  assert.equal(compareReportsByOccurrence(sameTimeA, { ...sameTimeA }), 0);
+});
+
+test("current-process state keeps the next report on an exact occurrence tie", () => {
+  const state = createReplayAccumulator();
+  const first = {
+    ...buildReport(context, "intent_reported"),
+    message: { text: "First", at: context.occurredAt },
+  };
+  const next = {
+    ...first,
+    message: { text: "Next", at: context.occurredAt },
+  };
+
+  state.observe(first);
+  state.observe(next);
+
+  assert.equal(state.snapshot()[0].message.text, "Next");
+});
+
+test("current-process state prunes only old resolved background-agent pairs", () => {
+  const now = Date.parse("2026-09-04T16:10:00.000Z");
+  const state = createReplayAccumulator(() => now);
+  const at = (offsetMs) => new Date(now + offsetMs).toISOString();
+  const backgroundReport = (eventId, occurredAt, kind, toolCallId) => ({
+    ...buildReport({ ...context, eventId, occurredAt }, kind),
+    toolCallId,
+  });
+
+  Array.from({ length: 40 }, (_, index) => {
+    const toolCallId = `old-complete-${index}`;
+    return [
+      backgroundReport(
+        `${toolCallId}-start`,
+        at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 2000 - index),
+        "background_agent_started",
+        toolCallId,
+      ),
+      backgroundReport(
+        `${toolCallId}-finish`,
+        at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 1000 - index),
+        "background_agent_finished",
+        toolCallId,
+      ),
+    ];
+  }).flat().forEach(state.observe);
+
+  [
+    backgroundReport(
+      "active-finish",
+      at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 4000),
+      "background_agent_finished",
+      "active",
+    ),
+    backgroundReport(
+      "active-start",
+      at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 3000),
+      "background_agent_started",
+      "active",
+    ),
+    backgroundReport(
+      "finish-only",
+      at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 5000),
+      "background_agent_finished",
+      "finish-only",
+    ),
+    backgroundReport(
+      "start-only",
+      at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 6000),
+      "background_agent_started",
+      "start-only",
+    ),
+    backgroundReport(
+      "recent-start",
+      at(-60000),
+      "background_agent_started",
+      "recent",
+    ),
+    backgroundReport(
+      "recent-finish",
+      at(-59000),
+      "background_agent_finished",
+      "recent",
+    ),
+  ].forEach(state.observe);
+
+  assert.deepEqual(
+    state.snapshot().map((report) => report.eventId),
+    [
+      "start-only",
+      "finish-only",
+      "active-finish",
+      "active-start",
+      "recent-start",
+      "recent-finish",
+    ],
+  );
+});
+
+test("current-process snapshot prunes resolved pairs after the retention window passes", () => {
+  let now = Date.parse("2026-09-04T16:00:00.000Z");
+  const state = createReplayAccumulator(() => now);
+  const started = {
+    ...buildReport({
+      ...context,
+      eventId: "aging-start",
+      occurredAt: "2026-09-04T15:59:00.000Z",
+    }, "background_agent_started"),
+    toolCallId: "aging",
+  };
+  const finished = {
+    ...buildReport({
+      ...context,
+      eventId: "aging-finish",
+      occurredAt: "2026-09-04T15:59:01.000Z",
+    }, "background_agent_finished"),
+    toolCallId: "aging",
+  };
+
+  state.observe(started);
+  state.observe(finished);
+  assert.deepEqual(state.snapshot().map((report) => report.eventId), [
+    "aging-start",
+    "aging-finish",
+  ]);
+
+  now += BACKGROUND_AGENT_CLOCK_RETENTION_MS + 61000;
+  assert.deepEqual(state.snapshot(), []);
+});
+
 test("blank metadata summary emits no title report", () => {
   assert.equal(buildNonBlankMessageReport(context, "title_bootstrap", "   "), null);
   assert.equal(buildNonBlankMessageReport(context, "title_bootstrap", undefined), null);
@@ -269,18 +456,12 @@ test("message blankness is checked before the stored text is capped", () => {
 });
 
 test("live and bootstrap messages share the canonical report shape", () => {
-  assert.deepEqual(buildNonBlankMessageReport(context, "title_reported", "Live title"), {
-    sessionId: "session-1",
-    worktreePath: "worktree",
-    provider: "copilot_cli",
-    eventId: "event-1",
-    occurredAt: "2026-07-20T12:31:02.493Z",
-    kind: "title_reported",
-    message: {
-      text: "Live title",
-      at: "2026-07-20T12:31:02.493Z",
-    },
-  });
+  assert.deepEqual(
+    buildNonBlankMessageReport(context, "title_reported", "Live title"),
+    expectedReport(null, "title_reported", {
+      message: { text: "Live title", at: context.occurredAt },
+    }),
+  );
 });
 
 test("malformed events and non-string fields are dropped without coercion", () => {
@@ -322,6 +503,7 @@ test("usage mapping accepts finite numeric strings but rejects blank and structu
 
 test("the production event boundary drops malformed identities before mapping", () => {
   const baseContext = {
+    parentProcessId: context.parentProcessId,
     sessionId: context.sessionId,
     worktreePath: context.worktreePath,
     provider: context.provider,
@@ -336,23 +518,20 @@ test("the production event boundary drops malformed identities before mapping", 
     id: "event",
     type: "assistant.turn_start",
   }), null);
-  assert.deepEqual(reportForSdkEvent(baseContext, {
-    id: "event",
-    timestamp: context.occurredAt,
-    type: "assistant.turn_start",
-    data: {},
-  }), {
-    sessionId: context.sessionId,
-    worktreePath: context.worktreePath,
-    provider: context.provider,
-    eventId: "event",
-    occurredAt: context.occurredAt,
-    kind: "turn_started",
-  });
+  assert.deepEqual(
+    reportForSdkEvent(baseContext, {
+      id: "event",
+      timestamp: context.occurredAt,
+      type: "assistant.turn_start",
+      data: {},
+    }),
+    expectedReport({ id: "event", timestamp: context.occurredAt }, "turn_started"),
+  );
 });
 
 test("a rejected live title produces no title report", () => {
   const baseContext = {
+    parentProcessId: context.parentProcessId,
     sessionId: context.sessionId,
     worktreePath: context.worktreePath,
     provider: context.provider,

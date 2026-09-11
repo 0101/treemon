@@ -25,6 +25,12 @@ module internal TerminalProxy =
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
+    type internal ProxyStopOperations =
+        { StopDataPlane: unit -> Task
+          StopApplication: CancellationToken -> Task
+          DisposeApplication: unit -> Task
+          DisposeClient: unit -> unit }
+
     let internal customizeTerminalPage (allowedOrigins: string list) (html: string) =
         let reconnectScript =
             $"<script>(function(){{var allowedOrigins={JsonSerializer.Serialize allowedOrigins},action=\"treemon-terminal-visible\",reconnectPrompt=\"Press \\u23CE to Reconnect\",poll=null,deadline=null,reloading=false,reloadMarker='treemon-terminal-reconnect-load',suppressNextLoadedActivation=(function(){{try{{var marked=sessionStorage.getItem(reloadMarker)==='1';sessionStorage.removeItem(reloadMarker);return marked}}catch(_){{return true}}}})();function clearPending(){{if(poll!==null){{clearInterval(poll);poll=null}}if(deadline!==null){{clearTimeout(deadline);deadline=null}}}}function isWaitingForReconnect(){{var terminal=document.querySelector('.xterm');return !!terminal&&Array.prototype.some.call(terminal.children,function(child){{return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt}})}}function reconnectIfWaiting(){{if(reloading||document.visibilityState!=='visible'||!isWaitingForReconnect())return false;reloading=true;clearPending();try{{sessionStorage.setItem(reloadMarker,'1')}}catch(_){{}}window.location.reload();return true}}function activate(loaded){{if(document.visibilityState!=='visible'){{clearPending();return}}if(loaded&&suppressNextLoadedActivation){{suppressNextLoadedActivation=false;return}}if(reconnectIfWaiting())return;if(poll===null)poll=setInterval(reconnectIfWaiting,100);if(deadline!==null)clearTimeout(deadline);deadline=setTimeout(clearPending,10000)}}window.addEventListener('message',function(event){{if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;if(event.data.active===false){{clearPending();return}}if(event.data.active===true)activate(event.data.loaded===true)}});document.addEventListener('visibilitychange',function(){{if(document.visibilityState!=='visible')clearPending()}})}})();</script>"
@@ -305,16 +311,30 @@ module internal TerminalProxy =
                 ()
         }
 
-    let private stopProxy plane (application: WebApplication) (client: HttpClient) =
+    let internal stopProxy operations () =
         task {
-            do! plane.Stop() |> Async.StartAsTask
-            use cancellation = new CancellationTokenSource(proxyShutdownTimeout)
+            let! dataPlaneFailure =
+                task {
+                    try
+                        do! operations.StopDataPlane()
+                        return None
+                    with error ->
+                        return Some error
+                }
 
-            do! ignoreTaskFailure (fun () -> application.StopAsync(cancellation.Token))
-            do! ignoreTaskFailure (fun () -> application.DisposeAsync().AsTask().WaitAsync(proxyShutdownTimeout))
+            try
+                use cancellation = new CancellationTokenSource(proxyShutdownTimeout)
 
-            client.Dispose()
+                do! ignoreTaskFailure (fun () -> operations.StopApplication cancellation.Token)
+                do! ignoreTaskFailure operations.DisposeApplication
+            finally
+                operations.DisposeClient()
+
+            match dataPlaneFailure with
+            | None -> ()
+            | Some error -> raise error
         }
+        |> Async.AwaitTask
 
     let private startProxy
         allowedOrigins
@@ -398,13 +418,26 @@ module internal TerminalProxy =
                             do! core.Stop()
                             return Error error
                         | Ok(application, client, endpoint) ->
-                            let stopWorkflow = lazy (stopProxy core application client)
+                            let stopOperations =
+                                { StopDataPlane =
+                                    fun () ->
+                                        (core.Stop() |> Async.StartAsTask) :> Task
+                                  StopApplication =
+                                    fun cancellation ->
+                                        application.StopAsync(cancellation)
+                                  DisposeApplication =
+                                    fun () ->
+                                        application
+                                            .DisposeAsync()
+                                            .AsTask()
+                                            .WaitAsync(proxyShutdownTimeout)
+                                  DisposeClient = fun () -> client.Dispose() }
 
                             return
                                 Ok
                                     { core with
                                         AttachmentEndpoint = endpoint
-                                        Stop = fun () -> stopWorkflow.Value |> Async.AwaitTask }
+                                        Stop = stopProxy stopOperations }
         }
 
     let start startupTimeout allowedOrigins bearerToken

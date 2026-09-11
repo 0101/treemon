@@ -3,21 +3,44 @@ module Server.SessionActivity
 open System
 open Shared
 
-// The push-model status domain. The server owns this domain; the Copilot CLI extension is a thin
-// forwarder that maps SDK events onto the wire contract, and the handler maps that onto SessionEvent.
-// Everything here is pure — no IO, no mutation — so it can be unit-tested in isolation and folded
-// incrementally (a later batch onto an earlier result == the whole stream at once).
+// The server owns the event union, pure fold, and durable exact-instance state. The passive
+// reporting extension maps SDK facts to the wire contract and owns acknowledged presence,
+// per-endpoint retry and reconnect, heartbeat and shutdown signaling, and compact current-process
+// replay state. Server ingestion validates accepted reports and maps them to SessionEvent.
 //
-// This is the SAME state machine as the old CopilotDetector.foldForwardEvent, MINUS transport
-// classification. The extension drops sub-agent and <skill-context> events, while the server
-// ingestion boundary drops runtime <system_reminder> user-channel events before this fold.
+// The transformations here are pure, so the fold remains independently testable and can be
+// applied incrementally.
 
 // --- Value types ------------------------------------------------------------------------------
 
 type SessionId = SessionId of string
 
 module SessionId =
+    [<Literal>]
+    let maxLength = 128
+
     let value (SessionId id) = id
+
+    let create (value: string) =
+        if String.IsNullOrWhiteSpace value then
+            Error "missing sessionId"
+        elif value.Length > maxLength then
+            Error
+                $"sessionId must be 1-{maxLength} characters from [A-Za-z0-9._:-]"
+        elif
+            value
+            |> Seq.forall (fun character ->
+                Char.IsAsciiLetterOrDigit character
+                || character = '.'
+                || character = '_'
+                || character = ':'
+                || character = '-')
+            |> not
+        then
+            Error
+                $"sessionId must be 1-{maxLength} characters from [A-Za-z0-9._:-]"
+        else
+            Ok(SessionId value)
 
 /// Exact identity of one TerminalHost-owned terminal. This is deliberately distinct from the
 /// Copilot SessionId because both identifiers are carried through the same ownership queries.
@@ -25,6 +48,18 @@ type TerminalSessionId = TerminalSessionId of string
 
 module TerminalSessionId =
     let value (TerminalSessionId id) = id
+
+    let create (value: string) =
+        if String.IsNullOrWhiteSpace value then
+            Error
+                "terminalSessionId must be a 32-character hexadecimal TerminalHost session id"
+        else
+            match Guid.TryParseExact(value.Trim(), "N") with
+            | true, terminalSessionId ->
+                Ok(TerminalSessionId(terminalSessionId.ToString("N")))
+            | false, _ ->
+                Error
+                    "terminalSessionId must be a 32-character hexadecimal TerminalHost session id"
 
 type EventId = EventId of string
 
@@ -40,6 +75,12 @@ type Message = { Text: string; At: DateTimeOffset }
 /// else the extension never sends, so the server has no "irrelevant event" branch to carry. These
 /// map 1:1 onto the wire `kind` values (see the handler).
 type SessionEvent =
+    /// Acknowledged bootstrap proving that this exact process-session binding exists. Presence owns
+    /// receipt-time liveness and is persisted before its caller receives success.
+    | SessionPresent
+    /// Monotonic closure of this process-session binding. It does not erase durable conversation
+    /// content; the same process can subsequently bind to a different session.
+    | SessionClosed
     | TurnStarted
     /// A genuine user prompt after transport-level synthetic messages are filtered.
     | UserPrompt of Message
@@ -63,7 +104,7 @@ type SessionEvent =
     | TurnEnded
     | WentIdle
     /// A liveness-only heartbeat: re-asserts the CLI is still open WITHOUT bearing on status. Handled
-    /// specially by the ingestion service — it only bumps the session's `last_seen` (openness), never
+    /// specially by the ingestion service — it only bumps the exact instance's `last_seen` (openness), never
     /// folds into status and never appends to the event history. Timer-generated (no SDK event source).
     | Heartbeat
     /// A context-window usage snapshot (currentTokens, tokenLimit) from the SDK `session.usage_info`
@@ -72,7 +113,8 @@ type SessionEvent =
 
 /// One pushed report: a single event for one session in one worktree.
 type SessionActivityReport =
-    { SessionId: SessionId
+    { ParentProcessId: int
+      SessionId: SessionId
       TerminalSessionId: TerminalSessionId option
       WorktreePath: WorktreePath
       Provider: CodingToolProvider
@@ -160,7 +202,8 @@ let internal pruneTerminalOriginEpochs
 /// A single push session's own status. `NoSession` is a *worktree-level* collapse result
 /// (`CodingToolStatus`), never a per-session value — so it is intentionally absent here, making that
 /// illegal state unrepresentable rather than guarding it with a runtime failwith. It is widened to the
-/// four-case `CodingToolStatus` only at the worktree-collapse boundary (`CodingToolStatus.fromPushSessions`).
+/// four-case `CodingToolStatus` only at the worktree-collapse boundary
+/// (`CodingToolStatus.fromPushInstances`).
 [<RequireQualifiedAccess>]
 type SessionLevelStatus =
     | Working
@@ -251,6 +294,8 @@ let private updateBackgroundAgent toolCallId update status =
 /// stream, which is what the durable-mirror + live-Map ingestion relies on.
 let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
     match e with
+    | SessionPresent
+    | SessionClosed -> s
     | TurnStarted -> { s with Status = SessionLevelStatus.Working }
     | AssistantMessage m ->
         { s with
@@ -387,9 +432,9 @@ let idleDebounceWindow = TimeSpan.FromSeconds 10.0
 /// stamp records no prior status), but in practice this is the Working→Idle blink: a parked
 /// WaitingForUser agent normally resumes via `user_prompt`→Working rather than `turn_ended`→Idle, so
 /// a spurious ≤`graceWindow` red hold on a waiting card is only a rare edge, not the common path.
-/// `idleSince` is the frozen "entered Idle" stamp (`CodingToolSinceByWorktree`), which the scheduler
-/// (`SchedulerState.stampIdleSince`) resets on every new Working turn — so each turn restarts the
-/// window. With no stamp there is no reference instant, so the real Idle status falls through. The
+/// `idleSince` is the collapsed status-transition stamp (`CodingToolSinceByWorktree`), which the
+/// scheduler (`SchedulerState.updateCodingToolTransition`) re-stamps whenever that status changes —
+/// so each new Working turn restarts the window. With no stamp there is no reference instant, so the real Idle status falls through. The
 /// classified activity (Reviewing/Investigating/…) is unaffected: it is derived from the retained
 /// skill, so a held-Working worktree keeps its group.
 let debounceIdle

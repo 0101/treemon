@@ -9,16 +9,34 @@ open System.Net.Sockets
 open System.Collections.Concurrent
 open NUnit.Framework
 open Shared
+open Server
 open Server.SessionBridge
 open Server.CanvasBridge
+open Server.SessionActivity
 open Server.RefreshScheduler.CanvasWatchers
 open Tests.TestUtils
 
-// Unique session IDs keep tests isolated now that the registry is keyed by sessionId
-// (a shared literal like "s1" would otherwise collide across tests).
+// Unique durable session IDs keep ownership assertions isolated even though physical bridge
+// registrations are now keyed by exact process identity.
 let private uniqueSid prefix =
     let id = Guid.NewGuid().ToString("N")[..7]
     $"{prefix}-{id}"
+
+let private freshProcessIdentity () =
+    Guid.NewGuid().ToString("N")
+    |> collisionResistantProcessIdentityForSessionId
+
+let private registerSessionWithIdentity path injectUrl sessionId =
+    let identity = freshProcessIdentity ()
+
+    registerExactSession 'B' identity path injectUrl sessionId None
+    |> ignore
+
+    identity
+
+let private registerSession path injectUrl sessionId =
+    registerSessionWithIdentity path injectUrl sessionId
+    |> ignore
 
 let private canvasWire payload =
     serializePrompt (Prompt.canvas payload)
@@ -216,7 +234,9 @@ type RegisterAndStatusTests() =
 
         // The downstream scanner fallback therefore finds no id to credit: a single anonymous
         // session leaves docs unowned instead of stamping the sticky, unroutable owner "".
-        Assert.That(fallbackOwner (sessionsForWorktree path), Is.EqualTo(None: string option),
+        let sessions = sessionsForWorktree path
+        let observedAt = sessions |> List.maxBy _.RegisteredAt |> _.RegisteredAt
+        Assert.That(fallbackOwner observedAt sessions, Is.EqualTo(None: string option),
                     "A single blank-id session must leave docs unowned, not owned by \"\"")
 
     [<Test>]
@@ -240,7 +260,10 @@ type RegisterAndStatusTests() =
         let sessions = sessionsForWorktree path
         Assert.That(List.length sessions, Is.EqualTo 2, "Distinct sessionIds for one worktree must coexist")
         Assert.That(
-            sessions |> List.choose _.SessionId |> List.sort,
+            sessions
+            |> List.choose _.SessionId
+            |> List.map SessionId.value
+            |> List.sort,
             Is.EqualTo(List.sort [ sid1; sid2 ]))
 
         // The single-status view reports the most-recently-registered session.
@@ -481,7 +504,7 @@ type DrainQueueTests() =
         runAsync (cancelPendingLaunch path)
 
 
-// ── multi-session registry (sessionId-keyed re-key) ─────────────────
+// ── exact-process registry with durable-session canvas collapse ──────
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -498,30 +521,85 @@ type MultiSessionRegistryTests() =
         registerSession path "http://localhost:2/inject" (Some b)
         registerSession path "http://localhost:3/inject" (Some c)
 
-        let ids = sessionsForWorktree path |> List.choose _.SessionId |> List.sort
+        let ids =
+            sessionsForWorktree path
+            |> List.choose _.SessionId
+            |> List.map SessionId.value
+            |> List.sort
         Assert.That(ids, Is.EqualTo(List.sort [ a; b; c ]))
 
     [<Test>]
-    member _.``Re-registering the same sessionId upserts in place (no duplicate)``() =
+    member _.``Two physical processes sharing one sessionId remain independently registered``() =
         let path = uniquePath "multi-upsert"
         let sid = uniqueSid "dup"
         registerSession path "http://localhost:1/inject" (Some sid)
         registerSession path "http://localhost:2/inject" (Some sid)
 
         let sessions = sessionsForWorktree path
-        Assert.That(List.length sessions, Is.EqualTo 1, "Same sessionId must not create a second entry")
-        Assert.That(sessions.Head.InjectUrl, Is.EqualTo "http://localhost:2/inject", "Latest registration wins the slot")
+        let canvasSessions = canvasSessionsForWorktree path
+        let liveness = getAllLiveness [ path ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                List.length sessions,
+                Is.EqualTo 2,
+                "Physical registrations are keyed by exact process identity, not durable SessionId")
+            Assert.That(
+                sessions |> List.map _.ProcessIdentity |> List.distinct |> List.length,
+                Is.EqualTo 2)
+            Assert.That(
+                canvasSessions |> List.length,
+                Is.EqualTo 1,
+                "Canvas owner routing collapses duplicate physical registrations for one durable session")
+            Assert.That(
+                canvasSessions.Head.InjectUrl,
+                Is.EqualTo "http://localhost:2/inject",
+                "The freshest physical registration serves the durable canvas owner")
+            Assert.That(
+                liveness[path].LiveSessionIds,
+                Is.EqualTo [ sid ],
+                "Public canvas liveness exposes one durable owner, not duplicate physical processes"))
 
     [<Test>]
-    member _.``Two None registrations for one worktree collapse to a single slot``() =
+    member _.``Re-registering one exact process updates its single slot``() =
+        let path = uniquePath "multi-exact-upsert"
+        let sid = uniqueSid "same-process"
+        let identity = freshProcessIdentity ()
+
+        registerExactSession
+            'B'
+            identity
+            path
+            "http://localhost:1/inject"
+            (Some sid)
+            None
+        |> ignore
+        registerExactSession
+            'B'
+            identity
+            path
+            "http://localhost:2/inject"
+            (Some sid)
+            None
+        |> ignore
+
+        let sessions = sessionsForWorktree path
+        Assert.That(List.length sessions, Is.EqualTo 1)
+        Assert.That(sessions.Head.ProcessIdentity, Is.EqualTo identity)
+        Assert.That(sessions.Head.InjectUrl, Is.EqualTo "http://localhost:2/inject")
+
+    [<Test>]
+    member _.``Two anonymous physical registrations remain exact but collapse for canvas status``() =
         let path = uniquePath "multi-none"
         registerSession path "http://localhost:1/inject" None
         registerSession path "http://localhost:2/inject" None
 
         let sessions = sessionsForWorktree path
-        Assert.That(List.length sessions, Is.EqualTo 1, "None registrations share the per-worktree fallback slot")
-        Assert.That(sessions.Head.InjectUrl, Is.EqualTo "http://localhost:2/inject")
-        Assert.That(sessions.Head.SessionId, Is.EqualTo None)
+        let canvasSessions = canvasSessionsForWorktree path
+        Assert.That(List.length sessions, Is.EqualTo 2)
+        Assert.That(List.length canvasSessions, Is.EqualTo 1)
+        Assert.That(canvasSessions.Head.InjectUrl, Is.EqualTo "http://localhost:2/inject")
+        Assert.That(canvasSessions.Head.SessionId, Is.EqualTo None)
 
     [<Test>]
     member _.``A None registration and a sessionId registration coexist``() =
@@ -533,7 +611,12 @@ type MultiSessionRegistryTests() =
         let sessions = sessionsForWorktree path
         Assert.That(List.length sessions, Is.EqualTo 2, "Anonymous and identified sessions must coexist")
         Assert.That(sessions |> List.exists (fun e -> e.SessionId = None), Is.True)
-        Assert.That(sessions |> List.exists (fun e -> e.SessionId = Some sid), Is.True)
+        Assert.That(
+            sessions
+            |> List.exists (fun entry ->
+                entry.SessionId = Some(SessionId sid)),
+            Is.True
+        )
 
     [<Test>]
     member _.``sessionsForWorktree isolates sessions by worktree``() =
@@ -547,7 +630,12 @@ type MultiSessionRegistryTests() =
         registerSession pathB "http://localhost:3/inject" (Some b1)
 
         Assert.That(sessionsForWorktree pathA |> List.length, Is.EqualTo 2)
-        Assert.That(sessionsForWorktree pathB |> List.choose _.SessionId, Is.EqualTo [ b1 ])
+        Assert.That(
+            sessionsForWorktree pathB
+            |> List.choose _.SessionId
+            |> List.map SessionId.value,
+            Is.EqualTo [ b1 ]
+        )
         Assert.That(sessionsForWorktree (uniquePath "multi-iso-empty") |> List.isEmpty, Is.True)
 
     [<Test>]
@@ -558,7 +646,10 @@ type MultiSessionRegistryTests() =
         registerSession path "http://localhost:1/inject" (Some older)
         registerSession path "http://localhost:2/inject" (Some newer)
 
-        Assert.That(getSessionForWorktree path, Is.EqualTo(Some newer))
+        Assert.That(
+            getSessionForWorktree path,
+            Is.EqualTo(Some(SessionId newer))
+        )
 
     [<Test>]
     member _.``Multi-session liveness keeps every live session available to authored docs``() =
@@ -769,15 +860,24 @@ type SystemViewInteractionRoutingTests() =
 
     let ts (s: string) = DateTimeOffset.Parse(s, Globalization.CultureInfo.InvariantCulture)
 
-    let storedAt sid wt updatedAt : Server.SessionActivityStore.StoredStatus =
-        { SessionId = Server.SessionActivity.SessionId sid
+    let storedAt identity sid wt updatedAt : Server.SessionActivityStore.StoredInstance =
+        { ProcessIdentity = identity
+          SessionId = Server.SessionActivity.SessionId sid
           TerminalSessionId = None
           WorktreePath = WorktreePath wt
           Provider = CopilotCli
           Status = Server.SessionActivity.emptyStatus
           UpdatedAt = ts updatedAt
+          LifecycleAt = Some(ts updatedAt)
           LastSeen = ts updatedAt
-          ContextUsageAt = None }
+          ContextUsageAt = None
+          ClosedAt = None }
+
+    let unregisteredIdentity processId =
+        ProcessIdentity.create
+            processId
+            (int64 processId * 1_000L + 1L)
+        |> Result.defaultWith invalidOp
 
     [<Test>]
     member _.``A SystemView routes to the most recently active live session``() =
@@ -786,15 +886,17 @@ type SystemViewInteractionRoutingTests() =
             let older = uniqueSid "older"
             let newer = uniqueSid "newer"
 
-            registerSession path "http://127.0.0.1:1/inject" (Some older)
-            registerSession path "http://127.0.0.1:2/inject" (Some newer)
+            let olderIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:1/inject" (Some older)
+            let newerIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:2/inject" (Some newer)
 
             let statuses =
-                [ storedAt older path "2026-03-01T12:00:00Z"
-                  storedAt newer path "2026-03-01T12:05:00Z" ]
+                [ storedAt olderIdentity older path "2026-03-01T12:00:00Z"
+                  storedAt newerIdentity newer path "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
-            Assert.That(target, Is.EqualTo(Some newer)))
+            Assert.That(target, Is.EqualTo(Some(SessionId newer))))
 
     [<Test>]
     member _.``A SystemView ignores a more recently active session that is not live``() =
@@ -804,14 +906,19 @@ type SystemViewInteractionRoutingTests() =
             let dead = uniqueSid "dead"
 
             // Only `live` registers with the bridge, so `dead` is unreachable however recent it is.
-            registerSession path "http://127.0.0.1:1/inject" (Some live)
+            let liveIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:1/inject" (Some live)
 
             let statuses =
-                [ storedAt live path "2026-03-01T12:00:00Z"
-                  storedAt dead path "2026-03-01T12:05:00Z" ]
+                [ storedAt liveIdentity live path "2026-03-01T12:00:00Z"
+                  storedAt (unregisteredIdentity 98001) dead path "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
-            Assert.That(target, Is.EqualTo(Some live), "Reachability gates the choice; activity only orders it"))
+            Assert.That(
+                target,
+                Is.EqualTo(Some(SessionId live)),
+                "Reachability gates the choice; activity only orders it"
+            ))
 
     [<Test>]
     member _.``A SystemView with no live session resolves no target``() =
@@ -819,10 +926,15 @@ type SystemViewInteractionRoutingTests() =
             let path = uniquePath "sv-none"
             let sid = uniqueSid "offline"
 
-            let statuses = [ storedAt sid path "2026-03-01T12:00:00Z" ]
+            let statuses =
+                [ storedAt
+                      (unregisteredIdentity 98002)
+                      sid
+                      path
+                      "2026-03-01T12:00:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
-            Assert.That(target, Is.EqualTo(None: string option)))
+            Assert.That(target, Is.EqualTo(None: SessionId option)))
 
     [<Test>]
     member _.``A SystemView ignores sessions from another worktree``() =
@@ -831,12 +943,17 @@ type SystemViewInteractionRoutingTests() =
             let otherPath = uniquePath "sv-scope-other"
             let stranger = uniqueSid "stranger"
 
-            registerSession otherPath "http://127.0.0.1:1/inject" (Some stranger)
+            let strangerIdentity =
+                registerSessionWithIdentity
+                    otherPath
+                    "http://127.0.0.1:1/inject"
+                    (Some stranger)
 
-            let statuses = [ storedAt stranger otherPath "2026-03-01T12:05:00Z" ]
+            let statuses =
+                [ storedAt strangerIdentity stranger otherPath "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
-            Assert.That(target, Is.EqualTo(None: string option)))
+            Assert.That(target, Is.EqualTo(None: SessionId option)))
 
     [<Test>]
     member _.``An AgentDoc ignores activity and routes to its recorded owner``() =
@@ -851,11 +968,11 @@ type SystemViewInteractionRoutingTests() =
 
             // `active` is both live and more recently active, but an AgentDoc has a real author.
             let statuses =
-                [ storedAt owner path "2026-03-01T12:00:00Z"
-                  storedAt active path "2026-03-01T12:05:00Z" ]
+                [ storedAt (unregisteredIdentity 98003) owner path "2026-03-01T12:00:00Z"
+                  storedAt (unregisteredIdentity 98004) active path "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "notes.html")
-            Assert.That(target, Is.EqualTo(Some owner)))
+            Assert.That(target, Is.EqualTo(Some(SessionId owner))))
 
     [<Test>]
     member _.``A SystemView falls back to the freshest reachable session when none has reported activity``() =
@@ -872,7 +989,7 @@ type SystemViewInteractionRoutingTests() =
             // reachable session may have no activity row at all. It is still a usable target —
             // treating it as "no target" would spawn a second session next to a working one.
             let target = runAsync (resolveTarget [] path "diff.html")
-            Assert.That(target, Is.EqualTo(Some newer)))
+            Assert.That(target, Is.EqualTo(Some(SessionId newer))))
 
     [<Test>]
     member _.``A SystemView never records an owner when it resolves a target``() =
@@ -880,8 +997,9 @@ type SystemViewInteractionRoutingTests() =
             let path = uniquePath "sv-no-write"
             let sid = uniqueSid "session"
 
-            registerSession path "http://127.0.0.1:1/inject" (Some sid)
-            let statuses = [ storedAt sid path "2026-03-01T12:00:00Z" ]
+            let identity =
+                registerSessionWithIdentity path "http://127.0.0.1:1/inject" (Some sid)
+            let statuses = [ storedAt identity sid path "2026-03-01T12:00:00Z" ]
 
             runAsync (resolveTarget statuses path "diff.html") |> ignore
 
@@ -908,14 +1026,41 @@ type ScannerFallbackAttributionTests() =
 
     [<Test>]
     member _.``fallbackOwner attributes only when exactly one session is registered``() =
-        let entry sid : SessionEntry =
-            { WorktreePath = "/w"; InjectUrl = "http://localhost/inject"; SessionId = sid; RegisteredAt = DateTime.UtcNow }
+        let now = DateTime(2026, 9, 5, 5, 0, 0, DateTimeKind.Utc)
 
-        Assert.That(fallbackOwner [], Is.EqualTo None, "Zero sessions -> no fallback owner")
-        Assert.That(fallbackOwner [ entry (Some "solo") ], Is.EqualTo(Some "solo"), "Exactly one session -> it is the owner")
-        Assert.That(fallbackOwner [ entry None ], Is.EqualTo None, "A single anonymous session has no id to attribute")
-        Assert.That(fallbackOwner [ entry (Some "a"); entry (Some "b") ], Is.EqualTo None,
+        let entry registeredAt sid : SessionEntry =
+            let identity = freshProcessIdentity ()
+
+            { ProcessIdentity = identity
+              WorktreePath = "/w"
+              InjectUrl = "http://localhost/inject"
+              SessionId = sid |> Option.map SessionId
+              TerminalSessionId = None
+              RegisteredAt = registeredAt }
+
+        Assert.That(fallbackOwner now [], Is.EqualTo None, "Zero sessions -> no fallback owner")
+        Assert.That(
+            fallbackOwner now [ entry now (Some "solo") ],
+            Is.EqualTo(Some "solo"),
+            "Exactly one session -> it is the owner")
+        Assert.That(
+            fallbackOwner now [ entry now None ],
+            Is.EqualTo None,
+            "A single anonymous session has no id to attribute")
+        Assert.That(
+            fallbackOwner now [ entry now (Some "same"); entry now (Some "same") ],
+            Is.EqualTo(Some "same"),
+            "Duplicate physical registrations for one durable session remain one canvas owner")
+        Assert.That(fallbackOwner now [ entry now (Some "a"); entry now (Some "b") ], Is.EqualTo None,
             "Two sessions are ambiguous -> leave unowned (the misattribution guard)")
+        Assert.That(
+            fallbackOwner now [ entry (now.AddMilliseconds -59_999.0) (Some "inside") ],
+            Is.EqualTo(Some "inside"),
+            "A registration just inside the 60-second liveness window remains eligible")
+        Assert.That(
+            fallbackOwner now [ entry (now.AddSeconds -60.0) (Some "boundary") ],
+            Is.EqualTo None,
+            "A registration exactly 60 seconds old is no longer live")
 
     [<Test>]
     member _.``Two registered sessions leave a no-owner changed doc UNOWNED (misattribution regression)``() =

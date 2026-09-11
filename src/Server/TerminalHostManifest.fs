@@ -36,6 +36,12 @@ let internal hostIdentityMatches left right =
     left.Pid = right.Pid
     && left.ProcessStartTimeUtcTicks = right.ProcessStartTimeUtcTicks
 
+let internal tryProcessIdentity (manifest: DiscoveryManifest) =
+    ProcessIdentity.create
+        manifest.Pid
+        manifest.ProcessStartTimeUtcTicks
+    |> Result.toOption
+
 let internal validBoundedText maximum (value: string) =
     not (String.IsNullOrWhiteSpace value)
     && value.Length <= maximum
@@ -194,7 +200,13 @@ let internal readManifest config =
         Error $"Could not read the TerminalHost discovery manifest: {error.Message}"
 
 let internal processIdentityMatches config (manifest: DiscoveryManifest) =
-    config.ProcessIdentityMatches manifest.Pid manifest.ProcessStartTimeUtcTicks
+    ProcessIdentity.create
+        manifest.Pid
+        manifest.ProcessStartTimeUtcTicks
+    |> Result.bind (
+        ProcessIdentityResolver.isAlive
+            config.ProcessIdentityResolver
+    )
 
 let internal resolveProcessExecutable config (manifest: DiscoveryManifest) =
     config.ResolveProcessExecutable manifest.Pid manifest.ProcessStartTimeUtcTicks

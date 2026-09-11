@@ -12,17 +12,24 @@ open Server.SessionActivityStore
 type SyncTarget =
     /// A CLI is open and has settled — idle for `settleWindow`, or blocked on a user who is not
     /// there. Treemon syncs the worktree itself and prompts this session only if it could not finish.
-    | IdleSession of sessionId: string
+    | IdleSession of processIdentity: ProcessIdentity * sessionId: SessionId
     /// No CLI is open. A retained/offline identity from a closed CLI may still be known.
-    | NoOpenSession of retainedSessionId: string option
+    | NoOpenSession of retainedSessionId: SessionId option
 
 module SyncTarget =
     /// The id a fallback prompt is addressed to, which is only ever a delivery hint — never evidence
     /// that a live agent will act on it.
     let sessionId =
         function
-        | IdleSession sessionId -> Some sessionId
+        | IdleSession(_, sessionId) -> Some sessionId
         | NoOpenSession retainedSessionId -> retainedSessionId
+
+    let sendTarget =
+        function
+        | IdleSession(processIdentity, _) ->
+            SessionBridge.SendTarget.ExactProcess processIdentity
+        | NoOpenSession retainedSessionId ->
+            SessionBridge.SendTarget.ofSessionId retainedSessionId
 
 /// Who — if anyone — is working in a worktree, and therefore what Treemon may do about a sync.
 /// Openness alone is not the question: a CLI that is merely open is a terminal somebody left
@@ -217,27 +224,42 @@ let internal hasSettled (now: DateTimeOffset) (updatedAt: DateTimeOffset) =
 /// offline identity is consulted only once nothing is open at all, so an open idle CLI can never be
 /// mistaken for one that merely left an id behind. Background agents count as work: `effectiveStatus`
 /// reports Working while one runs, even between the session's own turns.
-let internal ownershipFromSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
-    let openSessions =
-        sessions |> List.filter (fun session -> now - session.LastSeen < openWindow)
+let internal ownershipFromSessions
+    (now: DateTimeOffset)
+    (instances: StoredInstance list)
+    (retained: RetainedSession option)
+    =
+    let openInstances =
+        instances
+        |> List.filter (StoredInstance.isOpenAt now)
 
-    match openSessions |> pickWorking _.Status StoredStatus.activityOrderKey with
+    match
+        openInstances
+        |> pickWorking _.Status StoredInstance.activityOrderKey
+    with
     | Some _ -> Busy
     | None ->
-        match openSessions |> StoredStatus.tryMostRecentActivity with
+        match
+            openInstances
+            |> StoredInstance.tryMostRecentActivity
+        with
         | Some settled when hasSettled now settled.UpdatedAt ->
-            Free(IdleSession(SessionId.value settled.SessionId))
+            Free(
+                IdleSession(
+                    settled.ProcessIdentity,
+                    settled.SessionId
+                )
+            )
         | Some _ -> Busy
         | None ->
-            sessions
-            |> StoredStatus.tryMostRecentActivity
-            |> Option.map (_.SessionId >> SessionId.value)
+            retained
+            |> Option.map _.SessionId
             |> NoOpenSession
             |> Free
 
 let readOwnership
     (activityStore: SessionActivityStore.SessionActivityStore option)
-    (liveSessions: StoredStatus seq)
+    (liveInstances: StoredInstance seq)
     (path: string)
     =
     let retained =
@@ -245,11 +267,16 @@ let readOwnership
         |> Option.map _.RetainedByWorktree()
         |> Option.defaultValue Map.empty
 
-    liveSessions
-    |> CodingToolStatus.includeRetainedSessions retained
-    |> Seq.filter (fun stored -> WorktreePath.value stored.WorktreePath = path)
-    |> Seq.toList
-    |> ownershipFromSessions DateTimeOffset.UtcNow
+    let instances =
+        liveInstances
+        |> Seq.filter (fun stored ->
+            WorktreePath.value stored.WorktreePath = path)
+        |> Seq.toList
+
+    ownershipFromSessions
+        DateTimeOffset.UtcNow
+        instances
+        (retained |> Map.tryFind path)
 
 let internal registrationGraceMilliseconds = 3000
 
@@ -294,7 +321,7 @@ let deliver
 
         let sendRequest: SessionBridge.SendRequest =
             { WorktreePath = path
-              SessionId = sessionId
+              Target = SyncTarget.sendTarget request.Target
               Prompt = SessionBridge.Prompt.agentPrompt request.Prompt }
 
         let launchFallback () =

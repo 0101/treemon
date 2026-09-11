@@ -26,31 +26,32 @@ let ctTooltip =
 let private ctDot (status: CodingToolStatus) =
     Html.span [ prop.className ($"ct-dot {ctClassName status}"); prop.title (ctTooltip status) ]
 
-/// A per-session marker: a context-usage donut (arc = remaining context) when the session has
-/// reported usage, else a plain status dot. Colour comes from the session's OWN status.
-let private sessionMarker (i: int) (s: SessionDot) =
+/// One exact process marker: a context-usage donut when that process has reported usage, else a
+/// plain status dot. Colour comes from the process's own status.
+let private sessionMarker (s: SessionDot) =
+    let key = SessionInstanceId.value s.InstanceId
+
     match s.ContextUsage with
     | Some usage ->
         Html.span
-            [ prop.key i
+            [ prop.key key
               prop.className $"ct-dot ct-donut {ctClassName s.Status}"
               prop.title (ctTooltip s.Status)
               prop.style [ style.custom ("--ctx-remaining", string (ContextUsage.remainingFraction usage)) ] ]
     | None ->
-        Html.span [ prop.key i; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ]
+        Html.span [ prop.key key; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ]
 
-/// Per-session donuts for a worktree card: one marker per live session (donut when it has usage,
-/// else a plain status dot). Falls back to the single collapsed CodingTool dot when there are no
-/// live sessions (a NoSession worktree → grey), reproducing the pre-per-session single-dot behaviour.
+/// Exact-instance donuts for a worktree card. Falls back to the single collapsed CodingTool dot
+/// when there are no open processes (a NoSession worktree → grey).
 let sessionDots (wt: WorktreeStatus) =
     Html.span
         [ prop.className "ct-dots"
           prop.children (
               match wt.Sessions with
               | [] -> [ ctDot wt.CodingTool ]
-              | sessions -> sessions |> List.mapi sessionMarker) ]
+              | sessions -> sessions |> List.map sessionMarker) ]
 
-/// Plain per-session status dots for ONE worktree (never a donut — the header is too dense for arcs),
+/// Plain exact-instance status dots for one worktree (never a donut — the header is too dense for arcs),
 /// returned as a flat, keyed list so the repo header can `List.collect` every worktree's dots into a
 /// single row with one uniform gap. A worktree with no live session contributes its single collapsed
 /// dot.
@@ -60,7 +61,11 @@ let sessionDotsPlain (wt: WorktreeStatus) =
     | [] -> [ Html.span [ prop.key key; prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ] ]
     | sessions ->
         sessions
-        |> List.mapi (fun i s -> Html.span [ prop.key $"{key}-{i}"; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ])
+        |> List.map (fun session ->
+            Html.span
+                [ prop.key $"{key}-{SessionInstanceId.value session.InstanceId}"
+                  prop.className ($"ct-dot {ctClassName session.Status}")
+                  prop.title (ctTooltip session.Status) ])
 
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
@@ -606,8 +611,7 @@ let prRow (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: Worktre
 let canResumeSession (wt: WorktreeStatus) =
     not wt.HasActiveSession
     && wt.LastUserMessage.IsSome
-    && wt.CodingTool <> Working
-    && wt.CodingTool <> WaitingForUser
+    && wt.CodingTool = NoSession
 
 /// The card's activity line: the freshest source-tagged intent or session title plus, when a skill is
 /// running, that skill as a pill. Kept as a pure decision so presence logic is independently testable.

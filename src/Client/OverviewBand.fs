@@ -125,7 +125,11 @@ let private agentCircles (accent: string) (group: AgentGroup) =
     group.Members
     |> List.collect (fun member' ->
         member'.Sessions
-        |> List.mapi (fun index session -> sessionCircle accent $"{member'.ScopedKey}-{index}" session))
+        |> List.map (fun session ->
+            sessionCircle
+                accent
+                $"{member'.ScopedKey}-{SessionInstanceId.value session.InstanceId}"
+                session))
     |> fun circles -> Html.div [ prop.className "overview-circles"; prop.children circles ]
 
 /// One full agent group column: count/label metadata above its session circles. Clicking selects the

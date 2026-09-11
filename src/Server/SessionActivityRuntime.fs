@@ -11,7 +11,8 @@ type internal Runtime =
       SnapshotStore: OverviewSnapshotStore.OverviewSnapshotStore
       Capture: OverviewSnapshotCapture.SnapshotCapture }
 
-let internal createComponents
+let internal createComponentsWithProcessIdentityResolver
+    processIdentityResolver
     (dbPath: string)
     (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
     =
@@ -19,18 +20,34 @@ let internal createComponents
 
     try
         { Store = store
-          Service = new SessionActivityService.SessionActivityService(store, scheduler) }
+          Service =
+            new SessionActivityService.SessionActivityService(
+                store,
+                scheduler,
+                processIdentityResolver
+            ) }
     with _ ->
         (store :> System.IDisposable).Dispose()
         reraise ()
 
-let internal create
+let internal createComponents dbPath scheduler =
+    createComponentsWithProcessIdentityResolver
+        ProcessIdentityResolverRuntime.defaultResolver
+        dbPath
+        scheduler
+
+let internal createWithProcessIdentityResolver
+    processIdentityResolver
     (dbPath: string)
     (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     =
     let snapshotStore = OverviewSnapshotStore.OverviewSnapshotStore(dbPath)
-    let components = createComponents dbPath scheduler
+    let components =
+        createComponentsWithProcessIdentityResolver
+            processIdentityResolver
+            dbPath
+            scheduler
 
     try
         { Components = components
@@ -44,6 +61,13 @@ let internal create
         (components.Service :> System.IDisposable).Dispose()
         (components.Store :> System.IDisposable).Dispose()
         reraise ()
+
+let internal create dbPath scheduler rootPaths =
+    createWithProcessIdentityResolver
+        ProcessIdentityResolverRuntime.defaultResolver
+        dbPath
+        scheduler
+        rootPaths
 
 let internal shutdownStoreUsers
     (disposeIngestion: unit -> unit)

@@ -14,6 +14,53 @@ let private userMessage glyph text timestamp =
       Text = text
       Timestamp = timestamp }
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ResumeVisibilityTests() =
+
+    let previousUserMessage =
+        Some(userMessage None "continue the previous session" DateTimeOffset.UnixEpoch)
+
+    [<Test>]
+    member _.``A retained session is resumable only when no coding session is open``() =
+        let worktree =
+            { baseWt with
+                CodingTool = NoSession
+                LastUserMessage = previousUserMessage }
+
+        Assert.That(canResumeSession worktree, Is.True)
+
+    [<Test>]
+    member _.``An open coding session suppresses Resume even while idle``() =
+        [ Working; WaitingForUser; Idle ]
+        |> List.iter (fun status ->
+            let worktree =
+                { baseWt with
+                    CodingTool = status
+                    LastUserMessage = previousUserMessage }
+
+            Assert.That(
+                canResumeSession worktree,
+                Is.False,
+                $"Resume must stay hidden for an open {status} session"
+            ))
+
+    [<Test>]
+    member _.``A tracked native terminal suppresses Resume``() =
+        let worktree =
+            { baseWt with
+                CodingTool = NoSession
+                LastUserMessage = previousUserMessage
+                HasActiveSession = true }
+
+        Assert.That(canResumeSession worktree, Is.False)
+
+    [<Test>]
+    member _.``A worktree without a previous user message is not resumable``() =
+        let worktree = { baseWt with CodingTool = NoSession }
+        Assert.That(canResumeSession worktree, Is.False)
+
 /// The card's activity line (footer line 1) combines the freshest source-tagged activity (SDK
 /// `assistant.intent` or `session.title_changed`, carried as `Shared.AgentActivity`) with the running
 /// skill as a pill. These tests exercise CardViews.cardActivityLine — the pure decision behind

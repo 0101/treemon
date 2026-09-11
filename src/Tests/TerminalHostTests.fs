@@ -244,12 +244,13 @@ type private TestWebSocket(
     override _.State = state
     override _.SubProtocol = "tty"
 
-type private ApiFixture() =
+type private ApiFixture(?cleanup: unit -> Result<unit, string>) =
     let root = uniquePath "terminal-host-api"
     let worktree = Path.Combine(root, "repo")
     let starts = ConcurrentQueue<string>()
     let closes = ConcurrentQueue<string>()
     let token = "test-token-with-fixed-value"
+    let cleanup = defaultArg cleanup (fun () -> Ok())
 
     do
         Directory.CreateDirectory root |> ignore
@@ -265,7 +266,11 @@ type private ApiFixture() =
                       ProcessStartTimeUtcTicks = int64 (30_001 + starts.Count)
                       TtydPort = 40_001 + starts.Count
                       HasExited = fun () -> false
-                      Close = fun () -> closes.Enqueue sessionId }
+                      BeginClose =
+                        fun () ->
+                            Ok(fun () ->
+                                closes.Enqueue sessionId
+                                cleanup ()) }
         }
 
     let dataPlaneStarter sessionId _ _ =
@@ -314,7 +319,7 @@ type private ApiFixture() =
     interface IDisposable with
         member _.Dispose() =
             client.Dispose()
-            TerminalRegistry.shutdown registry |> Async.RunSynchronously
+            TerminalRegistry.shutdown registry |> Async.RunSynchronously |> ignore
             ControlApi.stop running |> getTask
 
             try
@@ -387,7 +392,7 @@ type TerminalRuntimeBudgetTests() =
             |> List.map (fun (path, lines) -> $"{path}: {lines}")
             |> String.concat Environment.NewLine
 
-        Assert.That(total, Is.LessThanOrEqualTo(4_000), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
+        Assert.That(total, Is.LessThanOrEqualTo(5_200), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -431,7 +436,11 @@ type TerminalRegistryResilienceTests() =
                                     true
                                 else
                                     false
-                          Close = fun () -> closes.Enqueue sessionId }
+                          BeginClose =
+                            fun () ->
+                                Ok(fun () ->
+                                    closes.Enqueue sessionId
+                                    Ok()) }
             }
 
         let dataPlaneStarter sessionId _ notifyUpstreamExited =
@@ -541,12 +550,14 @@ type TerminalRegistryResilienceTests() =
 
             TerminalRegistry.shutdown registry
             |> runWithin timeout
+            |> ignore
         finally
             releasePrune.Set()
 
             try
                 TerminalRegistry.shutdown registry
                 |> runWithin timeout
+                |> ignore
             with _ ->
                 ()
 
@@ -564,16 +575,15 @@ type TerminalRegistryResilienceTests() =
                           ProcessStartTimeUtcTicks = 33_100L
                           TtydPort = 43_100
                           HasExited = fun () -> exited.IsSet
-                          Close =
+                          BeginClose =
                             fun () ->
-                                closes.Enqueue()
+                                Ok(fun () ->
+                                    closes.Enqueue()
 
-                                if cleanupFails.IsSet then
-                                    raise (
-                                        InvalidOperationException(
-                                            "deterministic cleanup failure"
-                                        )
-                                    ) }
+                                    if cleanupFails.IsSet then
+                                        Error "deterministic cleanup failure"
+                                    else
+                                        Ok()) }
             }
 
         let dataPlaneStarter sessionId _ _ =
@@ -615,6 +625,7 @@ type TerminalRegistryResilienceTests() =
 
             TerminalRegistry.shutdown registry
             |> runWithin timeout
+            |> ignore
 
             Assert.Multiple(fun () ->
                 Assert.That(
@@ -638,6 +649,391 @@ type TerminalRegistryResilienceTests() =
             try
                 TerminalRegistry.shutdown registry
                 |> runWithin timeout
+                |> ignore
+            with _ ->
+                ()
+
+    [<Test>]
+    member _.``data plane failure is diagnostic after authoritative process cleanup``() =
+        let processCleanupAttempts = ConcurrentQueue<string>()
+        let dataPlaneStopAttempts = ConcurrentQueue<string>()
+        let applicationStopAttempts = ConcurrentQueue<string>()
+        let applicationDisposeAttempts = ConcurrentQueue<string>()
+        let clientDisposeAttempts = ConcurrentQueue<string>()
+        let dataPlanes = ConcurrentQueue<string * TerminalDataPlane>()
+
+        let countFor sessionId (attempts: ConcurrentQueue<string>) =
+            attempts
+            |> Seq.filter ((=) sessionId)
+            |> Seq.length
+
+        let starter sessionId _ =
+            async {
+                return
+                    Ok
+                        { ProcessId = 23_150
+                          ProcessStartTimeUtcTicks = 33_150L
+                          TtydPort = 43_150
+                          HasExited = fun () -> false
+                          BeginClose =
+                            fun () ->
+                                Ok(fun () ->
+                                    processCleanupAttempts.Enqueue sessionId
+                                    Ok()) }
+            }
+
+        let dataPlaneStarter sessionId _ _ =
+            async {
+                let stopOperations: TerminalProxy.ProxyStopOperations =
+                    { StopDataPlane =
+                        fun () ->
+                            (task {
+                                let firstAttempt =
+                                    countFor sessionId dataPlaneStopAttempts = 0
+
+                                dataPlaneStopAttempts.Enqueue sessionId
+
+                                if firstAttempt then
+                                    invalidOp "deterministic data-plane stop failure"
+                             } :> Task)
+                      StopApplication =
+                        fun _ ->
+                            applicationStopAttempts.Enqueue sessionId
+                            Task.CompletedTask
+                      DisposeApplication =
+                        fun () ->
+                            applicationDisposeAttempts.Enqueue sessionId
+                            Task.CompletedTask
+                      DisposeClient =
+                        fun () ->
+                            clientDisposeAttempts.Enqueue sessionId }
+
+                let dataPlane =
+                    { inertDataPlane
+                        $"http://127.0.0.1:43150/_treemon/{sessionId}/test-token/" with
+                        Stop = TerminalProxy.stopProxy stopOperations }
+
+                dataPlanes.Enqueue((sessionId, dataPlane))
+                return Ok dataPlane
+            }
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+
+        try
+            let first =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-data-plane-failure-close")
+                |> runWithin timeout
+                |> requireOk
+
+            let firstSessionId =
+                first.Terminals
+                |> List.exactlyOne
+                |> _.SessionId
+
+            let firstDataPlane =
+                dataPlanes.ToArray()
+                |> Array.find (fst >> (=) firstSessionId)
+                |> snd
+
+            let closed =
+                TerminalRegistry.close registry firstSessionId
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(closed.Terminals, Is.Empty)
+                Assert.That(countFor firstSessionId processCleanupAttempts, Is.EqualTo(1))
+                Assert.That(countFor firstSessionId dataPlaneStopAttempts, Is.EqualTo(1))
+                Assert.That(countFor firstSessionId applicationStopAttempts, Is.EqualTo(1))
+                Assert.That(countFor firstSessionId applicationDisposeAttempts, Is.EqualTo(1))
+                Assert.That(countFor firstSessionId clientDisposeAttempts, Is.EqualTo(1)))
+
+            firstDataPlane.Stop()
+            |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(countFor firstSessionId dataPlaneStopAttempts, Is.EqualTo(2))
+                Assert.That(countFor firstSessionId applicationStopAttempts, Is.EqualTo(2))
+                Assert.That(countFor firstSessionId applicationDisposeAttempts, Is.EqualTo(2))
+                Assert.That(countFor firstSessionId clientDisposeAttempts, Is.EqualTo(2)))
+
+            let second =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-data-plane-failure-shutdown")
+                |> runWithin timeout
+                |> requireOk
+
+            let secondSessionId =
+                second.Terminals
+                |> List.exactlyOne
+                |> _.SessionId
+
+            let clean =
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+
+            let afterShutdown =
+                TerminalRegistry.list registry
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(clean, Is.True)
+                Assert.That(afterShutdown.Terminals, Is.Empty)
+                Assert.That(countFor secondSessionId processCleanupAttempts, Is.EqualTo(1))
+                Assert.That(countFor secondSessionId dataPlaneStopAttempts, Is.EqualTo(1))
+                Assert.That(countFor secondSessionId applicationStopAttempts, Is.EqualTo(1))
+                Assert.That(countFor secondSessionId applicationDisposeAttempts, Is.EqualTo(1))
+                Assert.That(countFor secondSessionId clientDisposeAttempts, Is.EqualTo(1)))
+        finally
+            try
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+                |> ignore
+            with _ ->
+                ()
+
+    [<Test>]
+    member _.``launcher cleanup failure remains owned until registry maintenance succeeds``() =
+        use allowCleanup = new ManualResetEventSlim()
+        let cleanupAttempts = ConcurrentQueue<unit>()
+
+        let completeCleanup () =
+            cleanupAttempts.Enqueue()
+
+            if allowCleanup.IsSet then
+                Ok()
+            else
+                Error "exact survivor remains"
+
+        let terminalProcess =
+            { ProcessId = 23_200
+              ProcessStartTimeUtcTicks = 33_200L
+              TtydPort = 43_200
+              HasExited = fun () -> true
+              BeginClose = fun () -> Ok completeCleanup }
+
+        let starter _ _ =
+            async {
+                match terminalProcess.BeginClose() |> Result.bind (fun complete -> complete()) with
+                | Error cleanupError ->
+                    return
+                        Error(
+                            TerminalLaunchFailure.CleanupPending(
+                                "startup failed",
+                                cleanupError,
+                                terminalProcess
+                            )
+                        )
+                | Ok() ->
+                    return
+                        Error(
+                            TerminalLaunchFailure.LaunchFailed(
+                                "cleanup unexpectedly succeeded"
+                            )
+                        )
+            }
+
+        let dataPlaneStarter _ _ _ =
+            async.Return(Error "data plane must not start")
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+
+        try
+            let started =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-launcher-cleanup")
+                |> runWithin timeout
+
+            match started with
+            | Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(error, Does.Contain("startup failed"))
+                    Assert.That(error, Does.Contain("exact survivor remains")))
+            | Ok _ ->
+                Assert.Fail("Startup unexpectedly succeeded")
+
+            Assert.That(
+                cleanupAttempts.Count,
+                Is.EqualTo(1),
+                "the failed launcher cleanup must not be retried inside the start request"
+            )
+
+            allowCleanup.Set()
+
+            let listed =
+                TerminalRegistry.list registry
+                |> runWithin timeout
+
+            let clean =
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(listed.Terminals, Is.Empty)
+                Assert.That(cleanupAttempts.Count, Is.EqualTo(2))
+                Assert.That(clean, Is.True))
+        finally
+            allowCleanup.Set()
+
+            try
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+                |> ignore
+            with _ ->
+                ()
+
+    [<Test>]
+    member _.``data plane startup failure retains process when close preparation initially fails``() =
+        use allowPreparation = new ManualResetEventSlim()
+        let preparationAttempts = ConcurrentQueue<unit>()
+
+        let starter _ _ =
+            async {
+                return
+                    Ok
+                        { ProcessId = 23_300
+                          ProcessStartTimeUtcTicks = 33_300L
+                          TtydPort = 43_300
+                          HasExited = fun () -> false
+                          BeginClose =
+                            fun () ->
+                                preparationAttempts.Enqueue()
+
+                                if allowPreparation.IsSet then
+                                    Ok(fun () -> Ok())
+                                else
+                                    Error "cleanup preparation failed" }
+            }
+
+        let dataPlaneStarter _ _ _ =
+            async.Return(Error "data plane startup failed")
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+
+        try
+            let started =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-preparation-failure")
+                |> runWithin timeout
+
+            match started with
+            | Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(error, Does.Contain("data plane startup failed"))
+                    Assert.That(error, Does.Contain("cleanup preparation failed")))
+            | Ok _ ->
+                Assert.Fail("Startup unexpectedly succeeded")
+
+            Assert.That(preparationAttempts.Count, Is.EqualTo(1))
+            allowPreparation.Set()
+
+            let listed =
+                TerminalRegistry.list registry
+                |> runWithin timeout
+
+            let clean =
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(listed.Terminals, Is.Empty)
+                Assert.That(preparationAttempts.Count, Is.EqualTo(2))
+                Assert.That(clean, Is.True))
+        finally
+            allowPreparation.Set()
+
+            try
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+                |> ignore
+            with _ ->
+                ()
+
+    [<Test>]
+    member _.``startup exit retains process and data plane until survivor cleanup succeeds``() =
+        use allowCleanup = new ManualResetEventSlim()
+        let exitChecks = ConcurrentQueue<unit>()
+        let cleanupAttempts = ConcurrentQueue<unit>()
+        let stopAttempts = ConcurrentQueue<unit>()
+
+        let completeCleanup () =
+            cleanupAttempts.Enqueue()
+
+            if allowCleanup.IsSet then
+                Ok()
+            else
+                Error "exact survivor remains"
+
+        let starter _ _ =
+            async {
+                return
+                    Ok
+                        { ProcessId = 23_400
+                          ProcessStartTimeUtcTicks = 33_400L
+                          TtydPort = 43_400
+                          HasExited =
+                            fun () ->
+                                exitChecks.Enqueue()
+                                exitChecks.Count >= 2
+                          BeginClose = fun () -> Ok completeCleanup }
+            }
+
+        let dataPlaneStarter sessionId _ _ =
+            async {
+                let dataPlane =
+                    inertDataPlane
+                        $"http://127.0.0.1:43400/_treemon/{sessionId}/test-token/"
+
+                return
+                    Ok
+                        { dataPlane with
+                            Stop =
+                                fun () ->
+                                    async { stopAttempts.Enqueue() } }
+            }
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+
+        try
+            let started =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-startup-exit")
+                |> runWithin timeout
+
+            match started with
+            | Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(error, Does.Contain("ttyd exited during terminal startup"))
+                    Assert.That(error, Does.Contain("exact survivor remains")))
+            | Ok _ ->
+                Assert.Fail("Startup unexpectedly succeeded")
+
+            Assert.Multiple(fun () ->
+                Assert.That(cleanupAttempts.Count, Is.EqualTo(1))
+                Assert.That(stopAttempts.Count, Is.EqualTo(1)))
+
+            allowCleanup.Set()
+
+            let clean =
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(cleanupAttempts.Count, Is.EqualTo(2))
+                Assert.That(stopAttempts.Count, Is.EqualTo(2))
+                Assert.That(clean, Is.True))
+        finally
+            allowCleanup.Set()
+
+            try
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+                |> ignore
             with _ ->
                 ()
 
@@ -659,7 +1055,7 @@ type TerminalRegistryResilienceTests() =
                           ProcessStartTimeUtcTicks = int64 (80_000 + reachedTogether.Count)
                           TtydPort = 70_000 + reachedTogether.Count
                           HasExited = fun () -> false
-                          Close = fun () -> () }
+                          BeginClose = fun () -> Ok(fun () -> Ok()) }
             }
 
         let dataPlaneStarter sessionId _ _ =
@@ -688,7 +1084,7 @@ type TerminalRegistryResilienceTests() =
             |> requireOk
             |> ignore)
 
-        TerminalRegistry.shutdown registry |> runWithin timeout
+        TerminalRegistry.shutdown registry |> runWithin timeout |> ignore
 
         Assert.Multiple(fun () ->
             Assert.That(reachedTogether.Count, Is.EqualTo participantCount)
@@ -896,6 +1292,68 @@ type TerminalHostControlApiTests() =
         }
         :> Task
 
+    [<Test>]
+    member _.``failed shutdown keeps the host available and later retry closes all terminals``() =
+        task {
+            use allowCleanup = new ManualResetEventSlim()
+            use fixture =
+                new ApiFixture(fun () ->
+                    if allowCleanup.IsSet then Ok() else Error "exact survivor remains")
+
+            use! started =
+                fixture.Client.PostAsJsonAsync(
+                    "/api/v2/terminals",
+                    {| worktreePath = fixture.Worktree |}
+                )
+
+            use startedDocument = responseDocument started
+            let sessionId = terminalIds startedDocument |> List.exactlyOne
+            let shutdown = ControlApi.waitForShutdown fixture.Running
+            use emptyBody = new ByteArrayContent(Array.empty)
+            use! rejected = fixture.Client.PostAsync("/api/v2/shutdown", emptyBody)
+
+            Assert.That(rejected.StatusCode, Is.EqualTo(HttpStatusCode.Accepted))
+            Assert.That(
+                waitUntil (TimeSpan.FromSeconds 2.0) (fun () -> fixture.CloseCount = 1),
+                Is.True,
+                "shutdown cleanup was not attempted"
+            )
+
+            use! retained = fixture.Client.GetAsync("/api/v2/terminals")
+            use retainedDocument = responseDocument retained
+
+            Assert.Multiple(fun () ->
+                Assert.That(shutdown.IsCompleted, Is.False)
+                Assert.That(terminalIds retainedDocument, Is.EqualTo([ sessionId ])))
+
+            use! subsequentStart =
+                fixture.Client.PostAsJsonAsync(
+                    "/api/v2/terminals",
+                    {| worktreePath = fixture.Worktree |}
+                )
+
+            use subsequentDocument = responseDocument subsequentStart
+            let runningIds = terminalIds subsequentDocument
+
+            Assert.Multiple(fun () ->
+                Assert.That(subsequentStart.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                Assert.That(shutdown.IsCompleted, Is.False)
+                Assert.That(runningIds.Length, Is.EqualTo(2))
+                Assert.That(runningIds.Head, Is.EqualTo(sessionId))
+                Assert.That(fixture.StartCount, Is.EqualTo(2)))
+
+            allowCleanup.Set()
+            use retryBody = new ByteArrayContent(Array.empty)
+            use! retried = fixture.Client.PostAsync("/api/v2/shutdown", retryBody)
+            let! completed = Task.WhenAny(shutdown, Task.Delay 5_000)
+
+            Assert.Multiple(fun () ->
+                Assert.That(retried.StatusCode, Is.EqualTo(HttpStatusCode.Accepted))
+                Assert.That(completed, Is.SameAs(shutdown))
+                Assert.That(fixture.CloseCount, Is.EqualTo(3)))
+        }
+        :> Task
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -950,7 +1408,11 @@ type TerminalHostDataPlaneTests() =
                           ProcessStartTimeUtcTicks = 31_000L
                           TtydPort = 41_000
                           HasExited = fun () -> false
-                          Close = fun () -> closes.Enqueue sessionId }
+                          BeginClose =
+                            fun () ->
+                                Ok(fun () ->
+                                    closes.Enqueue sessionId
+                                    Ok()) }
             }
 
         let dataPlaneStarter sessionId _ _ =
@@ -1022,6 +1484,7 @@ type TerminalHostDataPlaneTests() =
         finally
             TerminalRegistry.shutdown registry
             |> Async.RunSynchronously
+            |> ignore
 
     [<Test>]
     member _.``new attachment receives bounded replay and ttyd receives its resize``() =
@@ -1903,7 +2366,8 @@ type TerminalHostCommandLifetimeTests() =
                 )
             finally
                 TerminalRegistry.shutdown registry
-                |> Async.RunSynchronously)
+                |> Async.RunSynchronously
+                |> ignore)
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -2276,6 +2740,60 @@ type TerminalHostManifestTests() =
                 Is.EqualTo(Some "2.0.0-valid")
             ))
 
+type private FakeCleanupBoundary(
+    initialJobMembers: int64 * int list,
+    initialTree: JobProcess.ProcessTreeSnapshot,
+    initialLive: Map<int, JobProcess.ProcessIdentity>
+) =
+    // The fake models an external process table whose contents change across the graceful-close boundary.
+    let mutable jobMembers = initialJobMembers
+    let mutable tree = initialTree
+    let mutable live = initialLive
+    let mutable closeCount = 0
+    let mutable disposeCount = 0
+    let mutable removeOnTerminate = true
+    let terminated = ConcurrentQueue<JobProcess.ProcessIdentity>()
+
+    let exactLive (identity: JobProcess.ProcessIdentity) =
+        live
+        |> Map.tryFind identity.ProcessId
+        |> Option.contains identity
+
+    member _.SetState(nextJobMembers, nextTree, nextLive) =
+        jobMembers <- nextJobMembers
+        tree <- nextTree
+        live <- nextLive
+
+    member _.KeepTerminatedProcessesAlive() =
+        removeOnTerminate <- false
+
+    member _.LiveProcess processId = live |> Map.tryFind processId
+    member _.CloseCount = closeCount
+    member _.DisposeCount = disposeCount
+    member _.Terminated = terminated.ToArray() |> Array.toList
+
+    member _.Operations: JobProcess.CleanupOperations =
+        { Capture =
+            JobProcess.captureOwnershipWith
+                (fun () -> jobMembers)
+                (fun () -> tree)
+                (fun processId -> Map.tryFind processId live)
+          CloseJob =
+            fun () ->
+                closeCount <- closeCount + 1
+                live <- snd jobMembers |> List.fold (fun current pid -> Map.remove pid current) live
+          DisposeHandles = fun () -> disposeCount <- disposeCount + 1
+          WaitForExit =
+            fun identities ->
+                identities
+                |> List.filter exactLive
+          Terminate =
+            fun identity ->
+                terminated.Enqueue identity
+
+                if removeOnTerminate && exactLive identity then
+                    live <- Map.remove identity.ProcessId live }
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("TerminalHost")>]
@@ -2292,6 +2810,174 @@ type TerminalHostJobObjectTests() =
             testOutput.Name,
             "copilot.exe"
         )
+
+    let identity processId startTicks: JobProcess.ProcessIdentity =
+        { ProcessId = processId
+          StartTimeUtcTicks = startTicks }
+
+    let tree capturedAt entries: JobProcess.ProcessTreeSnapshot =
+        { CapturedAtUtcTicks = capturedAt
+          Entries =
+            entries
+            |> List.map (fun (processId, parentProcessId) ->
+                { ProcessId = processId
+                  ParentProcessId = parentProcessId }) }
+
+    [<Test>]
+    member _.``cleanup snapshots exact job members and only terminates verified external descendants``() =
+        let initialLive =
+            [ identity 100 1_000L; identity 101 1_100L; identity 200 2_000L ]
+            |> List.map (fun item -> item.ProcessId, item)
+            |> Map.ofList
+
+        let boundary =
+            FakeCleanupBoundary(
+                (10_000L, [ 100; 101 ]),
+                tree 10_000L [ 200, 100 ],
+                initialLive
+            )
+
+        let diagnostics =
+            ConcurrentQueue<TerminalHostDiagnostic>()
+
+        let finish =
+            JobProcess.createCleanupWithDiagnostics
+                diagnostics.Enqueue
+                boundary.Operations
+                ()
+            |> requireOk
+
+        let reused = identity 200 9_000L
+        let finalExternal = identity 201 3_000L
+
+        let finalLive =
+            initialLive
+            |> Map.add 102 (identity 102 1_200L)
+            |> Map.add reused.ProcessId reused
+            |> Map.add finalExternal.ProcessId finalExternal
+
+        boundary.SetState(
+            (20_000L, [ 100; 101; 102 ]),
+            tree 20_000L [ 200, 100; 201, 102 ],
+            finalLive
+        )
+
+        finish () |> requireOk
+
+        let stages =
+            diagnostics.ToArray()
+            |> Array.choose (function
+                | TerminalHostDiagnostic.ProcessCleanup cleanup ->
+                    Some cleanup.Stage
+                | TerminalHostDiagnostic.TerminalClose _ -> None)
+
+        Assert.Multiple(fun () ->
+            Assert.That(boundary.CloseCount, Is.EqualTo(1))
+            Assert.That(boundary.DisposeCount, Is.EqualTo(1))
+            Assert.That(boundary.Terminated, Is.EqualTo([ finalExternal ]))
+            Assert.That(boundary.LiveProcess reused.ProcessId, Is.EqualTo(Some reused))
+            Assert.That(
+                stages,
+                Is.EqualTo(
+                    [| ProcessCleanupStage.OwnershipCaptured
+                       ProcessCleanupStage.OwnershipRecaptured
+                       ProcessCleanupStage.JobClosed
+                       ProcessCleanupStage.SurvivorsObserved
+                       ProcessCleanupStage.TerminationAttempted
+                       ProcessCleanupStage.Completed |]
+                )
+            ))
+
+    [<Test>]
+    member _.``unresolved exact survivor remains retryable with safe identity metadata``() =
+        let memberProcess = identity 300 3_000L
+        let survivor = identity 301 3_100L
+        let live =
+            [ memberProcess; survivor ]
+            |> List.map (fun item -> item.ProcessId, item)
+            |> Map.ofList
+
+        let boundary =
+            FakeCleanupBoundary(
+                (10_000L, [ memberProcess.ProcessId ]),
+                tree 10_000L [ survivor.ProcessId, memberProcess.ProcessId ],
+                live
+            )
+
+        boundary.KeepTerminatedProcessesAlive()
+        let diagnostics =
+            ConcurrentQueue<TerminalHostDiagnostic>()
+
+        let beginClose =
+            JobProcess.createCleanupWithDiagnostics
+                diagnostics.Enqueue
+                boundary.Operations
+
+        let finish = beginClose () |> requireOk
+
+        match finish () with
+        | Ok() -> Assert.Fail("The exact survivor must keep cleanup unresolved")
+        | Error error ->
+            Assert.That(error, Does.Contain($"{survivor.ProcessId}@{survivor.StartTimeUtcTicks}"))
+
+        let unresolved =
+            diagnostics.ToArray()
+            |> Array.choose (function
+                | TerminalHostDiagnostic.ProcessCleanup cleanup
+                    when cleanup.Stage =
+                         ProcessCleanupStage.UnresolvedSurvivors ->
+                    Some cleanup
+                | _ -> None)
+            |> Array.exactlyOne
+
+        Assert.That(
+            unresolved.ProcessIdentities,
+            Is.EqualTo(
+                [ { DiagnosticProcessIdentity.ProcessId =
+                        survivor.ProcessId
+                    StartTimeUtcTicks =
+                        survivor.StartTimeUtcTicks } ]
+            )
+        )
+
+        boundary.SetState(
+            (20_000L, []),
+            tree 20_000L [],
+            Map.empty
+        )
+
+        beginClose () |> requireOk |> fun retry -> retry () |> requireOk
+
+        Assert.That(
+            diagnostics.ToArray()
+            |> Array.choose (function
+                | TerminalHostDiagnostic.ProcessCleanup cleanup ->
+                    Some cleanup.Stage
+                | _ -> None)
+            |> Array.last,
+            Is.EqualTo(ProcessCleanupStage.Completed)
+        )
+
+    [<Test>]
+    member _.``cleanup diagnostic formatting bounds exact survivor identities``() =
+        let diagnostic =
+            TerminalHostDiagnostic.ProcessCleanup
+                { Stage = ProcessCleanupStage.UnresolvedSurvivors
+                  ProcessIdentities =
+                    [ 1..12 ]
+                    |> List.map (fun index ->
+                        { ProcessId = 20_000 + index
+                          StartTimeUtcTicks =
+                            30_000L + int64 index }) }
+
+        let formatted =
+            TerminalHostDiagnostics.format diagnostic
+
+        Assert.Multiple(fun () ->
+            Assert.That(formatted, Does.Contain("stage=unresolved_survivors"))
+            Assert.That(formatted, Does.Contain("process_count=12"))
+            Assert.That(formatted, Does.Contain("processes_omitted=4"))
+            Assert.That(formatted.Length, Is.LessThan(512)))
 
     [<Test>]
     member _.``owned console process starts without an attached console``() =
@@ -2327,7 +3013,7 @@ type TerminalHostJobObjectTests() =
                     "background process unexpectedly attached to a console"
                 )
             finally
-                JobProcess.close owned)
+                JobProcess.close owned |> ignore)
 
     [<Test>]
     member _.``failed terminal process reports executable port and exit code``() =
@@ -2343,17 +3029,29 @@ type TerminalHostJobObjectTests() =
                     (CanonicalWorktree.create root)
                 |> runWithin (TimeSpan.FromSeconds 10.0)
 
-            match result with
-            | Error error ->
+            let assertLaunchError (error: string) =
                 Assert.Multiple(fun () ->
                     Assert.That(error, Does.Contain(executable))
                     Assert.That(error, Does.Contain("exited with code"))
                     Assert.That(error, Does.Contain("before binding loopback port")))
+
+            match result with
+            | Error(TerminalLaunchFailure.LaunchFailed error) ->
+                assertLaunchError error
+            | Error(TerminalLaunchFailure.CleanupPending(error, _, terminal)) ->
+                try
+                    assertLaunchError error
+                finally
+                    terminal.BeginClose()
+                    |> Result.bind (fun complete -> complete())
+                    |> ignore
             | Ok terminal ->
                 try
                     Assert.Fail("A non-server executable unexpectedly became terminal-ready")
                 finally
-                    terminal.Close())
+                    terminal.BeginClose()
+                    |> Result.bind (fun complete -> complete())
+                    |> ignore)
 
     [<Test>]
     member _.``closing one retained Job Object kills its exact ttyd process tree``() =
@@ -2402,7 +3100,7 @@ type TerminalHostJobObjectTests() =
                     Assert.That(childPid, Is.EqualTo(JobProcess.processId owned))
                     Assert.That(File.ReadAllText(environmentFile).Trim(), Is.EqualTo(sessionId)))
 
-                JobProcess.close owned
+                JobProcess.close owned |> requireOk
 
                 Assert.Multiple(fun () ->
                     Assert.That(JobProcess.hasExited owned, Is.True)
@@ -2415,7 +3113,7 @@ type TerminalHostJobObjectTests() =
                         "Job Object close did not kill the ttyd process tree"
                     ))
             finally
-                JobProcess.close owned
+                JobProcess.close owned |> ignore
                 killExactPidFromFile descendantPidFile)
 
     [<Test>]

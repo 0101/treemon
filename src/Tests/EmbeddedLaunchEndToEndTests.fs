@@ -669,6 +669,40 @@ let private runRoute
         return addedId
     }
 
+let private seedDurableResumeSession
+    (fixture: FixturePaths)
+    port
+    sessionId
+    =
+    let now = DateTimeOffset.UtcNow
+    let dbPath =
+        Path.Combine(
+            fixture.RuntimeDirectory,
+            "data",
+            $"session-activity-{port}.db"
+        )
+
+    use store =
+        new SessionActivityStore.SessionActivityStore(dbPath)
+
+    let stored: SessionActivityStore.StoredInstance =
+        { ProcessIdentity =
+            Tests.TestUtils.collisionResistantProcessIdentityForSessionId
+                sessionId
+          SessionId = SessionActivity.SessionId sessionId
+          TerminalSessionId = None
+          WorktreePath =
+            WorktreePath(PathUtils.normalizePath fixture.RoutesWorktree)
+          Provider = CodingToolProvider.CopilotCli
+          Status = SessionActivity.emptyStatus
+          UpdatedAt = now
+          LifecycleAt = None
+          LastSeen = now
+          ContextUsageAt = None
+          ClosedAt = Some now }
+
+    store.UpsertInstance(stored) |> ignore
+
 let private createFixturePaths () =
     let suffix = Guid.NewGuid().ToString("N")[..9]
     let root =
@@ -1432,7 +1466,7 @@ let private runScenario client fixture server api port =
                 server
                 "launchSession"
                 fixture.RoutesWorktree
-                [ "--yolo"; "-i"; directPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; directPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1457,7 +1491,7 @@ let private runScenario client fixture server api port =
                 server
                 "tm-launch"
                 fixture.CliWorktree
-                [ "--yolo"; "-i"; Cli.Program.metaPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; Cli.Program.metaPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1529,7 +1563,7 @@ let private runScenario client fixture server api port =
                 server
                 "launchAction"
                 fixture.RoutesWorktree
-                [ "--yolo"; "-i"; actionPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; actionPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1554,7 +1588,7 @@ let private runScenario client fixture server api port =
                 server
                 "resumeSession"
                 fixture.RoutesWorktree
-                [ "--yolo"; "--continue" ]
+                [ "--experimental"; "--yolo"; "--continue" ]
                 (fun () ->
                     async {
                         let! result =
@@ -1566,6 +1600,36 @@ let private runScenario client fixture server api port =
                             Some(
                                 startResultId
                                     "resumeSession"
+                                    result
+                            )
+                    })
+            |> Async.Ignore
+
+        let durableSessionId = Guid.NewGuid().ToString()
+        seedDurableResumeSession fixture port durableSessionId
+
+        do!
+            runRoute
+                client
+                manifest
+                fixture.RecorderPath
+                server
+                "resumeSessionWithDurableId"
+                fixture.RoutesWorktree
+                [ "--experimental"
+                  "--yolo"
+                  $"--session-id={durableSessionId}" ]
+                (fun () ->
+                    async {
+                        let! result =
+                            api.resumeSession(
+                                WorktreePath fixture.RoutesWorktree
+                            )
+
+                        return
+                            Some(
+                                startResultId
+                                    "resumeSessionWithDurableId"
                                     result
                             )
                     })
@@ -1585,7 +1649,7 @@ let private runScenario client fixture server api port =
                 server
                 "explicit-canvas-session"
                 fixture.CanvasWorktree
-                [ "--yolo"; "-i"; canvasPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; canvasPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1613,7 +1677,7 @@ let private runScenario client fixture server api port =
                 server
                 "create-worktree-with-prompt"
                 fixture.CreatedWorktree
-                [ "--yolo"; "-i"; createPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; createPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1650,7 +1714,7 @@ let private runScenario client fixture server api port =
                 server
                 "queued-canvas-fallback"
                 fixture.CanvasWorktree
-                [ "--yolo"; "-i"; queuedPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; queuedPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1708,7 +1772,7 @@ let private runScenario client fixture server api port =
                 server
                 "autosync-fallback"
                 fixture.AutoSyncWorktree
-                [ "--yolo"; "-i"; autoSyncPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; autoSyncPrompt ]
                 (fun () ->
                     async {
                         let! result =

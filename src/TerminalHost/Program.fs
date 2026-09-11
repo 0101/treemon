@@ -8,27 +8,17 @@ open System.Threading
 open System.Threading.Tasks
 open Treemon.TerminalHosting
 
-type private HostConfig =
-    { Control: ControlApiConfig
-      Layout: TerminalHostLayout
-      TerminalLaunch: TerminalLaunchConfig }
+type private HostConfig = { Control: ControlApiConfig; Layout: TerminalHostLayout; TerminalLaunch: TerminalLaunchConfig }
 
 [<RequireQualifiedAccess>]
 module private HostConfig =
     let parse arguments =
         let initial =
-            { Control =
-                { Port = 0
-                  AllowedOrigins = [] }
+            { Control = { Port = 0; AllowedOrigins = [] }
               Layout = TerminalHostLayout.current ()
               TerminalLaunch =
-                { TtydExecutable =
-                    Path.Combine(
-                        AppContext.BaseDirectory,
-                        TerminalHostLayout.TtydExecutableName
-                    )
-                  ShellCommand = "pwsh"
-                  StartupTimeout = TimeSpan.FromSeconds 10.0 } }
+                { TtydExecutable = Path.Combine(AppContext.BaseDirectory, TerminalHostLayout.TtydExecutableName)
+                  ShellCommand = "pwsh"; StartupTimeout = TimeSpan.FromSeconds 10.0 } }
 
         let rec collect config remaining =
             match remaining with
@@ -39,16 +29,9 @@ module private HostConfig =
                     collect { config with Control.Port = port } tail
                 | _ -> Error $"Invalid control port '{value}'"
             | "--state-dir" :: value :: tail when not (String.IsNullOrWhiteSpace value) ->
-                collect
-                    { config with
-                        Layout =
-                            TerminalHostLayout.forStateDirectory value }
-                    tail
+                collect { config with Layout = TerminalHostLayout.forStateDirectory value } tail
             | "--ttyd" :: value :: tail when not (String.IsNullOrWhiteSpace value) ->
-                collect
-                    { config with
-                        TerminalLaunch.TtydExecutable = Path.GetFullPath value }
-                    tail
+                collect { config with TerminalLaunch.TtydExecutable = Path.GetFullPath value } tail
             | "--shell" :: value :: tail when not (String.IsNullOrWhiteSpace value) ->
                 collect { config with TerminalLaunch.ShellCommand = value } tail
             | "--allowed-origin" :: value :: tail ->
@@ -91,63 +74,38 @@ module private HostRuntime =
                 |> Option.filter (String.IsNullOrWhiteSpace >> not)
                 |> Option.defaultValue "1.0.0"
             let token = Manifest.generateBearerToken ()
-
             let registry =
                 TerminalRegistry.create
                     (TerminalLauncher.start config.TerminalLaunch)
                     (TerminalProxy.start config.TerminalLaunch.StartupTimeout config.Control.AllowedOrigins token)
-
             let! control =
-                ControlApi.start
-                    config.Control
-                    token
-                    hostPid
-                    processStartTimeUtcTicks
-                    version
-                    registry
-
+                ControlApi.start config.Control token hostPid processStartTimeUtcTicks version registry
             let identity =
-                { Pid = hostPid
-                  ProcessStartTimeUtcTicks = processStartTimeUtcTicks
-                  Endpoint = control.Endpoint
-                  HostVersion = version
-                  ControlApiVersion = Protocol.ControlApiVersion }
-
+                { Pid = hostPid; ProcessStartTimeUtcTicks = processStartTimeUtcTicks; Endpoint = control.Endpoint
+                  HostVersion = version; ControlApiVersion = Protocol.ControlApiVersion }
             let manifest =
-                { Identity = identity
-                  BearerToken = token
-                  StagedExecutableVersion =
-                        Manifest.readStagedExecutableVersion config.Layout }
-
+                { Identity = identity; BearerToken = token
+                  StagedExecutableVersion = Manifest.readStagedExecutableVersion config.Layout }
             match Manifest.write config.Layout.StateDirectory manifest with
             | Error error ->
-                do! TerminalRegistry.shutdown registry |> Async.StartAsTask
+                let! _ = TerminalRegistry.shutdown registry |> Async.StartAsTask
                 do! ControlApi.stop control
                 return Error error
             | Ok() ->
                 use monitorCancellation = new CancellationTokenSource()
-
                 let monitor =
-                    Manifest.monitor
-                        config.Layout.StateDirectory
-                        config.Layout
-                        identity
-                        token
-                        manifest.StagedExecutableVersion
-                        monitorCancellation.Token
-
+                    Manifest.monitor config.Layout.StateDirectory config.Layout identity token
+                        manifest.StagedExecutableVersion monitorCancellation.Token
                 let! outcome =
                     task {
                         try
                             do! ControlApi.waitForShutdown control
                             return Ok()
-                        with error ->
-                            return Error error.Message
+                        with error -> return Error error.Message
                     }
-
                 monitorCancellation.Cancel()
                 do! monitor
-                do! TerminalRegistry.shutdown registry |> Async.StartAsTask
+                let! _ = TerminalRegistry.shutdown registry |> Async.StartAsTask
                 do! ControlApi.stop control
                 Manifest.removeIfOwned config.Layout.StateDirectory identity
                 return outcome

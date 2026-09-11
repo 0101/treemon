@@ -15,22 +15,22 @@ type BuildInteractiveCommandTests() =
     [<Test>]
     member _.``CopilotCli provider produces copilot -i command``() =
         let result = (build (Some CodingToolProvider.CopilotCli) (Interactive "use pr skill with https://github.com/org/repo/pull/7")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --yolo -i 'use pr skill with https://github.com/org/repo/pull/7'"))
+        Assert.That(result, Is.EqualTo("copilot --experimental --yolo -i 'use pr skill with https://github.com/org/repo/pull/7'"))
 
     [<Test>]
     member _.``None provider falls back to the default``() =
         let result = (build None (Interactive "create a pull request")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --yolo -i 'create a pull request'"))
+        Assert.That(result, Is.EqualTo("copilot --experimental --yolo -i 'create a pull request'"))
 
     [<Test>]
     member _.``single quotes in prompt are escaped``() =
         let result = (build (Some CodingToolProvider.CopilotCli) (Interactive "it's broken")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --yolo -i 'it''s broken'"))
+        Assert.That(result, Is.EqualTo("copilot --experimental --yolo -i 'it''s broken'"))
 
     [<Test>]
     member _.``prompt with special characters is preserved``() =
         let result = (build None (Interactive "/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --yolo -i '/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs'"))
+        Assert.That(result, Is.EqualTo("copilot --experimental --yolo -i '/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs'"))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -38,21 +38,21 @@ type BuildInteractiveCommandTests() =
 type ResumeCommandTests() =
 
     [<Test>]
-    member _.``Resume with id includes yolo flag``() =
+    member _.``Resume with id uses the direct startup session selector``() =
         let inv = build (Some CodingToolProvider.CopilotCli) (Resume (Some "abc-123"))
-        Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --resume 'abc-123'"))
+        Assert.That(inv.AsShellString, Is.EqualTo("copilot --experimental --yolo --session-id='abc-123'"))
 
     // The resume id is interpolated into the PowerShell command submitted to the terminal, so a
     // hostile owner sessionId must remain inside the single-quoted argument.
     [<Test>]
     member _.``Resume single-quotes and escapes the id (no command injection)``() =
         let inv = build (Some CodingToolProvider.CopilotCli) (Resume (Some "$(calc); '"))
-        Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --resume '$(calc); '''"))
+        Assert.That(inv.AsShellString, Is.EqualTo("copilot --experimental --yolo --session-id='$(calc); '''"))
 
     [<Test>]
     member _.``Resume without id uses --continue with yolo flag``() =
         let inv = build (Some CodingToolProvider.CopilotCli) (Resume None)
-        Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --continue"))
+        Assert.That(inv.AsShellString, Is.EqualTo("copilot --experimental --yolo --continue"))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -63,7 +63,7 @@ type NonInteractiveCommandTests() =
     member _.``NonInteractive produces conflict command``() =
         let inv = build (Some CodingToolProvider.CopilotCli) (NonInteractive "use conflict skill to resolve conflicts")
         Assert.That(inv.Executable, Is.EqualTo("copilot"))
-        Assert.That(inv.Args, Is.EqualTo("""-p "use conflict skill to resolve conflicts" --allow-all --no-ask-user -s --autopilot"""))
+        Assert.That(inv.Args, Is.EqualTo("""--experimental -p "use conflict skill to resolve conflicts" --allow-all --no-ask-user -s --autopilot"""))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -84,6 +84,24 @@ type PermissionFlagInvariantTests() =
             (provider: CodingToolProvider, permFlag: string, mode: InvocationMode) =
         let inv = build (Some provider) mode
         Assert.That(inv.Args, Does.Contain(permFlag))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ExtensionDiscoveryFlagInvariantTests() =
+
+    static member InvocationCases : obj array seq =
+        seq {
+            yield [| box (Interactive "hello") |]
+            yield [| box (Resume (Some "abc")) |]
+            yield [| box (Resume None) |]
+            yield [| box (NonInteractive "hello") |]
+        }
+
+    [<TestCaseSource("InvocationCases")>]
+    member _.``Every Copilot invocation enables extension discovery``(mode: InvocationMode) =
+        let inv = build (Some CodingToolProvider.CopilotCli) mode
+        Assert.That(inv.Args, Does.StartWith("--experimental "))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -160,7 +178,7 @@ type InvestigateLaunchCommandTests() =
     member _.``build wraps the investigate invocation as an interactive shell string``() =
         let wrapped = skillInvocation (Some CodingToolProvider.CopilotCli) "investigate" "clean up auth"
         let cmd = (build (Some CodingToolProvider.CopilotCli) (Interactive wrapped)).AsShellString
-        Assert.That(cmd, Is.EqualTo("copilot --yolo -i 'use investigate skill with clean up auth'"))
+        Assert.That(cmd, Is.EqualTo("copilot --experimental --yolo -i 'use investigate skill with clean up auth'"))
 
     [<Test>]
     member _.``multi-line prompt becomes one control-free command with its UTF-8 payload intact``() =
@@ -168,7 +186,7 @@ type InvestigateLaunchCommandTests() =
         let wrapped = skillInvocation (Some CodingToolProvider.CopilotCli) "investigate" prompt
         let cmd = (build (Some CodingToolProvider.CopilotCli) (Interactive wrapped)).AsShellString
         let prefix =
-            "copilot --yolo -i ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('"
+            "copilot --experimental --yolo -i ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('"
         let suffix = "')))"
 
         Assert.That(cmd, Does.StartWith prefix)
