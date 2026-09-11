@@ -520,6 +520,50 @@ type StartupReconciliationTests() =
 
             Assert.That(afterPresence, Is.Empty))
 
+    [<Test>]
+    member _.``preparing one terminal cleanup preserves unrelated pending reconciliation``() =
+        let now = DateTimeOffset.UtcNow
+        let selectedIdentity = exactIdentity 4405 14405L
+        let unrelatedIdentity = exactIdentity 4406 14406L
+        let selectedTerminal = terminal "4405"
+        let unrelatedTerminal = terminal "4406"
+
+        let identities =
+            [ 4405, selectedIdentity; 4406, unrelatedIdentity ]
+            |> Map.ofList
+
+        let resolver =
+            ProcessIdentityResolver.create (fun processId ->
+                Ok(identities |> Map.tryFind processId))
+
+        withService resolver (fun (service, store, _) ->
+            [ selectedIdentity, "selected-session", selectedTerminal
+              unrelatedIdentity, "unrelated-session", unrelatedTerminal ]
+            |> List.iter (fun (identity, sessionId, terminalSessionId) ->
+                store.UpsertInstance(
+                    storedInstance identity sessionId terminalSessionId now
+                )
+                |> ignore)
+
+            service.StartAt now
+
+            TerminalSessionCleanup.terminalSessionCleanupWithDiagnostics
+                LifecycleDiagnostics.ignore
+                service
+                (Map.ofList [ selectedTerminal, exactWorktree ])
+            |> ignore
+
+            let _, _, pending =
+                queryAt
+                    service
+                    DateTimeOffset.UtcNow
+                    (Set.ofList [ selectedTerminal; unrelatedTerminal ])
+
+            Assert.That(
+                pending,
+                Is.EqualTo(Set.ofList [ selectedIdentity; unrelatedIdentity ])
+            ))
+
     [<TestCaseSource("PendingCases")>]
     member _.``pending reconciliation clears without reopening a session``
         (scenario: PendingReconciliationScenario)

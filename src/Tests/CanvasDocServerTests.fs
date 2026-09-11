@@ -872,3 +872,16 @@ type AttributeOwnershipTests() =
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
             Assert.That(owner, Is.EqualTo(Some sessionId),
                         "An accepted declaration must record the owner"))
+
+    [<Test>]
+    member _.``the canonical activity sessionId alphabet is accepted``() =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-canonical-sid"
+            let agent = agentKnowing worktree
+            let sessionId = "copilot.session_42:resume"
+
+            let outcome = runAsync (attributeOwnership agent worktree "a.html" sessionId)
+            Assert.That(outcome, Is.EqualTo(Attributed))
+
+            let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
+            Assert.That(owner, Is.EqualTo(Some sessionId)))

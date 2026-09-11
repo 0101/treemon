@@ -22,3 +22,14 @@ test("request body reading rejects stream errors", async () => {
 
   await assert.rejects(readBody(request), /connection reset/);
 });
+
+test("request body decoding preserves UTF-8 characters split across chunks", async () => {
+  const encoded = Buffer.from("before € after");
+  const splitInsideEuroSign = encoded.indexOf(0xe2) + 1;
+  const request = Readable.from([
+    encoded.subarray(0, splitInsideEuroSign),
+    encoded.subarray(splitInsideEuroSign),
+  ]);
+
+  assert.equal(await readBody(request), "before € after");
+});

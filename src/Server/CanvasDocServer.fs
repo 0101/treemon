@@ -9,6 +9,7 @@ open System.IO
 open System.Text.Json
 open global.Microsoft.AspNetCore.Hosting
 open Shared
+open Server.SessionActivity
 
 [<Literal>]
 let internal contentHashHeaderName = "X-Treemon-Canvas-Content-Hash"
@@ -48,17 +49,9 @@ type AttributeOutcome =
     | UnknownWorktree             // well-formed but unmonitored worktree — nothing recorded
     | Invalid of reason: string   // missing/blank field — nothing recorded
 
-/// Defense-in-depth for the F9 command-injection class: a declared owner sessionId is eventually
-/// interpolated into a launched `--session-id=<id>` command (via CanvasDocOwnership.getOwner ->
-/// CodingToolCli.build Resume). CodingToolCli now single-quote-escapes that value at the sink, but
-/// we additionally refuse to *store* an owner id outside the safe set real provider session ids use
-/// (ASCII alphanumerics, '-', '_' — GUIDs and provider UUIDs all qualify), so a hostile id carrying
-/// ';', a newline, or '$(...)' never enters the ownership store in the first place.
-let private isSafeSessionIdChar (c: char) =
-    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c = '-' || c = '_'
-
+/// Ownership IDs later feed Resume, so every boundary uses the same canonical validation.
 let internal isValidSessionId (sessionId: string) =
-    not (System.String.IsNullOrWhiteSpace sessionId) && sessionId |> Seq.forall isSafeSessionIdChar
+    SessionId.create sessionId |> Result.isOk
 
 /// Resolves a diff request's worktree against one scheduler snapshot, yielding both the comparison
 /// context Git needs and the `RepoId` that owns the worktree, so a linked worktree reads the root

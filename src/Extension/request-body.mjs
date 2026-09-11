@@ -5,19 +5,21 @@
  */
 export function readBody(req, maxBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
-    let body = "";
+    /** @type {Buffer[]} */
+    const chunks = [];
     let size = 0;
 
     req.on("error", reject);
     req.on("data", (chunk) => {
-      size += chunk.length;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
       if (size > maxBytes) {
         req.destroy();
         reject(new Error("body too large"));
         return;
       }
-      body += chunk;
+      chunks.push(buffer);
     });
-    req.on("end", () => resolve(body));
+    req.on("end", () => resolve(Buffer.concat(chunks, size).toString("utf8")));
   });
 }

@@ -13,7 +13,7 @@ let internal terminalSessionCleanupWithDiagnostics
     fun originPaths ->
         let query terminalSessionIds =
             queryOwnedSessions
-                (fun ids -> service.QueryTerminalActivity ids)
+                (fun ids -> service.QuerySelectedTerminalActivity ids)
                 DateTimeOffset.UtcNow
                 terminalSessionIds
             |> Result.map _.OpenSessions

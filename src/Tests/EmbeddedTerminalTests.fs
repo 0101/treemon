@@ -951,6 +951,53 @@ type TerminalHostProcessConfigurationTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type EmbeddedTerminalControlClientTests() =
+    [<Test>]
+    member _.``host exit waiting uses the dedicated process timeout``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let baseConfig = managerConfig host noLaunch
+
+            let manifest =
+                match TerminalHostManifest.readManifest baseConfig with
+                | Ok(Some value) -> value
+                | other ->
+                    Assert.Fail($"Expected a valid manifest, got {other}")
+                    Unchecked.defaultof<_>
+
+            let identity =
+                TerminalHostManifest.tryProcessIdentity manifest
+                |> Option.defaultWith (fun () ->
+                    Assert.Fail("Expected a valid process identity")
+                    Unchecked.defaultof<_>)
+
+            let probes = ConcurrentQueue<unit>()
+
+            let resolver =
+                ProcessIdentityResolver.create (fun _ ->
+                    probes.Enqueue()
+
+                    if probes.Count = 1 then
+                        Ok(Some identity)
+                    else
+                        Ok None)
+
+            let config =
+                { baseConfig with
+                    StartupTimeout = TimeSpan.Zero
+                    ProcessExitTimeout = TimeSpan.FromSeconds 1.0
+                    ProbeInterval = TimeSpan.FromMilliseconds 1.0
+                    ProcessIdentityResolver = resolver }
+
+            let! result =
+                TerminalHostClient.waitForHostExit config manifest
+                |> Async.StartAsTask
+
+            match result with
+            | Error error -> Assert.Fail($"Expected confirmed process exit, got: {error}")
+            | Ok () -> Assert.That(probes.Count, Is.EqualTo(2))
+        }
+
     [<TestCase("http://127.0.0.1:41001/", true)>]
     [<TestCase("http://127.0.0.1:41001/terminal/session/", true)>]
     [<TestCase("http://127.0.0.1:5000/terminal/session/", true)>]

@@ -507,10 +507,16 @@ let internal statusesForTerminalOrigins
         |> Option.exists terminalSessionIds.Contains)
     |> List.ofSeq
 
+[<RequireQualifiedAccess>]
+type internal ReconciliationScope =
+    | AuthoritativeOrigins
+    | SelectedOrigins
+
 let internal reconcilePending
     (resolver: ProcessIdentityResolver)
     (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
     (now: DateTimeOffset)
+    (scope: ReconciliationScope)
     (terminalSessionIds: Set<TerminalSessionId>)
     (store: SessionActivityStore)
     (state: ServiceState)
@@ -573,7 +579,10 @@ let internal reconcilePending
                     match instance.TerminalSessionId with
                     | None -> Ok(clear identity None current)
                     | Some origin when not (terminalSessionIds.Contains origin) ->
-                        Ok(clear identity (Some origin) current)
+                        match scope with
+                        | ReconciliationScope.AuthoritativeOrigins ->
+                            Ok(clear identity (Some origin) current)
+                        | ReconciliationScope.SelectedOrigins -> Ok current
                     | Some _ ->
                         ProcessIdentityResolver.isAlive resolver identity
                         |> Result.bind (fun alive ->

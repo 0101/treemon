@@ -101,6 +101,7 @@ type private ServiceMsg =
     | ClosedProcessSnapshot of AsyncReplyChannel<Set<ProcessIdentity>>
     | QueryTerminalActivity of
         DateTimeOffset *
+        ReconciliationScope *
         Set<TerminalSessionId> *
         AsyncReplyChannel<
             Result<
@@ -395,6 +396,7 @@ type SessionActivityService internal
                         return! loop state
                     | QueryTerminalActivity(
                         now,
+                        reconciliationScope,
                         terminalSessionIds,
                         reply
                       ) ->
@@ -403,6 +405,7 @@ type SessionActivityService internal
                                 resolver
                                 scheduler
                                 now
+                                reconciliationScope
                                 terminalSessionIds
                                 store
                                 state
@@ -787,9 +790,10 @@ type SessionActivityService internal
 
         mailbox.PostAndReply Snapshot
 
-    member internal _.QueryTerminalActivityAt
+    member private _.QueryTerminalActivityAtWithScope
         (
             now: DateTimeOffset,
+            reconciliationScope: ReconciliationScope,
             terminalSessionIds: Set<TerminalSessionId>
         ) =
         if isDisposed () then
@@ -800,6 +804,7 @@ type SessionActivityService internal
                     (fun reply ->
                         QueryTerminalActivity(
                             now,
+                            reconciliationScope,
                             terminalSessionIds,
                             reply
                         )),
@@ -813,9 +818,27 @@ type SessionActivityService internal
 
                 Error "exact terminal activity query failed"
 
+    member internal this.QueryTerminalActivityAt
+        (
+            now: DateTimeOffset,
+            terminalSessionIds: Set<TerminalSessionId>
+        ) =
+        this.QueryTerminalActivityAtWithScope(
+            now,
+            ReconciliationScope.AuthoritativeOrigins,
+            terminalSessionIds
+        )
+
     member this.QueryTerminalActivity terminalSessionIds =
         this.QueryTerminalActivityAt(
             DateTimeOffset.UtcNow,
+            terminalSessionIds
+        )
+
+    member internal this.QuerySelectedTerminalActivity terminalSessionIds =
+        this.QueryTerminalActivityAtWithScope(
+            DateTimeOffset.UtcNow,
+            ReconciliationScope.SelectedOrigins,
             terminalSessionIds
         )
 

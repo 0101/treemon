@@ -325,7 +325,7 @@ let private authoritativeRelist action lastRegistry config manifest requestResul
     }
 
 let internal waitForHostExit config manifest =
-    let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
+    let deadline = DateTimeOffset.UtcNow + config.ProcessExitTimeout
 
     let rec wait () =
         async {
@@ -335,7 +335,7 @@ let internal waitForHostExit config manifest =
             | Ok true when DateTimeOffset.UtcNow < deadline ->
                 do! Async.Sleep(probeDelayMilliseconds config)
                 return! wait ()
-            | Ok true -> return Error $"TerminalHost PID {manifest.Pid} did not exit within {config.StartupTimeout.TotalSeconds:g} seconds"
+            | Ok true -> return Error $"TerminalHost PID {manifest.Pid} did not exit within {config.ProcessExitTimeout.TotalSeconds:g} seconds"
         }
 
     wait ()

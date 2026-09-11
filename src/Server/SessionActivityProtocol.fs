@@ -105,12 +105,12 @@ let private tryParseTimestamp (value: string) =
         )
     with
     | true, timestamp -> Ok timestamp
-        | false, _ ->
-            value
-            |> Option.ofObj
-            |> Option.defaultValue ""
-            |> ProtocolError.MalformedTimestamp
-            |> Error
+    | false, _ ->
+        value
+        |> Option.ofObj
+        |> Option.defaultValue ""
+        |> ProtocolError.MalformedTimestamp
+        |> Error
 
 let internal maxTextLength = 8192
 
