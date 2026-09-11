@@ -4,6 +4,7 @@ open System
 open System.IO
 open System.Runtime.InteropServices
 open NUnit.Framework
+open Server
 open Server.GitWorktree
 open Server.RefreshScheduler
 open Server.SchedulerState
@@ -664,17 +665,25 @@ type StateAgentTests() =
             )
 
             let seen = DateTimeOffset(2026, 7, 23, 12, 0, 0, TimeSpan.Zero)
+            let identity =
+                ProcessIdentity.create 7001 7001001L
+                |> Result.defaultWith invalidOp
 
             agent.Post(
-                UpdateSessionStatus
-                    { SessionId = SessionId "removed-worktree"
+                UpdateSessionInstance(
+                    { ProcessIdentity = identity
+                      SessionId = SessionId "removed-worktree"
                       TerminalSessionId = None
                       WorktreePath = WorktreePath oldPath
                       Provider = CopilotCli
                       Status = { emptyStatus with Status = SessionLevelStatus.Idle }
                       UpdatedAt = seen
+                      LifecycleAt = Some seen
                       LastSeen = seen
-                      ContextUsageAt = None }
+                      ContextUsageAt = None
+                      ClosedAt = None },
+                    seen
+                )
             )
             do! waitForAgent agent
 
@@ -694,6 +703,13 @@ type StateAgentTests() =
                 Assert.That(repo.GitData.ContainsKey(oldPath), Is.False)
                 Assert.That(repo.BeadsData.ContainsKey(oldPath), Is.False)
                 Assert.That(repo.PlanningData.ContainsKey(oldPath), Is.False)
+                Assert.That(
+                    state.SessionInstances
+                    |> Map.values
+                    |> Seq.exists (fun instance ->
+                        WorktreePath.value instance.WorktreePath = oldPath),
+                    Is.False
+                )
                 Assert.That(state.CodingToolSinceByWorktree.ContainsKey(oldPath), Is.False)
                 Assert.That(repo.UpstreamRemote, Is.EqualTo("upstream"))
                 Assert.That(repo.BaseBranch, Is.EqualTo("develop")))
@@ -1852,78 +1868,95 @@ type ExpediteRefreshTests() =
         |> Async.RunSynchronously
 
 
-// F5/C-07: the push live map (SessionStatuses) is bounded to the idle window. Without eviction it was
+// The exact-instance map is bounded to the idle window. Without eviction it would be
 // append-only, so long-dead sessions lingered in memory forever and drifted from the store's live
-// cache. evictStaleStatuses drops entries older than idleWindow, measured against the NEWEST LastSeen
-// in the map, on every UpdateSessionStatus.
+// cache. evictStaleInstances drops entries older than idleWindow, measured against the NEWEST
+// LastSeen in the map, on every exact update.
 
-let private storedSeen (sid: string) (seen: DateTimeOffset) : StoredStatus =
-    { SessionId = SessionId sid
+let private storedSeen (sid: string) (seen: DateTimeOffset) : StoredInstance =
+    { ProcessIdentity =
+        TestUtils.syntheticProcessIdentityForSessionId sid
+      SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath "C:/wt/a"
       Provider = CopilotCli
       Status = { emptyStatus with Status = SessionLevelStatus.Working }
       UpdatedAt = seen
+      LifecycleAt = Some seen
       LastSeen = seen
-      ContextUsageAt = None }
+      ContextUsageAt = None
+      ClosedAt = None }
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type SessionStatusEvictionTests() =
+type SessionInstanceEvictionTests() =
 
     let now = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
 
-    let statusMap (entries: (string * DateTimeOffset) list) =
+    let instanceMap (entries: (string * DateTimeOffset) list) =
         entries
-        |> List.map (fun (sid, seen) -> SessionId sid, storedSeen sid seen)
+        |> List.map (fun (sid, seen) ->
+            let instance = storedSeen sid seen
+            instance.ProcessIdentity, instance)
         |> Map.ofList
 
-    let keptIds (m: Map<SessionId, StoredStatus>) =
-        m |> Map.keys |> Seq.map SessionId.value |> List.ofSeq |> List.sort
+    let keptIds (instances: Map<ProcessIdentity, StoredInstance>) =
+        instances
+        |> Map.values
+        |> Seq.map (_.SessionId >> SessionId.value)
+        |> List.ofSeq
+        |> List.sort
 
     [<Test>]
-    member _.``evictStaleStatuses drops entries older than the idle window before the newest session``() =
+    member _.``evictStaleInstances drops entries older than the idle window before the newest session``() =
         // newest = "fresh" at `now`; "stale" is just past the idle window behind it.
-        let statuses =
-            statusMap
+        let instances =
+            instanceMap
                 [ "fresh", now
                   "stale", now - (idleWindow + TimeSpan.FromMinutes 1.0) ]
 
-        Assert.That(evictStaleStatuses statuses |> keptIds, Is.EqualTo([ "fresh" ]))
+        Assert.That(evictStaleInstances instances |> keptIds, Is.EqualTo([ "fresh" ]))
 
     [<Test>]
-    member _.``evictStaleStatuses keeps an entry exactly at the idle-window cutoff``() =
+    member _.``evictStaleInstances keeps an entry exactly at the idle-window cutoff``() =
         // "edge" sits exactly idleWindow behind the newest ("fresh") — the >= cutoff keeps it.
-        let atCutoff = statusMap [ "fresh", now; "edge", now - idleWindow ]
+        let atCutoff = instanceMap [ "fresh", now; "edge", now - idleWindow ]
 
-        Assert.That(evictStaleStatuses atCutoff |> keptIds, Is.EqualTo([ "edge"; "fresh" ]))
-
-    [<Test>]
-    member _.``evictStaleStatuses leaves a fully-live map untouched``() =
-        let live = statusMap [ "a", now; "b", now - TimeSpan.FromHours 1.0 ]
-
-        Assert.That(evictStaleStatuses live, Is.EqualTo(live))
+        Assert.That(evictStaleInstances atCutoff |> keptIds, Is.EqualTo([ "edge"; "fresh" ]))
 
     [<Test>]
-    member _.``evictStaleStatuses never drops the single newest session even if its LastSeen is historical``() =
+    member _.``evictStaleInstances leaves a fully-live map untouched``() =
+        let live = instanceMap [ "a", now; "b", now - TimeSpan.FromHours 1.0 ]
+
+        Assert.That(evictStaleInstances live, Is.EqualTo(live))
+
+    [<Test>]
+    member _.``evictStaleInstances never drops the single newest session even if its LastSeen is historical``() =
         // A lone entry (or the newest one) is always its own reference, so it can never evict itself —
         // this is what keeps a freshly-ingested report (with a possibly-historical timestamp) in place.
-        let lone = statusMap [ "only", now - TimeSpan.FromDays 400.0 ]
+        let lone = instanceMap [ "only", now - TimeSpan.FromDays 400.0 ]
 
-        Assert.That(evictStaleStatuses lone |> keptIds, Is.EqualTo([ "only" ]))
+        Assert.That(evictStaleInstances lone |> keptIds, Is.EqualTo([ "only" ]))
 
     [<Test>]
-    member _.``UpdateSessionStatus evicts a now-stale sibling when a fresher session arrives``() =
+    member _.``UpdateSessionInstance evicts a now-stale sibling when a fresher instance arrives``() =
         async {
             let agent = createAgent ()
             let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
             // "old" first (kept as the lone newest), then "fresh" 5h later pushes "old" past the window.
-            agent.Post(UpdateSessionStatus(storedSeen "old" t0))
-            agent.Post(UpdateSessionStatus(storedSeen "fresh" (t0 + TimeSpan.FromHours 5.0)))
+            let old = storedSeen "old" t0
+            let fresh = storedSeen "fresh" (t0 + TimeSpan.FromHours 5.0)
+            agent.Post(UpdateSessionInstance(old, old.LastSeen))
+            agent.Post(UpdateSessionInstance(fresh, fresh.LastSeen))
             let! state = agent.PostAndAsyncReply(GetState)
 
-            let ids = state.SessionStatuses |> Map.keys |> Seq.map SessionId.value |> Set.ofSeq
+            let ids =
+                state.SessionInstances
+                |> Map.values
+                |> Seq.map (_.SessionId >> SessionId.value)
+                |> Set.ofSeq
+
             Assert.That(ids, Is.EqualTo(Set.ofList [ "fresh" ]))
         }
         |> Async.RunSynchronously

@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Tests" />
+    <InternalsVisibleTo Include="SessionIsolationVerifier" />
   </ItemGroup>
 
   <ItemGroup>
@@ -19,6 +20,7 @@
     <Compile Include="JsonStore.fs" />
     <Compile Include="PersistentStore.fs" />
     <Compile Include="PathUtils.fs" />
+    <Compile Include="ProcessIdentity.fs" />
     <Compile Include="ProcessRunner.fs" />
     <Compile Include="Win32.fs" />
     <Compile Include="SystemMetrics.fs" />
@@ -35,9 +37,12 @@
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />
+    <Compile Include="LifecycleDiagnostics.fs" />
+    <Compile Include="SessionActivityProtocol.fs" />
     <Compile Include="SqliteStorage.fs" />
     <Compile Include="OverviewSnapshotBoundary.fs" />
     <Compile Include="OverviewSnapshotStore.fs" />
+    <Compile Include="SessionActivityStoreSchema.fs" />
     <Compile Include="SessionActivityStore.fs" />
     <Compile Include="CodingToolStatus.fs" />
     <Compile Include="CodingToolCli.fs" />
@@ -59,6 +64,7 @@
     <Compile Include="CanvasExport.fs" />
     <Compile Include="CanvasShare.fs" />
     <Compile Include="SchedulerState.fs" />
+    <Compile Include="SessionActivityIngestion.fs" />
     <Compile Include="CardEventLog.fs" />
     <Compile Include="DemoFixture.fs" />
     <Compile Include="TerminalHostProcess.fs" />
@@ -68,6 +74,7 @@
     <Compile Include="TerminalHostReplacement.fs" />
     <Compile Include="TerminalSessionActivity.fs" />
     <Compile Include="EmbeddedTerminal.fs" />
+    <Compile Include="WorktreeCleanup.fs" />
     <Compile Include="TerminalLaunch.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="WorktreeApi.fs" />
@@ -79,6 +86,7 @@
     <Compile Include="HttpSecurity.fs" />
     <Compile Include="CanvasDocServer.fs" />
     <Compile Include="SessionActivityService.fs" />
+    <Compile Include="TerminalSessionCleanup.fs" />
     <Compile Include="SessionActivityRuntime.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>

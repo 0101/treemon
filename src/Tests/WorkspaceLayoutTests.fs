@@ -838,7 +838,12 @@ type TerminalPaneDomTests() =
                     .ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(
-                    "() => document.querySelectorAll('.terminal-tab').length === 1")
+                    """() => {
+                        const activeFrame = document.querySelector('.terminal-iframe-active');
+                        return document.querySelectorAll('.terminal-tab').length === 1
+                            && !!activeFrame
+                            && document.activeElement === activeFrame;
+                    }""")
             let! selectedAfterCardAction =
                 (selectedTab this.Page)
                     .Locator(".terminal-tab-label")

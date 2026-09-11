@@ -25,8 +25,8 @@ or control character is rejected before ownership state is touched.
 A **SystemView** is server-generated and has no author, so nothing is persisted for it. Each
 interaction resolves, at send time, to the most recently active session that currently holds a live
 bridge registration for that worktree. Liveness and activity are separate inputs, fed by two
-independent extensions: the bridge registry says which sessions can receive a prompt at all, and
-`StoredStatus.UpdatedAt` only *orders* them. A reachable session that has not reported activity is
+independent extensions: the bridge registry says which exact processes can receive a prompt at all,
+and `StoredInstance.UpdatedAt` only *orders* them. A reachable session that has not reported activity is
 therefore still a valid target — resolution falls back to the freshest registration rather than
 reporting "no target", so Treemon does not spawn a second session beside a usable one. Heartbeat and
 usage timestamps never decide the target, preserving the rule that `LastSeen` is liveness-only.
@@ -78,15 +78,18 @@ before allocating an unbounded clone.
 ## Technical Approach
 
 `CanvasDocOwnership` is the mailbox-backed store for AgentDoc ownership, providing assignment,
-lookup, removal, and pruning. `SessionBridge` owns the sessionId-keyed registry, transport queue,
-limits, and liveness shared by canvas and agent prompts. `CanvasBridge` layers target resolution and
-worktree launch policy over that generic transport, and delegates a required spawn to the shared
-embedded command-launch boundary.
+lookup, removal, and pruning. `SessionBridge` owns exact process-keyed registrations, secondary
+worktree and durable-SessionId lookup, the transport queue, limits, and liveness shared by canvas
+and agent prompts. Canvas-facing lookup collapses duplicate physical registrations for one durable
+SessionId to its freshest live registration; exact agent delivery keeps the physical identity.
+`CanvasBridge` layers target resolution and worktree launch policy over that generic transport, and
+delegates a required spawn to the shared embedded command-launch boundary.
 
 `CanvasBridge.resolveTarget` branches on `CanvasDocKinds.classify`: an AgentDoc reads
-`CanvasDocOwnership`, while a SystemView intersects the worktree's live bridge registrations with the
-scheduler's `SessionStatuses` snapshot, takes the most recent by `StoredStatus.activityOrderKey`, and
-falls back to the freshest live registration when no reachable session has an activity row.
+`CanvasDocOwnership`, while a SystemView takes the durable session IDs from the worktree's
+canvas-collapsed live registrations, orders their exact rows from
+`SchedulerState.SessionInstances` by `StoredInstance.activityOrderKey`, and falls back to the
+freshest live registration when no reachable session has an activity row.
 `CanvasBridge.sendMessage` returns the resolved target alongside the outcome so the caller can
 distinguish "queued because nothing is reachable" from "queued behind a known session".
 

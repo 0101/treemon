@@ -8,38 +8,43 @@
 
 ## Expected Behavior
 
-The Resume control appears when the worktree has a previous user message, no tracked native terminal,
-and no Working or WaitingForUser coding session. It is available from the card and the `R` key.
+The Resume control appears only when the worktree has a previous user message, no tracked native
+terminal, and `CodingToolStatus.NoSession`. It is available from the card and the `R` key.
 
 When invoked, Treemon:
 
 1. Reads the configured coding-tool provider.
 2. Selects the durable session with the greatest `(UpdatedAt, SessionId)` for the worktree.
 3. Returns the running embedded terminal already owning that exact session, when one exists.
-4. Otherwise starts an embedded terminal and submits `copilot --yolo --resume <session-id>`.
-5. Falls back to `copilot --yolo --continue` when no durable session ID remains.
+4. Otherwise starts an embedded terminal and submits
+   `copilot --experimental --yolo --session-id=<session-id>`.
+5. Falls back to `copilot --experimental --yolo --continue` when no durable session ID remains.
 6. Opens the terminal pane and selects the exact returned terminal.
 
-A different live session or terminal in the same worktree does not suppress Resume. Repeated input
-while a launch is in flight retargets the pane without issuing another launch. Command-delivery
-failure closes the newly created terminal and reports the launch failure.
+Any open coding session in the worktree suppresses Resume; an embedded terminal with no open coding
+session does not. Repeated input while a launch is in flight retargets the pane without issuing
+another launch. Command-delivery failure closes the newly created terminal and reports the launch
+failure.
 
 ## Technical Approach
 
 `SessionActivityStore.LatestSessionIdForWorktree` performs the scalar durable lookup independently
-of heartbeat recency and the live-session window. `TerminalSessionActivity.tryFindLiveTerminalId`
+of heartbeat recency and the live-session window, ranking exact process instances together with the
+pre-upgrade identities retained in `resume_sessions`. `TerminalSessionActivity.tryFindLiveTerminalId`
 joins that selected Copilot session to a running terminal through its exact
 `TREEMON_TERMINAL_SESSION_ID` origin.
 
-`CodingToolCli` builds the provider-specific resume command. `WorktreeApi.resumeSession` either
-returns the matching terminal or uses the shared embedded command-launch operation.
+`CodingToolCli` builds the provider-specific resume command with the CLI's direct startup selector,
+`--session-id=<id>`, so extensions join the durable target identity from process start.
+`WorktreeApi.resumeSession` either returns the matching terminal or uses the shared embedded
+command-launch operation.
 `CardViews.canResumeSession` is the single visibility predicate used by both mouse and keyboard
 entry points.
 
 ## Decisions
 
-- **Exact ID over directory-based continue:** `--resume <id>` avoids resuming a session from another
-  worktree; `--continue` is only the missing-ID fallback.
+- **Direct session selector over foreground switching:** `--session-id=<id>` starts under the
+  durable identity before extensions join; `--continue` is only the missing-ID fallback.
 - **Idempotent exact-session resume:** an already-live target returns its terminal instead of
   starting a second Copilot process.
 - **Hidden over disabled:** Resume represents a narrow applicable state rather than a generally

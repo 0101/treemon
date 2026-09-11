@@ -42,21 +42,20 @@ type DashboardState =
       /// True only after the durable live-session rebuild has been applied, including an empty seed.
       /// Overview capture uses this to distinguish "no live sessions" from "startup has not loaded
       /// session state yet".
-      SessionStatusesHydrated: bool
-      // Push-model live session status, keyed by SessionId. Fed by the SessionActivity mailbox
-      // (single writer) via UpdateSessionStatus and rebuilt from SQLite on restart. Kept bounded by
-      // evicting entries older than the idle window (relative to the newest LastSeen) on each update
-      // (evictStaleStatuses), so it mirrors the store's live cache (LoadLiveStatuses) rather than
-      // growing append-only. This is the substrate the worktree card's coding-tool fields collapse
-      // over (pickActive) — see the push-only repoint task; today it is populated but not yet read by
-      // WorktreeApi.
-      SessionStatuses: Map<SessionActivity.SessionId, SessionActivityStore.StoredStatus>
-      // Per-worktree "entered Idle" timestamp for the time-since-idle chip (WorktreeStatus.CodingToolSince).
-      // Keyed by the (normalised) worktree path. Stamped ONCE when a worktree's collapsed coding-tool
-      // status transitions INTO Idle (the turn-end / last-active time), then FROZEN across the idle
-      // heartbeats that keep advancing last_seen (so the chip shows time-in-category, not
-      // time-since-last-write), and cleared when the status leaves Idle (a new Working turn moves it).
-      // In-memory only: a restart rebuilds it from the reloaded sessions (re-stamping at reload time).
+      SessionInstancesHydrated: bool
+      /// Exact physical process instances, keyed by PID plus process-start identity. The collection
+      /// stays bounded by the activity idle window and never collapses duplicate durable SessionIds.
+      SessionInstances:
+          Map<
+              ProcessIdentity,
+              SessionActivityStore.StoredInstance
+           >
+      /// Last observed collapsed status per worktree. This is paired with
+      /// `CodingToolSinceByWorktree` so liveness-only updates can preserve the transition stamp.
+      CodingToolStatusByWorktree: Map<string, CodingToolStatus>
+      /// When the collapsed worktree status last changed. Heartbeats and other exact-instance
+      /// updates preserve the timestamp while the collapsed status is unchanged. NoSession has no
+      /// entry. In-memory only: startup seeds the currently observed status at the rebuild time.
       CodingToolSinceByWorktree: Map<string, DateTimeOffset>
       /// Worktrees with an auto-sync operation running: target selection, Treemon's own Git sync, and
       /// delivery, including any fallback launch one of those operations makes.
@@ -71,8 +70,9 @@ module DashboardState =
           ExpeditedRepos = Set.empty
           ClientActivity = ActivityLevel.Idle
           ClientActivityAt = DateTimeOffset.MinValue
-          SessionStatusesHydrated = false
-          SessionStatuses = Map.empty
+          SessionInstancesHydrated = false
+          SessionInstances = Map.empty
+          CodingToolStatusByWorktree = Map.empty
           CodingToolSinceByWorktree = Map.empty
           AutoSyncOperationsInFlight = Set.empty }
 
@@ -98,15 +98,14 @@ type StateMsg =
     | ExpediteRefresh of RepoId
     | ClearExpedite of RepoId
     | ReportClientActivity of ActivityLevel * DateTimeOffset
-    /// Push-model live status for one session, produced by the SessionActivity single-writer
-    /// mailbox after folding an ingested event. Stored keyed by SessionId so a worktree's live
-    /// sessions can later be collapsed (pickActive) into the card's coding-tool fields.
-    | UpdateSessionStatus of SessionActivityStore.StoredStatus
-    /// Restart rebuild: seed the whole live-status map in one shot (rows arrive oldest-first from
-    /// LoadLiveStatuses) and stamp each worktree's time-since-idle from its NEWEST session — never the
-    /// oldest-replayed row, which the per-row UpdateSessionStatus path would freeze in, overstating the
-    /// chip for the whole post-restart idle span (F11/C-14).
-    | SeedSessionStatuses of SessionActivityStore.StoredStatus list
+    /// One exact process-instance update. A closed instance removes only that physical identity.
+    | UpdateSessionInstance of
+        SessionActivityStore.StoredInstance *
+        observedAt: DateTimeOffset
+    /// Restart rebuild: seed the complete bounded exact collection in one shot.
+    | SeedSessionInstances of
+        observedAt: DateTimeOffset *
+        SessionActivityStore.StoredInstance list
     /// The per-worktree operation guard `AutoSync.trigger` holds for a whole sync attempt.
     | TryBeginAutoSyncOperation of path: string * AsyncReplyChannel<bool>
     | CompleteAutoSyncOperation of path: string
@@ -141,55 +140,155 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         PlanningData = repo.PlanningData |> Map.remove path
         CanvasData = repo.CanvasData |> Map.remove path }
 
-/// Evict live session-status entries older than the idle window. `SessionStatuses` is otherwise
-/// append-only, so without this it grows unboundedly and drifts from the store's live cache
-/// (`LoadLiveStatuses`, same `idleWindow` cutoff) — long-dead sessions would linger in memory forever.
+/// Evict exact process instances older than the activity cache's idle window.
+/// `SessionInstances` is otherwise append-only, so long-dead rows would linger indefinitely.
 /// The window is measured against the NEWEST `LastSeen` in the map (the freshest heartbeat observed)
 /// rather than wall-clock, so it stays deterministic and replay-safe (events can carry historical
-/// timestamps) and never drops the entry that was just added. Applied on every `UpdateSessionStatus`.
-let internal evictStaleStatuses
-    (statuses: Map<SessionActivity.SessionId, SessionActivityStore.StoredStatus>)
+/// timestamps) and never drops the entry that was just added. Applied on every exact update.
+let internal evictStaleInstances
+    (
+        instances:
+            Map<
+                ProcessIdentity,
+                SessionActivityStore.StoredInstance
+             >
+    )
     =
-    if Map.isEmpty statuses then
-        statuses
+    if Map.isEmpty instances then
+        instances
     else
-        let newest = statuses |> Seq.map _.Value.LastSeen |> Seq.max
+        let newest = instances |> Seq.map _.Value.LastSeen |> Seq.max
         let cutoff = newest - SessionActivity.idleWindow
-        statuses |> Map.filter (fun _ s -> s.LastSeen >= cutoff)
+        instances |> Map.filter (fun _ instance -> instance.LastSeen >= cutoff)
 
-/// Stamp / freeze / clear a worktree's time-since-idle timestamp from its freshly-collapsed
-/// coding-tool status. Pure so it is unit-testable in isolation:
-///   * status = Idle → stamp `now` on the FIRST entry, then FREEZE (keep the existing stamp across
-///     the idle heartbeats that keep advancing last_seen — the chip must show time-IN-category, not
-///     time-since-last-write);
-///   * status = Working / WaitingForUser / NoSession → clear the entry (a new Working turn moves the
-///     chip; a lost session leaves no idle time).
-/// This stamp has TWO consumers that both depend on the freeze/reset policy above: the time-since-idle
-/// chip (surfaced only while Idle) and `SessionActivity.debounceIdle` (the card read path), which
-/// measures its Working→Idle display hold from this frozen transition instant — so weigh both before
-/// changing when the stamp freezes or clears.
-/// `worktreePath` is the normalised path key (`WorktreePath.value`) that WorktreeApi looks up.
-let internal stampIdleSince
-    (now: DateTimeOffset)
+let internal groupInstancesByWorktree
+    (
+        instances:
+            seq<SessionActivityStore.StoredInstance>
+    )
+    =
+    instances
+    |> Seq.groupBy (
+        _.WorktreePath
+        >> WorktreePath.value
+        >> PathUtils.normalizePath
+    )
+    |> Seq.map (fun (worktreePath, grouped) ->
+        worktreePath, grouped |> List.ofSeq)
+    |> Map.ofSeq
+
+let private collapsedStatusAt
+    (observedAt: DateTimeOffset)
+    (worktreePath: string)
+    (
+        instancesByWorktree:
+            Map<
+                string,
+                SessionActivityStore.StoredInstance list
+             >
+    )
+    =
+    instancesByWorktree
+    |> Map.tryFind worktreePath
+    |> Option.defaultValue []
+    |> CodingToolStatus.fromPushInstances observedAt None
+    |> _.Status
+
+let internal updateCodingToolTransition
+    (observedAt: DateTimeOffset)
     (worktreePath: string)
     (status: CodingToolStatus)
-    (idleSince: Map<string, DateTimeOffset>)
-    : Map<string, DateTimeOffset> =
-    match status with
-    | Idle -> if Map.containsKey worktreePath idleSince then idleSince else idleSince |> Map.add worktreePath now
-    | Working
-    | WaitingForUser
-    | NoSession -> idleSince |> Map.remove worktreePath
+    (
+        statuses: Map<string, CodingToolStatus>,
+        since: Map<string, DateTimeOffset>
+    )
+    =
+    match status, statuses |> Map.tryFind worktreePath with
+    | NoSession, _ ->
+        statuses |> Map.remove worktreePath,
+        since |> Map.remove worktreePath
+    | current, Some previous
+        when current = previous
+             && Map.containsKey worktreePath since ->
+        statuses, since
+    | current, _ ->
+        statuses |> Map.add worktreePath current,
+        since |> Map.add worktreePath observedAt
+
+let private refreshCodingToolTransitions
+    (observedAt: DateTimeOffset)
+    (
+        previousInstances:
+            Map<
+                ProcessIdentity,
+                SessionActivityStore.StoredInstance
+             >
+    )
+    (
+        currentInstances:
+            Map<
+                ProcessIdentity,
+                SessionActivityStore.StoredInstance
+             >
+    )
+    (statuses: Map<string, CodingToolStatus>)
+    (since: Map<string, DateTimeOffset>)
+    =
+    let previousByWorktree =
+        previousInstances
+        |> Map.values
+        |> groupInstancesByWorktree
+
+    let currentByWorktree =
+        currentInstances
+        |> Map.values
+        |> groupInstancesByWorktree
+
+    Set.unionMany
+        [ previousByWorktree |> Map.keys |> Set.ofSeq
+          currentByWorktree |> Map.keys |> Set.ofSeq
+          statuses |> Map.keys |> Set.ofSeq ]
+    |> Set.fold
+        (fun transitionState worktreePath ->
+            let previousStatus =
+                collapsedStatusAt
+                    observedAt
+                    worktreePath
+                    previousByWorktree
+
+            let currentStatus =
+                collapsedStatusAt
+                    observedAt
+                    worktreePath
+                    currentByWorktree
+
+            let preparedState =
+                if previousStatus = currentStatus then
+                    transitionState
+                else
+                    let statuses, since = transitionState
+                    statuses |> Map.remove worktreePath,
+                    since |> Map.remove worktreePath
+
+            updateCodingToolTransition
+                observedAt
+                worktreePath
+                currentStatus
+                preparedState)
+        (statuses, since)
 
 /// The status-overview "Agent \u2191" row (category `CodingToolRefresh`). Under the push model there is
 /// no poll to log, so the row would sit permanently `pending`; instead we mark the latest extension
 /// push here — which worktree last reported and when — as a green success, so a growing "X ago"
-/// signals that pushes have stopped. `LastSeen` is the push instant; duration is meaningless for a
-/// push (no server-side work) so it stays blank.
-let internal codingToolPushEvent (stored: SessionActivityStore.StoredStatus) : CardEvent =
+/// signals that pushes have stopped. `observedAt` is the server receipt time; duration is meaningless
+/// for a push (no server-side work) so it stays blank.
+let internal codingToolPushEvent
+    (observedAt: DateTimeOffset)
+    (stored: SessionActivityStore.StoredInstance)
+    : CardEvent =
     { Source = "CodingToolRefresh"
       Message = WorktreePath.value stored.WorktreePath
-      Timestamp = stored.LastSeen
+      Timestamp = observedAt
       Status = Some StepStatus.Succeeded
       Duration = None }
 
@@ -212,19 +311,35 @@ let private updateWorktreeList
             KnownPaths = newPaths
             IsReady = true }
 
-    // Prune the GLOBAL time-since-idle stamps for the removed worktrees. CodingToolSinceByWorktree
-    // hangs off DashboardState (not PerRepoState), so it cannot be pruned inside removeWorktreeData;
-    // without this a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince
-    // freezes existing keys), overstating the chip on reuse (F10/C-13).
+    // Prune the GLOBAL status-transition stamps for removed worktrees. They hang off DashboardState
+    // (not PerRepoState), so removeWorktreeData cannot reach them.
     let prunedSince =
         removedPaths
         |> Set.fold (fun m path -> Map.remove path m) state.CodingToolSinceByWorktree
+
+    let prunedInstances =
+        state.SessionInstances
+        |> Map.filter (fun _ instance ->
+            removedPaths
+            |> Set.contains (WorktreePath.value instance.WorktreePath)
+            |> not)
 
     // AutoSyncOperationsInFlight is deliberately NOT pruned here: AutoSync.trigger releases it in a
     // finally, so it already self-cleans for every operation that ends. Dropping it because the path
     // vanished from a discovery could only hand the guard to a second trigger while the first is
     // still merging, breaking the one-operation-per-worktree invariant (docs/spec/worktree-monitor.md).
-    updateRepo repoId updated { state with CodingToolSinceByWorktree = prunedSince }
+    updateRepo
+        repoId
+        updated
+        { state with
+            SessionInstances = prunedInstances
+            CodingToolStatusByWorktree =
+                removedPaths
+                |> Set.fold
+                    (fun statuses path ->
+                        Map.remove path statuses)
+                    state.CodingToolStatusByWorktree
+            CodingToolSinceByWorktree = prunedSince }
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -295,13 +410,22 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
 
     | RemoveWorktree(repoId, path) ->
         let repo = getRepo repoId state
-        // Also drop the worktree's GLOBAL time-since-idle stamp (same reason as UpdateWorktreeList —
-        // it lives on DashboardState, not PerRepoState, so removeWorktreeData can't reach it; F10/C-13).
+        // Also drop the worktree's GLOBAL status-transition state (same reason as
+        // UpdateWorktreeList — it lives on DashboardState, not PerRepoState).
         let prunedSince = state.CodingToolSinceByWorktree |> Map.remove path
+        let prunedInstances =
+            state.SessionInstances
+            |> Map.filter (fun _ instance ->
+                WorktreePath.value instance.WorktreePath <> path)
         // AutoSyncOperationsInFlight is left alone for the same reason as in updateWorktreeList: only
         // the operation that holds the guard may release it.
         updateRepo repoId (removeWorktreeData path repo)
-            { state with CodingToolSinceByWorktree = prunedSince }
+            { state with
+                SessionInstances = prunedInstances
+                CodingToolStatusByWorktree =
+                    state.CodingToolStatusByWorktree
+                    |> Map.remove path
+                CodingToolSinceByWorktree = prunedSince }
 
     | GetState replyChannel ->
         replyChannel.Reply(state)
@@ -322,73 +446,70 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
     | ReportClientActivity(activity, timestamp) ->
         { state with ClientActivity = activity; ClientActivityAt = timestamp }
 
-    | UpdateSessionStatus stored ->
-        // Add the fresh report, then evict entries past the idle window (measured against the newest
-        // LastSeen) so the map stays bounded and mirrors the store's live cache instead of growing
-        // append-only.
-        let newStatuses =
-            state.SessionStatuses
-            |> Map.add stored.SessionId stored
-            |> evictStaleStatuses
+    | UpdateSessionInstance(stored, observedAt) ->
+        let updated =
+            if stored.ClosedAt.IsSome then
+                state.SessionInstances
+                |> Map.remove stored.ProcessIdentity
+            else
+                state.SessionInstances
+                |> Map.add stored.ProcessIdentity stored
+                |> evictStaleInstances
 
-        // Re-collapse THIS worktree's live sessions (using the freshest observed time as `now`) to see
-        // whether it just entered / left Idle, then stamp / freeze / clear the time-since-idle chip.
-        let worktreePath = WorktreePath.value stored.WorktreePath
-
-        let worktreeSessions =
-            newStatuses
-            |> Map.toList
-            |> List.map snd
-            |> List.filter (fun s -> s.WorktreePath = stored.WorktreePath)
-
-        let collapsed = CodingToolStatus.fromPushSessions stored.LastSeen worktreeSessions
-
-        { state with
-            SessionStatuses = newStatuses
-            LatestByCategory = state.LatestByCategory |> Map.add "CodingToolRefresh" (codingToolPushEvent stored)
-            CodingToolSinceByWorktree =
-                stampIdleSince stored.LastSeen worktreePath collapsed.Status state.CodingToolSinceByWorktree }
-
-    | SeedSessionStatuses stored ->
-        // Restart rebuild. LoadLiveStatuses replays rows OLDEST-first; feeding them one-by-one through
-        // UpdateSessionStatus lets the oldest idle row stamp+FREEZE the chip, so a long-stale idle
-        // session's timestamp gets locked in instead of the current open session's — the chip then
-        // OVERSTATES time-since-idle for the whole post-restart idle span (F11/C-14). Instead seed the
-        // map in one shot (same final set as replaying each row: evict measures against the global
-        // newest), then stamp each worktree's chip from its NEWEST session's last_seen, collapsed at
-        // that time. That yields the accepted "chip resets on restart" behaviour (Decision #8) rather
-        // than an overstated old stamp — WITHOUT reversing the seed order to DESC.
-        let seeded =
-            (state.SessionStatuses, stored)
-            ||> List.fold (fun m s -> Map.add s.SessionId s m)
-            |> evictStaleStatuses
-
-        let idleSince =
-            seeded
-            |> Map.toList
-            |> List.map snd
-            |> List.groupBy (fun s -> WorktreePath.value s.WorktreePath)
-            |> List.fold
-                (fun acc (worktreePath, sessions) ->
-                    let newestSeen = sessions |> List.map _.LastSeen |> List.max
-                    let collapsed = CodingToolStatus.fromPushSessions newestSeen sessions
-                    stampIdleSince newestSeen worktreePath collapsed.Status acc)
+        let codingToolStatuses, codingToolSince =
+            refreshCodingToolTransitions
+                observedAt
+                state.SessionInstances
+                updated
+                state.CodingToolStatusByWorktree
                 state.CodingToolSinceByWorktree
 
-        // Prime the "Agent" push row from the newest seeded session so it reflects the last known push
-        // immediately after restart instead of reverting to `pending` until the first live heartbeat.
+        { state with
+            SessionInstances = updated
+            LatestByCategory =
+                state.LatestByCategory
+                |> Map.add
+                    "CodingToolRefresh"
+                    (codingToolPushEvent observedAt stored)
+            CodingToolStatusByWorktree = codingToolStatuses
+            CodingToolSinceByWorktree = codingToolSince }
+
+    | SeedSessionInstances(observedAt, stored) ->
+        let seeded =
+            stored
+            |> List.filter _.ClosedAt.IsNone
+            |> List.map (fun instance ->
+                instance.ProcessIdentity, instance)
+            |> Map.ofList
+            |> evictStaleInstances
+
+        let codingToolStatuses, codingToolSince =
+            refreshCodingToolTransitions
+                observedAt
+                Map.empty
+                seeded
+                Map.empty
+                Map.empty
+
+        // Prime the "Agent" push row from the newest seeded instance so it reflects the last known
+        // presence immediately after restart instead of reverting to pending until a live report.
         let latestByCategory =
-            match seeded |> Map.toList |> List.map snd with
+            match seeded |> Map.values |> List.ofSeq with
             | [] -> state.LatestByCategory
-            | sessions ->
-                let newest = sessions |> List.maxBy _.LastSeen
-                state.LatestByCategory |> Map.add "CodingToolRefresh" (codingToolPushEvent newest)
+            | instances ->
+                let newest = instances |> List.maxBy _.LastSeen
+
+                state.LatestByCategory
+                |> Map.add
+                    "CodingToolRefresh"
+                    (codingToolPushEvent newest.LastSeen newest)
 
         { state with
-            SessionStatusesHydrated = true
-            SessionStatuses = seeded
+            SessionInstancesHydrated = true
+            SessionInstances = seeded
             LatestByCategory = latestByCategory
-            CodingToolSinceByWorktree = idleSince }
+            CodingToolStatusByWorktree = codingToolStatuses
+            CodingToolSinceByWorktree = codingToolSince }
 
     | TryBeginAutoSyncOperation(path, reply) ->
         // One path may hold the guard; everyone else is refused until the holder releases it.

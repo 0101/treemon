@@ -57,17 +57,14 @@ type GroupMember =
       Branch: string
       RepoId: RepoId
       RepoName: string
-      /// When the agent entered its current state — used to show the per-agent "time in category"
-      /// in the agent-group drill-down. Set (from the worktree's CodingToolSince) only for agent-group
-      /// members; always None for task-bucket members (passed explicitly, so the contract holds by
-      /// construction rather than convention).
+      /// When the agent entered its current state — used to show "time in category" in the
+      /// agent-group drill-down. The worktree-level CodingToolSince is safe only when exactly one
+      /// physical instance is open; multi-instance and task-bucket members carry None.
       Since: System.DateTimeOffset option
-      /// The live sessions that place this agent member in THIS group — each carrying its own status,
-      /// skill and context usage. Since agent grouping is now per SESSION (not per worktree), a
-      /// worktree whose sessions span several groups appears once in each, carrying only the subset of
-      /// its sessions that belong to that group (the source of the per-session donuts drawn in the
-      /// Agents row and the drill-down chip). Always [] for task-bucket members (passed explicitly, so
-      /// the contract holds by construction rather than convention).
+      /// The live physical instances that place this agent member in THIS group — each carrying its
+      /// own exact marker identity, status, skill, and context usage. A worktree whose processes span
+      /// several groups appears once in each, carrying only the matching subset. Always [] for
+      /// task-bucket members.
       Sessions: SessionDot list
       Contribution: int }
 
@@ -259,20 +256,22 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     // are 0 and never raise the max, so this equals the max across the non-empty buckets.
     let scale = taskGroups |> List.map (fun (_, _, count) -> count) |> List.max
 
-    // Agent groups, now split per SESSION (not per worktree): each open session lands in the group its
-    // OWN status/skill classifies via agentGroupOf — a red-dot Working session by its running
-    // skill, a WaitingForUser session in Waiting, an Idle session in Idle. A worktree therefore
-    // appears in every group its sessions span, carrying only the matching subset, and contributes
-    // that subset's size (so Count = Σ Contribution = total sessions in the group). NoSession sessions
-    // never occur (empty session list ⇔ NoSession worktree), so a worktree with no live session joins
-    // no group. Empty groups omitted; Waiting then Idle sort last. Since carries the worktree's frozen
-    // CodingToolSince (one stamp per worktree — split sessions share it) for the time-in-category chip.
+    // Agent groups split per physical instance (not per worktree or durable SessionId): each open
+    // process lands in the group its own status/skill classifies via agentGroupOf. A worktree
+    // therefore appears in every group its instances span and contributes that matching subset's
+    // size. Empty lists represent NoSession, so they contribute no agent group.
     let agentMembersFor kind =
         taggedWorktrees
         |> List.choose (fun (repoId, repoName, w) ->
             match w.Sessions |> List.filter (fun s -> agentGroupOf s.Status s.Skill = Some kind) with
             | [] -> None
-            | matched -> Some(memberOf repoId repoName w.CodingToolSince matched w (List.length matched)))
+            | matched ->
+                let since =
+                    match w.Sessions with
+                    | [ _ ] -> w.CodingToolSince
+                    | _ -> None
+
+                Some(memberOf repoId repoName since matched w (List.length matched)))
 
     let agents =
         agentGroupOrder

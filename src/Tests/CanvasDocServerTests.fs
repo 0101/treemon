@@ -836,7 +836,7 @@ type AttributeOwnershipTests() =
 
     // F9 (security, defense-in-depth): a sessionId carrying shell/PowerShell metacharacters must be
     // rejected before it is stored, because a stored owner id is later interpolated into a launched
-    // `--resume {id}` command. The worktree IS known, so only the hostile sessionId can reject.
+    // `--session-id=<id>` command. The worktree IS known, so only the hostile sessionId can reject.
     [<TestCase("abc'; rm -rf ~ #")>]
     [<TestCase("$(calc)")>]
     [<TestCase("a b")>]
@@ -872,3 +872,16 @@ type AttributeOwnershipTests() =
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
             Assert.That(owner, Is.EqualTo(Some sessionId),
                         "An accepted declaration must record the owner"))
+
+    [<Test>]
+    member _.``the canonical activity sessionId alphabet is accepted``() =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-canonical-sid"
+            let agent = agentKnowing worktree
+            let sessionId = "copilot.session_42:resume"
+
+            let outcome = runAsync (attributeOwnership agent worktree "a.html" sessionId)
+            Assert.That(outcome, Is.EqualTo(Attributed))
+
+            let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
+            Assert.That(owner, Is.EqualTo(Some sessionId)))

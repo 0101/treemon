@@ -39,6 +39,7 @@ let private createApiWithTerminal agent roots embeddedTerminal =
           CardLog = CardEventLog.createAgent ()
           SessionAgent = SessionManager.createAgent ()
           EmbeddedTerminal = embeddedTerminal
+          TerminalSessionCleanup = WorktreeCleanup.noSessionClose
           ActivityStore = None
           SnapshotStore = None
           AutoSyncStore = None
@@ -67,11 +68,14 @@ let private createApi agent roots =
               StartupTimeout = TimeSpan.FromSeconds 5.0
               ControlRequestTimeout = TimeSpan.FromSeconds 5.0
               ProbeInterval = TimeSpan.FromMilliseconds 25.0
+              ProcessExitTimeout = TimeSpan.FromSeconds 30.0
               LaunchHost =
                 fun _ ->
                     Error
                         "This path-resolution test did not expect to launch TerminalHost"
-              ProcessIdentityMatches = fun _ _ -> Ok false
+              ProcessIdentityResolver =
+                ProcessIdentityResolver.create
+                    (fun _ -> Ok None)
               ResolveProcessExecutable =
                 fun _ _ ->
                     Error

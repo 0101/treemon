@@ -9,6 +9,7 @@ open System.IO
 open System.Text.Json
 open global.Microsoft.AspNetCore.Hosting
 open Shared
+open Server.SessionActivity
 
 [<Literal>]
 let internal contentHashHeaderName = "X-Treemon-Canvas-Content-Hash"
@@ -26,7 +27,11 @@ let internal bodyScriptMetaName = "treemon-canvas-has-body-script"
 type CanvasRegisterRequest =
     { worktreePath: string
       injectUrl: string
-      sessionId: string }
+      shutdownUrl: string
+      shutdownCapability: string
+      sessionId: string
+      parentProcessId: int
+      terminalSessionId: string }
 
 [<CLIMutable>]
 type CanvasAttributeRequest =
@@ -44,17 +49,9 @@ type AttributeOutcome =
     | UnknownWorktree             // well-formed but unmonitored worktree — nothing recorded
     | Invalid of reason: string   // missing/blank field — nothing recorded
 
-/// Defense-in-depth for the F9 command-injection class: a declared owner sessionId is eventually
-/// interpolated into a launched `--resume {id}` command (via CanvasDocOwnership.getOwner ->
-/// CodingToolCli.build Resume). CodingToolCli now single-quote-escapes that value at the sink, but
-/// we additionally refuse to *store* an owner id outside the safe set real provider session ids use
-/// (ASCII alphanumerics, '-', '_' — GUIDs and provider UUIDs all qualify), so a hostile id carrying
-/// ';', a newline, or '$(...)' never enters the ownership store in the first place.
-let private isSafeSessionIdChar (c: char) =
-    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c = '-' || c = '_'
-
+/// Ownership IDs later feed Resume, so every boundary uses the same canonical validation.
 let internal isValidSessionId (sessionId: string) =
-    not (System.String.IsNullOrWhiteSpace sessionId) && sessionId |> Seq.forall isSafeSessionIdChar
+    SessionId.create sessionId |> Result.isOk
 
 /// Resolves a diff request's worktree against one scheduler snapshot, yielding both the comparison
 /// context Git needs and the `RepoId` that owns the worktree, so a linked worktree reads the root
@@ -99,7 +96,29 @@ let isLoopbackInjectUrl (injectUrl: string) : bool =
         && HttpSecurity.isLoopbackHost uri.Host
     | false, _ -> false
 
-let canvasRegisterHandler (agent: MailboxProcessor<SchedulerState.StateMsg>) : HttpHandler =
+let private registrationFailureText =
+    function
+    | SessionBridge.RegistrationFailure.InvalidParentProcessId ->
+        "missing or invalid parentProcessId"
+    | SessionBridge.RegistrationFailure.ParentProcessNotRunning ->
+        "the parent Copilot process is not running"
+    | SessionBridge.RegistrationFailure.ParentProcessResolutionFailed ->
+        "could not resolve the parent Copilot process identity"
+    | SessionBridge.RegistrationFailure.ParentProcessReused ->
+        "the bridge parent process identity changed"
+    | SessionBridge.RegistrationFailure.ParentIdentityMismatch ->
+        "the bridge registration does not match the existing process identity"
+    | SessionBridge.RegistrationFailure.InvalidSessionId ->
+        "invalid sessionId"
+    | SessionBridge.RegistrationFailure.InvalidTerminalSessionId ->
+        "invalid terminalSessionId"
+    | SessionBridge.RegistrationFailure.InvalidShutdownCapability ->
+        "invalid shutdown capability"
+
+let canvasRegisterHandler
+    (processIdentityResolver: ProcessIdentityResolver)
+    (agent: MailboxProcessor<SchedulerState.StateMsg>)
+    : HttpHandler =
     fun next ctx -> task {
         try
             let! body = ctx.BindJsonAsync<CanvasRegisterRequest>()
@@ -110,9 +129,18 @@ let canvasRegisterHandler (agent: MailboxProcessor<SchedulerState.StateMsg>) : H
             elif System.String.IsNullOrWhiteSpace body.injectUrl then
                 Log.log "Canvas" $"Registration failed: missing injectUrl for {body.worktreePath}"
                 return! RequestErrors.BAD_REQUEST "missing injectUrl" next ctx
+            elif System.String.IsNullOrWhiteSpace body.shutdownUrl then
+                Log.log "Canvas" $"Registration failed: missing shutdownUrl for {body.worktreePath}"
+                return! RequestErrors.BAD_REQUEST "missing shutdownUrl" next ctx
+            elif System.String.IsNullOrWhiteSpace body.shutdownCapability then
+                Log.log "Canvas" $"Registration failed: missing shutdown capability for {body.worktreePath}"
+                return! RequestErrors.BAD_REQUEST "missing shutdown capability" next ctx
             elif not (isLoopbackInjectUrl body.injectUrl) then
-                Log.log "Canvas" $"Registration failed: non-loopback injectUrl ({body.injectUrl}) for {body.worktreePath}"
+                Log.log "Canvas" $"Registration failed: non-loopback injectUrl for {body.worktreePath}"
                 return! RequestErrors.BAD_REQUEST "injectUrl must resolve to a loopback host" next ctx
+            elif not (isLoopbackInjectUrl body.shutdownUrl) then
+                Log.log "Canvas" $"Registration failed: non-loopback shutdownUrl for {body.worktreePath}"
+                return! RequestErrors.BAD_REQUEST "shutdownUrl must resolve to a loopback host" next ctx
             else
                 let worktreePath = body.worktreePath |> Server.PathUtils.normalizePath
                 let! isKnown = isKnownWorktree agent worktreePath |> Async.StartAsTask
@@ -121,14 +149,22 @@ let canvasRegisterHandler (agent: MailboxProcessor<SchedulerState.StateMsg>) : H
                     Log.log "Canvas" $"Registration: unmonitored worktree — {worktreePath} (extension serves the doc in a browser)"
                     return! Successful.ok (json {| registered = false; monitored = false |}) next ctx
                 else
-                    // Normalize a blank/whitespace sessionId to None (anonymous) rather than
-                    // Some "": Option.ofObj only maps null. A Some "" owner is unroutable yet
-                    // sticky (SessionBridge also normalizes blank IDs), so it must never be stored —
-                    // mirror attributeOwnership's IsNullOrWhiteSpace treatment of sessionId.
-                    let sessionId =
-                        if System.String.IsNullOrWhiteSpace body.sessionId then None else Some body.sessionId
-                    CanvasBridge.registerSession worktreePath body.injectUrl sessionId
-                    return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
+                    let request: SessionBridge.RegistrationRequest =
+                        { WorktreePath = worktreePath
+                          InjectUrl = body.injectUrl
+                          ShutdownUrl = body.shutdownUrl
+                          ShutdownCapability = body.shutdownCapability
+                          SessionId = Option.ofObj body.sessionId
+                          ParentProcessId = body.parentProcessId
+                          TerminalSessionId = Option.ofObj body.terminalSessionId }
+
+                    match SessionBridge.registerSession processIdentityResolver request with
+                    | Ok _ ->
+                        return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
+                    | Error failure ->
+                        let reason = registrationFailureText failure
+                        Log.log "Canvas" $"Registration rejected for {worktreePath}: {reason}"
+                        return! RequestErrors.BAD_REQUEST reason next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
             return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
