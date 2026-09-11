@@ -195,13 +195,13 @@ type WorkMetrics =
       LinesAdded: int
       LinesRemoved: int }
 
-/// How the fixed desktop workspace (Terminal | Canvas | Dashboard) divides its width while Canvas
-/// is open. EqualThirds renders 1:1:1 with Terminal or 1:1 without it; WideCanvas renders 1:2:1
-/// with Terminal or 2:1 without it.
+/// Desktop Terminal | Canvas | Dashboard proportions: 1:1:1, 1:2:1, or 2:2:1.
+/// With either optional pane hidden, equal mode becomes 1:1 and both wide modes become 2:1.
 [<RequireQualifiedAccess>]
 type WorkspaceWidth =
     | EqualThirds
     | WideCanvas
+    | WidePanes
 
 [<RequireQualifiedAccess>]
 type EmbeddedTerminalLifecycle =
