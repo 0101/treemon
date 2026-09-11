@@ -142,10 +142,10 @@ shared state; no session-log parsing remains.
   values and usage cannot block a lifecycle transition.
 - Usage values and their ordering timestamp are stored on `session_instances`; usage is not appended
   to `activity_events` and cannot establish presence for an unknown process identity.
-- Explicit worktree Resume selects the greatest `(UpdatedAt, SessionId)` from all durable sessions
-  for the worktree, regardless of current status or heartbeat recency. Sessions older than the live
-  window remain manually resumable until retention removes them. Automatic TerminalHost replacement
-  is narrower: it resumes only an open exact-origin process instance, as defined in
+- Once invoked, explicit worktree Resume selects the greatest `(UpdatedAt, SessionId)` from all
+  durable sessions for the worktree, regardless of current status or heartbeat recency. Sessions
+  older than the live window remain manually resumable until retention removes them. Automatic
+  TerminalHost replacement is narrower: it resumes only an open exact-origin process instance, as
   `docs/spec/embedded-terminal.md`.
 - On server start, durable conversations and recently observed instances are loaded from SQLite.
   Durable titles, intents, skill, footer messages, context gauges, and their ordering clocks are
@@ -402,7 +402,7 @@ into lifecycle status.
 | Persistence | Store exact process-instance folds in full; keep event rows as dedupe keys only and pre-upgrade history as bare resume identity; rebuild legacy schema transactionally. |
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
-| Explicit Resume | Query durable most-recent activity identity, then use bounded live exact-origin state only to reuse that target's running terminal instead of launching a duplicate process. |
+| Explicit Resume | Once invoked, query durable most-recent activity identity, then use bounded live exact-origin state only to reuse that target's running terminal instead of launching a duplicate process. |
 | Terminal origin | Validate and persist optional `TerminalSessionId` on the process instance; a focused terminal module derives exact ownership for tab activity, Resume idempotency, and replacement, never from worktree inference. |
 | Explicit close | Live `session.shutdown` or confirmed terminal teardown closes one exact process instance monotonically; heartbeat expiry remains the crash fallback. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |

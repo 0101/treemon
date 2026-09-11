@@ -96,12 +96,13 @@ fallback, and `tm launch`. A browser need not be open for a CLI or background la
 the terminal until a dashboard attaches later.
 
 Direct dashboard actions that start an agent open and target the terminal pane, selecting the exact
-returned terminal. Resume first joins its durable target session ID to the authoritative running
-terminal snapshot; when that exact session is already live, it returns the existing terminal and
-starts no second Copilot process. Other terminals in the worktree do not suppress Resume. Repeating
-the terminal-open or Resume action while that worktree already has a start in flight re-targets the
-pane without issuing a second launch; the in-flight state clears on both success and failure, so a
-rejected launch never wedges the action.
+returned terminal. When invoked, Resume first joins its durable target session ID to the
+authoritative running terminal snapshot; when that exact session is already live, it returns the
+existing terminal and starts no second Copilot process. An embedded terminal without an open coding
+session does not suppress Resume; any open coding session does. Repeating the terminal-open or
+Resume action while that worktree already has a start in flight re-targets the pane without issuing
+a second launch; the in-flight state clears on both success and failure, so a rejected launch never
+wedges the action.
 Background and CLI launches never steal dashboard focus. The browser polls the
 authoritative terminal registry on its normal activity cadence even when its current snapshot is
 empty, so the first background-created terminal becomes visible without a reload. That poll is

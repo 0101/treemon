@@ -8,8 +8,8 @@
 
 ## Expected Behavior
 
-The Resume control appears when the worktree has a previous user message, no tracked native terminal,
-and no Working or WaitingForUser coding session. It is available from the card and the `R` key.
+The Resume control appears only when the worktree has a previous user message, no tracked native
+terminal, and `CodingToolStatus.NoSession`. It is available from the card and the `R` key.
 
 When invoked, Treemon:
 
@@ -21,9 +21,10 @@ When invoked, Treemon:
 5. Falls back to `copilot --experimental --yolo --continue` when no durable session ID remains.
 6. Opens the terminal pane and selects the exact returned terminal.
 
-A different live session or terminal in the same worktree does not suppress Resume. Repeated input
-while a launch is in flight retargets the pane without issuing another launch. Command-delivery
-failure closes the newly created terminal and reports the launch failure.
+Any open coding session in the worktree suppresses Resume; an embedded terminal with no open coding
+session does not. Repeated input while a launch is in flight retargets the pane without issuing
+another launch. Command-delivery failure closes the newly created terminal and reports the launch
+failure.
 
 ## Technical Approach
 

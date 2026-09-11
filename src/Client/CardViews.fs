@@ -611,8 +611,7 @@ let prRow (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: Worktre
 let canResumeSession (wt: WorktreeStatus) =
     not wt.HasActiveSession
     && wt.LastUserMessage.IsSome
-    && wt.CodingTool <> Working
-    && wt.CodingTool <> WaitingForUser
+    && wt.CodingTool = NoSession
 
 /// The card's activity line: the freshest source-tagged intent or session title plus, when a skill is
 /// running, that skill as a pill. Kept as a pure decision so presence logic is independently testable.
