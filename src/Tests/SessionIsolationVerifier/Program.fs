@@ -86,8 +86,8 @@ type private InstanceEvidence =
     { Facts: InstanceFacts
       LastSeen: DateTimeOffset }
 
-/// Which view of an exact row a phase reads. The mailbox snapshot proves in-memory state, including
-/// the rebuild after a service restart; the store proves the durable row.
+/// Which view of an exact row a phase reads. The mailbox snapshot proves open in-memory state,
+/// including the rebuild after a service restart; the store also retains closed durable history.
 type private RowSource =
     | LiveSnapshot
     | DurableStore
@@ -774,12 +774,21 @@ let private verify () =
                 expectRows
                     secondRuntime
                     LiveSnapshot
-                    [ expectedRow "STEP4_OLD_A" fixtureA.Identity terminalA SessionLevelStatus.Working AlreadyClosed
-                          "first shared event"
-                      expectedRow "STEP4_REUSED_A" reusedIdentity terminalA SessionLevelStatus.Working AlreadyClosed
-                          "(none)"
-                      expectedRow "STEP4_RECOVERED_B" fixtureB.Identity terminalB SessionLevelStatus.Working StillOpen
+                    [ expectedRow "STEP4_RECOVERED_B" fixtureB.Identity terminalB SessionLevelStatus.Working StillOpen
                           "surviving process working" ]
+
+            ensure
+                (secondRuntime.Service.ExactSnapshot().Count = 1)
+                "The restart live snapshot retained a closed exact identity"
+
+            expectRows
+                secondRuntime
+                DurableStore
+                [ expectedRow "STEP4_DURABLE_OLD_A" fixtureA.Identity terminalA SessionLevelStatus.Working AlreadyClosed
+                      "first shared event"
+                  expectedRow "STEP4_DURABLE_REUSED_A" reusedIdentity terminalA SessionLevelStatus.Working AlreadyClosed
+                      "(none)" ]
+            |> ignore
 
             ensure
                 (recovered[fixtureB.Identity].LastSeen > afterReuse[fixtureB.Identity].LastSeen)
@@ -797,8 +806,8 @@ let private verify () =
             printfn
                 $"STEP4 PASS reusedPid={reusedPid} distinctStartTicks={priorStartTicks}/{ProcessIdentity.processStartTimeUtcTicks reusedIdentity} heartbeatBeforePresenceCreated=false restartPort={secondRuntime.Port} restartPresenceAttempts={restartAttempts} pendingAfterPresence={pending.Count} activeStateRecovered=true"
 
+            closeProcess secondRuntime fixtureB.Identity
             let exactIdentities = [ fixtureA.Identity; reusedIdentity; fixtureB.Identity ]
-            exactIdentities |> List.iter (closeProcess secondRuntime)
             let census = expectCensus "STEP5 durable rows" { Rows = 3; Closed = 3 } secondRuntime.Store
             stopFixture fixtureB |> orFail "Fixture B stop"
             let survivors = exactIdentities |> List.filter isAlive |> List.length
