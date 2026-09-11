@@ -259,6 +259,7 @@ let internal readWorkspaceWidth () : WorkspaceWidth =
 
         match stringProperty "workspaceWidth", stringProperty "canvasSize" with
         | Some "wide-canvas", _ -> WorkspaceWidth.WideCanvas
+        | Some "wide-panes", _ -> WorkspaceWidth.WidePanes
         | Some _, _ -> WorkspaceWidth.EqualThirds
         | None, Some "2to1" -> WorkspaceWidth.WideCanvas
         | _ -> WorkspaceWidth.EqualThirds)
@@ -268,6 +269,7 @@ let internal writeWorkspaceWidth (width: WorkspaceWidth) =
         match width with
         | WorkspaceWidth.EqualThirds -> "thirds"
         | WorkspaceWidth.WideCanvas -> "wide-canvas"
+        | WorkspaceWidth.WidePanes -> "wide-panes"
     updateGlobalConfig "workspace width" [ "workspaceWidth", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
 
 /// Machine-level config for the canvas Share backend (the `canvasShare` section of `config.json`):

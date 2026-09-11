@@ -90,9 +90,9 @@ theme and an inert `canvasSend` so author controls remain harmless outside Treem
 
 - The pane opens and closes from the header Canvas button and the `C` key.
 - Open or closed state persists in global config.
-- The workspace order is fixed as `Terminal | Canvas | Dashboard`. The width selector persists equal
-  or wide Canvas mode: `1:1:1` / `1:2:1` while Terminal is visible and `1:1` / `2:1` while it is
-  hidden. Narrow screens stack the same order and ignore the desktop ratio.
+- Workspace width controls live in the app header, not the canvas tab bar. The fixed
+  `Terminal | Canvas | Dashboard` order, persisted ratios, and hidden-pane behavior are described
+  in `docs/spec/worktree-monitor.md` (Dashboard Layout).
 - The pane normally follows the focused worktree. An explicit card-level SystemView action may target another worktree without moving dashboard card focus; the next explicit card selection clears that override.
 - The worktree diff is explicit-only when another canvas document exists. Automatic fallback and explicit card selection prefer another document; `diff.html` is selected automatically only when it is the worktree's sole canvas document. The card Diff action and direct tab selection still open it. The server omits the generated `diff.html` from a confirmed-clean worktree's inventory (`docs/spec/worktree-diff-viewer.md`), so a clean worktree shows no diff tab — the tab strip needs no per-view visibility rule of its own.
 - Worktrees with multiple docs show tab buttons. The active doc's tab always renders — a lone `AgentDoc` gets a labeled tab instead of a bare iframe, and a lone `SystemView` still shows its `.canvas-system-tab` entry so its beads-count badge stays visible. Each `AgentDoc` tab reserves a fixed-width metadata slot: it shows compact last-modified age normally, then swaps in an outlined Copy button only while hovered. Copy writes the doc's full on-disk path using the worktree path's separator; success replaces the rectangles with a green checkmark for 1.2 seconds, while failure uses the existing actionable error banner. Path copy and Canvas Share disable each other until the active clipboard workflow settles. The overlay changes opacity only, so tab dimensions stay fixed.

@@ -1021,7 +1021,7 @@ type OverviewBandE2ETests() =
             // canvas -> 2/3, per the `.workspace-wide-canvas` rule) while staying safely above the
             // breakpoint keeps the three-pane row layout intact and gives the dashboard only ~333px at
             // this viewport — comfortably under the content width on both Windows and Linux fonts.
-            do! this.Page.Locator(".canvas-width-btn[title^='Wide canvas']").ClickAsync()
+            do! this.Page.Locator(".workspace-width-btn[title^='Wide canvas']").ClickAsync()
             do! this.Page.Locator(".app-layout.workspace-wide-canvas").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! this.Page.SetViewportSizeAsync(1000, 800)
             do! this.Page.WaitForTimeoutAsync(250.0f)
@@ -1080,7 +1080,7 @@ type OverviewBandE2ETests() =
                 this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
             do! canvasBtn.ClickAsync()
             do! this.Page.Locator(".canvas-tab-bar").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            do! this.Page.Locator(".canvas-width-btn[title^='Wide canvas']").ClickAsync()
+            do! this.Page.Locator(".workspace-width-btn[title^='Wide canvas']").ClickAsync()
             do! this.Page.Locator(".app-layout.workspace-wide-canvas").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! this.Page.WaitForTimeoutAsync(400.0f)
 
