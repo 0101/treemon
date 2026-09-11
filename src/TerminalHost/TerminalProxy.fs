@@ -5,6 +5,7 @@ open System.Net
 open System.Net.Http
 open System.Net.WebSockets
 open System.Text
+open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
@@ -30,8 +31,11 @@ module internal TerminalProxy =
           DisposeApplication: unit -> Task
           DisposeClient: unit -> unit }
 
-    let internal customizeTerminalPage (html: string) =
-        html.Replace("</head>", TerminalPageHeadInjection + "</head>", StringComparison.OrdinalIgnoreCase)
+    let internal customizeTerminalPage (allowedOrigins: string list) (html: string) =
+        let reconnectScript =
+            $"<script>(function(){{var allowedOrigins={JsonSerializer.Serialize allowedOrigins},action=\"treemon-terminal-visible\",reconnectPrompt=\"Press \\u23CE to Reconnect\",poll=null,deadline=null,reloading=false,reloadMarker='treemon-terminal-reconnect-load',suppressNextLoadedActivation=(function(){{try{{var marked=sessionStorage.getItem(reloadMarker)==='1';sessionStorage.removeItem(reloadMarker);return marked}}catch(_){{return true}}}})();function clearPending(){{if(poll!==null){{clearInterval(poll);poll=null}}if(deadline!==null){{clearTimeout(deadline);deadline=null}}}}function isWaitingForReconnect(){{var terminal=document.querySelector('.xterm');return !!terminal&&Array.prototype.some.call(terminal.children,function(child){{return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt}})}}function reconnectIfWaiting(){{if(reloading||document.visibilityState!=='visible'||!isWaitingForReconnect())return false;reloading=true;clearPending();try{{sessionStorage.setItem(reloadMarker,'1')}}catch(_){{}}window.location.reload();return true}}function activate(loaded){{if(document.visibilityState!=='visible'){{clearPending();return}}if(loaded&&suppressNextLoadedActivation){{suppressNextLoadedActivation=false;return}}if(reconnectIfWaiting())return;if(poll===null)poll=setInterval(reconnectIfWaiting,100);if(deadline!==null)clearTimeout(deadline);deadline=setTimeout(clearPending,10000)}}window.addEventListener('message',function(event){{if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;if(event.data.active===false){{clearPending();return}}if(event.data.active===true)activate(event.data.loaded===true)}});document.addEventListener('visibilitychange',function(){{if(document.visibilityState!=='visible')clearPending()}})}})();</script>"
+
+        html.Replace("</head>", TerminalPageHeadInjection + reconnectScript + "</head>", StringComparison.OrdinalIgnoreCase)
 
     let private receiveMessage mode (socket: WebSocket) =
         let buffer = Array.zeroCreate<byte> 8_192
@@ -200,6 +204,7 @@ module internal TerminalProxy =
         context.Response.Headers.Pragma <- "no-cache"
 
     let private proxyHttp
+        allowedOrigins
         ttydPort
         targetPath
         (client: HttpClient)
@@ -228,7 +233,10 @@ module internal TerminalProxy =
 
                         let! html = response.Content.ReadAsStringAsync(context.RequestAborted)
 
-                        let bytes = html |> customizeTerminalPage |> Encoding.UTF8.GetBytes
+                        let bytes =
+                            html
+                            |> customizeTerminalPage allowedOrigins
+                            |> Encoding.UTF8.GetBytes
 
                         context.Response.ContentLength <- int64 bytes.Length
                         do! context.Response.Body.WriteAsync(bytes, context.RequestAborted)
@@ -286,7 +294,13 @@ module internal TerminalProxy =
                         | Some attachmentId ->
                             do! runBrowser plane attachmentId socket |> Async.StartAsTask
                 else
-                    return! proxyHttp ttydPort targetPath client context
+                    return!
+                        proxyHttp
+                            allowedOrigins
+                            ttydPort
+                            targetPath
+                            client
+                            context
         }
 
     let private ignoreTaskFailure (operation: unit -> Task) =

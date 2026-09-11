@@ -23,6 +23,11 @@ type internal ReplaySlice =
     | Complete of ReplayFrame list
     | Gap of ReplayFrame list
 
+type internal TerminalModeReplay =
+    private
+        { Modes: Map<int, bool>
+          Pending: string }
+
 [<RequireQualifiedAccess>]
 module internal TerminalProtocol =
     let [<Literal>] private DefaultColumns = 120
@@ -81,6 +86,108 @@ module internal TerminalProtocol =
         Encoding.UTF8.GetBytes(
             $"{{\"AuthToken\":\"\",\"columns\":{size.Columns},\"rows\":{size.Rows}}}"
         )
+
+[<RequireQualifiedAccess>]
+module internal TerminalModeReplay =
+    let private trackedModes =
+        set [ 1; 6; 7; 9; 12; 25; 45; 66; 1000; 1001; 1002; 1003
+              1004; 1005; 1006; 1007; 1015; 1016; 1047; 1049; 47; 2004 ]
+
+    let private mouseTrackingModes = set [ 9; 1000; 1001; 1002; 1003 ]
+    let private mouseEncodingModes = set [ 1005; 1006; 1015; 1016 ]
+    let private alternateScreenModes = set [ 47; 1047; 1049 ]
+
+    let empty =
+        { Modes = Map.empty
+          Pending = "" }
+
+    let private updateMode enabled mode modes =
+        let family =
+            if mouseTrackingModes.Contains mode then
+                Some mouseTrackingModes
+            elif mouseEncodingModes.Contains mode then
+                Some mouseEncodingModes
+            elif alternateScreenModes.Contains mode then
+                Some alternateScreenModes
+            else
+                None
+
+        family
+        |> Option.map (fun values ->
+            modes
+            |> Map.filter (fun candidate _ ->
+                not (values.Contains candidate)))
+        |> Option.defaultValue modes
+        |> Map.add mode enabled
+
+    let private finish enabled (pending: string) modes =
+        pending.Substring(3).Split(';')
+        |> Array.choose (fun value ->
+            match Int32.TryParse value with
+            | true, mode when trackedModes.Contains mode -> Some mode
+            | _ -> None)
+        |> Array.fold (fun updated mode ->
+            updated |> updateMode enabled mode) modes
+
+    let private pendingStart value =
+        if value = 0x1Buy then "\u001b"
+        elif value = 0x9Buy then "\u001b["
+        else ""
+
+    let private observeByte state value =
+        let character = char value
+
+        match state.Pending with
+        | "" ->
+            { state with Pending = pendingStart value }
+        | "\u001b" when character = 'c' -> empty
+        | "\u001b" when character = '[' ->
+            { state with Pending = "\u001b[" }
+        | "\u001b[" when character = '?' || character = '!' ->
+            { state with Pending = state.Pending + string character }
+        | "\u001b[!" when character = 'p' -> empty
+        | pending
+            when pending.StartsWith("\u001b[?", StringComparison.Ordinal)
+                 && (Char.IsAsciiDigit character || character = ';')
+                 && pending.Length < 64 ->
+            { state with Pending = pending + string character }
+        | pending
+            when pending.StartsWith("\u001b[?", StringComparison.Ordinal)
+                 && (character = 'h' || character = 'l') ->
+            { Modes = finish (character = 'h') pending state.Modes
+              Pending = "" }
+        | _ ->
+            { state with Pending = pendingStart value }
+
+    let observeOutputFrame (data: byte array) state =
+        if data.Length <= 1 then
+            state
+        else
+            data[1..]
+            |> Array.fold observeByte state
+
+    let private frame matching state =
+        state.Modes
+        |> Map.toList
+        |> List.filter matching
+        |> List.sortBy snd
+        |> List.map (fun (mode, enabled) ->
+            let setting = if enabled then "h" else "l"
+            $"\u001b[?{mode}{setting}")
+        |> String.concat ""
+        |> function
+            | "" -> None
+            | modes -> Some(Encoding.ASCII.GetBytes($"0{modes}"))
+
+    let beforeReplayFrame state =
+        state
+        |> frame (fun (mode, enabled) ->
+            enabled && alternateScreenModes.Contains mode)
+
+    let afterReplayFrame state =
+        state
+        |> frame (fun (mode, enabled) ->
+            not (enabled && alternateScreenModes.Contains mode))
 
 [<RequireQualifiedAccess>]
 module internal ReplayBuffer =

@@ -87,6 +87,10 @@ type Msg =
     | SelectEmbeddedTerminal of EmbeddedTerminalId
     | ReconnectEmbeddedTerminalView of EmbeddedTerminalId
     | EmbeddedTerminalViewLoaded of EmbeddedTerminalId * generation: int
+    | NotifyEmbeddedTerminalVisibility of
+        terminalId: EmbeddedTerminalId *
+        origin: string *
+        signal: TerminalPane.TerminalVisibilitySignal
     | CycleEmbeddedTerminal of EmbeddedTerminalId * TerminalPane.CycleDirection
     | CloseEmbeddedTerminal of EmbeddedTerminalId
     | EmbeddedTerminalCloseFailed

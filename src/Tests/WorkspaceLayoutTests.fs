@@ -412,12 +412,35 @@ let private terminalDocument (marker: string) =
     .xterm-viewport { width: 100%; height: 80px; overflow-y: auto; }
     .scrollback { height: 600px; }
   </style>
+  <script>
+    var loadKey = 'terminal-test-load-count';
+    window.__terminalLoadCount = Number(sessionStorage.getItem(loadKey) || 0) + 1;
+    sessionStorage.setItem(loadKey, String(window.__terminalLoadCount));
+    window.__terminalVisibleMessages = 0;
+    window.__terminalInactiveMessages = 0;
+    window.addEventListener('message', function(event) {
+      if (!event.data || event.data.action !== '__ACTION__') return;
+      if (event.data.active === true) window.__terminalVisibleMessages++;
+      if (event.data.active === false) window.__terminalInactiveMessages++;
+    });
+  </script>
 </head>
 <body>
-  <div data-terminal-marker="__MARKER__" class="xterm-viewport"><div class="scrollback"></div></div>
+  <div class="xterm">
+    <textarea class="xterm-helper-textarea" aria-label="Terminal input"></textarea>
+    <div data-terminal-marker="__MARKER__" class="xterm-viewport"><div class="scrollback"></div></div>
+  </div>
 </body>
 </html>"""
         .Replace("__MARKER__", marker, StringComparison.Ordinal)
+        .Replace(
+            "__ACTION__",
+            TerminalPane.TerminalVisibleAction,
+            StringComparison.Ordinal
+        )
+    |> TerminalHost.TerminalProxy.customizeTerminalPage [
+        Uri(ServerFixture.viteUrl).GetLeftPart(UriPartial.Authority)
+    ]
 
 [<TestFixture>]
 [<Category("E2E")>]
@@ -452,6 +475,51 @@ type TerminalPaneDomTests() =
                 page.EvaluateAsync(
                     "() => { window.__terminalFrames = Array.from(document.querySelectorAll('.terminal-iframe')); }")
             return ()
+        }
+
+    let waitForTerminalSignal
+        (page: IPage)
+        (frame: IFrame)
+        stage
+        expression
+        =
+        task {
+            try
+                let! _ =
+                    frame.WaitForFunctionAsync(
+                        expression,
+                        (null :> obj),
+                        FrameWaitForFunctionOptions(
+                            PollingInterval = 50.0f,
+                            Timeout = 5000.0f
+                        )
+                    )
+
+                return ()
+            with :? TimeoutException as ex ->
+                let! terminal =
+                    frame.EvaluateAsync<string>(
+                        """() => JSON.stringify({
+                            visibleMessages: window.__terminalVisibleMessages ?? null,
+                            inactiveMessages: window.__terminalInactiveMessages ?? null,
+                            loadCount: window.__terminalLoadCount ?? null
+                        })"""
+                    )
+                let! dashboard =
+                    page.EvaluateAsync<string>(
+                        """() => JSON.stringify({
+                            visibility: document.visibilityState,
+                            hasFocus: document.hasFocus(),
+                            paneHidden: document.querySelector('.terminal-pane')?.hidden ?? null,
+                            activeTerminal: document.querySelector('.terminal-iframe-active')
+                                ?.getAttribute('data-terminal-id') ?? null
+                        })"""
+                    )
+
+                return
+                    Assert.Fail(
+                        $"{stage}: terminal frame condition timed out. Frame={frame.Url}; terminal={terminal}; dashboard={dashboard}. {ex.Message}"
+                    )
         }
 
     let tabFor (page: IPage) label =
@@ -798,6 +866,60 @@ type TerminalPaneDomTests() =
                 )
                 Assert.That(startCalls, Is.Zero)
                 Assert.That(closeCalls, Is.Zero))
+        }
+
+    [<Test>]
+    member this.``Visible ttyd reconnect prompt reloads the active iframe``() =
+        task {
+            let terminalFrame =
+                this.Page.Frames
+                |> Seq.find _.Url.StartsWith(
+                    "http://127.0.0.1:61234/",
+                    StringComparison.Ordinal
+                )
+
+            do! this.Page.BringToFrontAsync()
+            do! this.Page.Locator(".dashboard").FocusAsync()
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => window.dispatchEvent(new Event('focus'))"
+                )
+
+            do!
+                waitForTerminalSignal
+                    this.Page
+                    terminalFrame
+                    "Initial active-terminal activation"
+                    "() => window.__terminalVisibleMessages >= 1"
+
+            let! initialLoad =
+                terminalFrame.EvaluateAsync<int>(
+                    "() => window.__terminalLoadCount"
+                )
+
+            let! _ =
+                terminalFrame.EvaluateAsync(
+                    """() => {
+                        const overlay = document.createElement('div');
+                        overlay.style.position = 'absolute';
+                        overlay.textContent = 'Press \u23CE to Reconnect';
+                        document.querySelector('.xterm').appendChild(overlay);
+                    }"""
+                )
+
+            do!
+                waitForTerminalSignal
+                    this.Page
+                    terminalFrame
+                    "Reconnect overlay reload"
+                    $"() => window.__terminalLoadCount > {initialLoad}"
+
+            let! marker =
+                terminalFrame
+                    .Locator("[data-terminal-marker]")
+                    .GetAttributeAsync("data-terminal-marker")
+
+            Assert.That(marker, Is.EqualTo("first"))
         }
 
     [<Test>]

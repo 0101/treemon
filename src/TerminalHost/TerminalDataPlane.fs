@@ -20,6 +20,7 @@ type private BrowserAttachment =
 
 type private DataPlaneState =
     { Replay: ReplayBuffer
+      ModeReplay: TerminalModeReplay
       Attachment: BrowserAttachment option
       TerminalSize: TerminalSize
       TitleFrame: byte array option
@@ -53,9 +54,14 @@ module TerminalDataPlane =
 
     let private ReplyTimeoutMilliseconds, StopReplyTimeoutMilliseconds = 60_000, 30_000
 
-    let private replayGapFrame =
+    let private replayGapResetFrame =
         Encoding.UTF8.GetBytes(
-            "0\u001bc\u001b[2J\u001b[H[treemon] Earlier terminal output was omitted because the 1 MiB replay buffer was exceeded while this view was paused.\r\n"
+            "0\u001bc\u001b[2J\u001b[H"
+        )
+
+    let private replayGapNoticeFrame =
+        Encoding.UTF8.GetBytes(
+            "0[treemon] Earlier terminal output was omitted because the 1 MiB replay buffer was exceeded while this view was paused.\r\n"
         )
 
     let private socketIsOpen (socket: WebSocket) =
@@ -147,10 +153,16 @@ module TerminalDataPlane =
                 ()
         }
 
+    let private modeReplayFrames projection state =
+        state.ModeReplay
+        |> projection
+        |> Option.toList
+
     let private initialBrowserFrames state =
-        List.append
-            ([ state.TitleFrame; state.PreferencesFrame ] |> List.choose id)
-            (state.Replay |> ReplayBuffer.frames |> List.map _.Data)
+        [ yield! [ state.TitleFrame; state.PreferencesFrame ] |> List.choose id
+          yield! modeReplayFrames TerminalModeReplay.beforeReplayFrame state
+          yield! state.Replay |> ReplayBuffer.frames |> List.map _.Data
+          yield! modeReplayFrames TerminalModeReplay.afterReplayFrame state ]
 
     let private activateAttachment upstream state attachment terminalSize frames =
         async {
@@ -183,7 +195,11 @@ module TerminalDataPlane =
                 with
                 | ReplaySlice.Complete frames -> frames |> List.map _.Data
                 | ReplaySlice.Gap frames ->
-                    replayGapFrame :: (frames |> List.map _.Data)
+                    [ yield replayGapResetFrame
+                      yield! modeReplayFrames TerminalModeReplay.beforeReplayFrame state
+                      yield replayGapNoticeFrame
+                      yield! frames |> List.map _.Data
+                      yield! modeReplayFrames TerminalModeReplay.afterReplayFrame state ]
 
             return! activateAttachment upstream state attachment state.TerminalSize frames
         }
@@ -261,7 +277,11 @@ module TerminalDataPlane =
                         let replay =
                             state.Replay |> ReplayBuffer.append replayCapacity frame
 
-                        { state with Replay = replay },
+                        { state with
+                            Replay = replay
+                            ModeReplay =
+                                state.ModeReplay
+                                |> TerminalModeReplay.observeOutputFrame frame },
                         Some(ReplayBuffer.nextSequence replay)
                     else
                         match char frame[0] with
@@ -307,6 +327,7 @@ module TerminalDataPlane =
     let internal createCore replayCapacity upstream onUpstreamEnded =
         let initial =
             { Replay = ReplayBuffer.empty
+              ModeReplay = TerminalModeReplay.empty
               Attachment = None
               TerminalSize = TerminalProtocol.defaultSize
               TitleFrame = None

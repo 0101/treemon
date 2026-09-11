@@ -18,6 +18,12 @@ type TerminalViewState =
     { Generation: int
       FocusAfterLoad: bool }
 
+[<RequireQualifiedAccess>]
+type TerminalVisibilitySignal =
+    | Activate
+    | Loaded
+    | Deactivate
+
 type TerminalPaneState =
     { IsOpen: bool
       Snapshot: EmbeddedTerminalSnapshot
@@ -32,6 +38,8 @@ type TerminalPaneCallbacks =
       StartTerminal: WorktreePath -> unit
       ReconnectView: EmbeddedTerminalId -> unit
       ViewLoaded: EmbeddedTerminalId -> int -> unit }
+
+let [<Literal>] TerminalVisibleAction = "treemon-terminal-visible"
 
 [<RequireQualifiedAccess>]
 type CycleDirection =
@@ -250,7 +258,7 @@ let selectedWorktree targetWorktree focusedElement =
         | Some (Card scopedKey) -> Some (WorktreePath scopedKey)
         | _ -> None)
 
-let safeEndpoint (endpoint: string) =
+let private trySafeEndpoint (endpoint: string) =
     let prefix = "http://127.0.0.1:"
 
     if not (endpoint.StartsWith(prefix, StringComparison.Ordinal)) then
@@ -264,8 +272,28 @@ let safeEndpoint (endpoint: string) =
 
         match Int32.TryParse portText with
         | true, port when port > 0 && port <= 65535 && port <> 5000 ->
-            Some endpoint
+            Some(endpoint, prefix + portText)
         | _ -> None
+
+let safeEndpoint endpoint =
+    trySafeEndpoint endpoint |> Option.map fst
+
+let visibleRunningTerminal isOpen activeTerminal snapshot =
+    if not isOpen then
+        None
+    else
+        activeTerminal
+        |> Option.bind (fun terminalId ->
+            snapshot
+            |> tryFindTab terminalId
+            |> Option.bind (fun tab ->
+                match tab.Lifecycle with
+                | EmbeddedTerminalLifecycle.Running endpoint ->
+                    endpoint
+                    |> trySafeEndpoint
+                    |> Option.map (fun (_, origin) ->
+                        terminalId, origin)
+                | EmbeddedTerminalLifecycle.Interrupted _ -> None))
 
 let tryReconnectableTab activeTerminal snapshot =
     activeTerminal
@@ -374,6 +402,69 @@ let focusTerminalWhenReady terminalId generation =
 
             focusTerminalView terminalId generation)
         ignore
+
+let notifyTerminalVisibility terminalId origin signal =
+    let active, loaded =
+        match signal with
+        | TerminalVisibilitySignal.Activate -> true, false
+        | TerminalVisibilitySignal.Loaded -> true, true
+        | TerminalVisibilitySignal.Deactivate -> false, false
+
+    let rec tryNotify remainingAttempts =
+        Dom.window?requestAnimationFrame(fun (_: float) ->
+            let notified =
+                Dom.document.getElementById(terminalFrameId terminalId)
+                |> Option.ofObj
+                |> Option.exists (fun frame ->
+                    Fable.Core.JsInterop.emitJsExpr<bool>
+                        (frame, origin, TerminalVisibleAction, active, loaded)
+                        "(function(f,origin,action,active,loaded){if(!f.contentWindow)return false;if(!active){f.contentWindow.postMessage({action:action,active:false,loaded:false},origin);return true}var pane=f.closest('.terminal-pane');if(document.visibilityState!=='visible'||!document.hasFocus()||f.hidden||!f.classList.contains('terminal-iframe-active')||!pane||pane.hidden)return false;f.contentWindow.postMessage({action:action,active:true,loaded:loaded},origin);return true})($0,$1,$2,$3,$4)")
+
+            if not notified && remainingAttempts > 1 then
+                tryNotify (remainingAttempts - 1))
+        |> ignore
+
+    tryNotify (if active then 3 else 2)
+
+let observeVisibleTerminal terminalId notify =
+    let loadHandler =
+        fun (event: Event) ->
+            let loadedFrameId =
+                Fable.Core.JsInterop.emitJsExpr<string> event
+                    "($0.target&&$0.target.id)||''"
+
+            if loadedFrameId = terminalFrameId terminalId then
+                notify TerminalVisibilitySignal.Loaded
+
+    let visibilityHandler =
+        fun (_: Event) ->
+            if Fable.Core.JsInterop.emitJsExpr<bool> () "document.visibilityState==='visible'" then
+                notify TerminalVisibilitySignal.Activate
+            else
+                notify TerminalVisibilitySignal.Deactivate
+
+    let focusHandler =
+        fun (_: Event) ->
+            notify TerminalVisibilitySignal.Activate
+
+    let blurHandler =
+        fun (_: Event) ->
+            notify TerminalVisibilitySignal.Deactivate
+
+    notify TerminalVisibilitySignal.Activate
+
+    Dom.document.addEventListener("load", loadHandler, true)
+    Dom.document.addEventListener("visibilitychange", visibilityHandler)
+    Dom.window.addEventListener("focus", focusHandler)
+    Dom.window.addEventListener("blur", blurHandler)
+
+    { new IDisposable with
+        member _.Dispose() =
+            Dom.document.removeEventListener("load", loadHandler, true)
+            Dom.document.removeEventListener("visibilitychange", visibilityHandler)
+            Dom.window.removeEventListener("focus", focusHandler)
+            Dom.window.removeEventListener("blur", blurHandler)
+            notify TerminalVisibilitySignal.Deactivate }
 
 let messageListener (dispatch: TerminalShortcut -> unit) =
     let tryActiveTerminalId (message: MessageEvent) =

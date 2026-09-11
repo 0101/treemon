@@ -1529,6 +1529,64 @@ type TerminalHostDataPlaneTests() =
             plane.Stop() |> Async.RunSynchronously
 
     [<Test>]
+    member _.``new attachment restores interaction modes missing from bounded replay``() =
+        let upstream = new TestWebSocket()
+        let plane = TerminalDataPlane.createCore 8 upstream ignore
+
+        try
+            [ "0\u001b[?1049;1003;1005h"
+              "0\u001b[?100"
+              "02;1006h\u001b[?25l"
+              "0redraw" ]
+            |> List.iter (fun value ->
+                plane.AcceptUpstreamFrame(frame value)
+                |> Async.RunSynchronously)
+
+            let browser = new TestWebSocket()
+            let attachmentId =
+                plane.AttachSocket TerminalAttachmentMode.Browser browser
+                |> Async.RunSynchronously
+                |> requireSome "browser was not attached"
+
+            plane.AcceptBrowserFrame
+                attachmentId
+                (frame """{"AuthToken":"","columns":120,"rows":30}""")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            Assert.That(
+                browser.Sent |> List.map Encoding.UTF8.GetString,
+                Is.EqualTo(
+                    [ "0\u001b[?1049h"
+                      "0redraw"
+                      "0\u001b[?25l\u001b[?1002h\u001b[?1006h" ]
+                )
+            )
+        finally
+            plane.Stop() |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``terminal resets clear retained interaction modes``() =
+        [ "\u001bc"; "\u001b[!p" ]
+        |> List.iter (fun reset ->
+            let replay =
+                TerminalModeReplay.empty
+                |> TerminalModeReplay.observeOutputFrame
+                    (frame "0\u001b[?1002;1006h")
+                |> TerminalModeReplay.observeOutputFrame
+                    (frame $"0{reset}")
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    TerminalModeReplay.beforeReplayFrame replay,
+                    Is.EqualTo(None)
+                )
+                Assert.That(
+                    TerminalModeReplay.afterReplayFrame replay,
+                    Is.EqualTo(None)
+                )))
+
+    [<Test>]
     member _.``command attachment accepts input without replay or output forwarding``() =
         let upstream = new TestWebSocket()
         let plane = TerminalDataPlane.createCore 1_024 upstream ignore
@@ -1658,6 +1716,9 @@ type TerminalHostDataPlaneTests() =
             |> Async.RunSynchronously
             |> requireOk
 
+            plane.AcceptUpstreamFrame(frame "0\u001b[?1049;1002;1006h")
+            |> Async.RunSynchronously
+
             let retained =
                 Array.append
                     [| byte '0' |]
@@ -1678,17 +1739,24 @@ type TerminalHostDataPlaneTests() =
             |> requireOk
 
             let browserFrames = browser.Sent
-            Assert.That(browserFrames |> List.length, Is.EqualTo(2))
+            Assert.That(browserFrames |> List.length, Is.EqualTo(5))
 
-            let gapNotice = browserFrames |> List.head |> Encoding.UTF8.GetString
-            let survivingFrame = browserFrames |> List.last
+            let resetFrame = browserFrames |> List.head |> Encoding.UTF8.GetString
+            let beforeReplay = browserFrames |> List.item 1 |> Encoding.UTF8.GetString
+            let gapNotice = browserFrames |> List.item 2 |> Encoding.UTF8.GetString
+            let survivingFrame = browserFrames |> List.item 3
+            let modeFrame =
+                browserFrames
+                |> List.last
+                |> Encoding.UTF8.GetString
 
             Assert.Multiple(fun () ->
                 Assert.That(
-                    gapNotice,
-                    Does.StartWith("0\u001bc\u001b[2J\u001b[H")
+                    resetFrame,
+                    Is.EqualTo("0\u001bc\u001b[2J\u001b[H")
                 )
 
+                Assert.That(beforeReplay, Is.EqualTo("0\u001b[?1049h"))
                 Assert.That(gapNotice, Does.Contain("output was omitted"))
 
                 Assert.That(
@@ -1696,6 +1764,11 @@ type TerminalHostDataPlaneTests() =
                     && Array.forall2 (=) survivingFrame retained,
                     Is.True,
                     "surviving replay bytes changed"
+                )
+
+                Assert.That(
+                    modeFrame,
+                    Is.EqualTo("0\u001b[?1002h\u001b[?1006h")
                 ))
         finally
             plane.Stop() |> Async.RunSynchronously
@@ -2029,11 +2102,19 @@ type TerminalHostProxyTests() =
                     ))))
 
     [<Test>]
-    member _.``terminal page adds chrome and global shortcut interception``() =
+    member _.``terminal page adds shortcuts and gates reconnect reload``() =
         let html =
             "<html><head><style>.xterm-viewport{overflow-y:scroll}</style></head><body></body></html>"
+        let allowedOrigins =
+            [ "http://localhost:5174"
+              "http://127.0.0.1:5174" ]
 
-        let customized = TerminalProxy.customizeTerminalPage html
+        let customized =
+            TerminalProxy.customizeTerminalPage allowedOrigins html
+        let serializedAction =
+            JsonSerializer.Serialize TerminalPane.TerminalVisibleAction
+        let serializedPrompt =
+            JsonSerializer.Serialize "Press \u23ce to Reconnect"
 
         Assert.Multiple(fun () ->
             Assert.That(
@@ -2054,6 +2135,65 @@ type TerminalHostProxyTests() =
             Assert.That(customized, Does.Contain("e.source!==parent"))
             Assert.That(customized, Does.Contain("e.stopImmediatePropagation()"))
             Assert.That(customized, Does.Contain("},true)"))
+            Assert.That(customized, Does.Contain($"action={serializedAction}"))
+            Assert.That(
+                customized,
+                Does.Contain($"reconnectPrompt={serializedPrompt}")
+            )
+            Assert.That(
+                customized,
+                Does.Contain(JsonSerializer.Serialize allowedOrigins)
+            )
+            Assert.That(
+                customized,
+                Does.Contain("event.source!==window.parent")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("allowedOrigins.indexOf(event.origin)<0")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("child.style.position==='absolute'")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("child.textContent===reconnectPrompt")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("poll=setInterval(reconnectIfWaiting,100)")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("deadline=setTimeout(clearPending,10000)")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("if(deadline!==null)clearTimeout(deadline)")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("reloading=true;clearPending()")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("sessionStorage.setItem(reloadMarker,'1')")
+            )
+            Assert.That(
+                customized,
+                Does.Contain(
+                    "if(loaded&&suppressNextLoadedActivation){suppressNextLoadedActivation=false;return}"
+                )
+            )
+            Assert.That(
+                customized,
+                Does.Contain("if(event.data.active===false){clearPending();return}")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("document.visibilityState!=='visible'")
+            )
 
             Assert.That(
                 customized.IndexOf("open-worktree-search", StringComparison.Ordinal),

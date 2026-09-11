@@ -2281,7 +2281,9 @@ type DashboardTests() =
             let secondTerminal = EmbeddedTerminalId "shortcut-second"
 
             let terminalPage label =
-                TerminalHost.TerminalProxy.customizeTerminalPage (
+                TerminalHost.TerminalProxy.customizeTerminalPage
+                    [ Uri(ServerFixture.viteUrl).GetLeftPart(UriPartial.Authority) ]
+                    (
                     "<!doctype html><html><head><title>"
                     + label
                     + "</title></head><body><textarea class=\"xterm-helper-textarea\" id=\"terminal-target\">"
@@ -2291,7 +2293,7 @@ type DashboardTests() =
                     + "var key=e.key.toLowerCase();"
                     + "if(key==='p'||key==='tab')window.__terminalKeydowns++})"
                     + "</script></body></html>"
-                )
+                    )
 
             let snapshot =
                 { Tabs =
