@@ -411,7 +411,7 @@ into lifecycle status.
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
 | Explicit Resume | Once invoked, query durable most-recent activity identity, then use bounded live exact-origin state only to reuse that target's running terminal instead of launching a duplicate process. |
 | Terminal origin | Validate and persist optional `TerminalSessionId` on the process instance; a focused terminal module derives exact ownership for tab activity, Resume idempotency, and replacement, never from worktree inference. |
-| Explicit close | Live `session.shutdown` closes one process-session binding; confirmed terminal teardown closes the current binding for each exact process, and heartbeat expiry remains the crash fallback. |
+| Explicit close | The client dismisses the exact terminal tab immediately and suppresses stale snapshots while teardown resolves; a failed close restores it from an authoritative registry refresh. Live `session.shutdown` closes one process-session binding; confirmed terminal teardown closes the current binding for each exact process, and heartbeat expiry remains the crash fallback. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
 
 ## Key Files

@@ -377,6 +377,7 @@ let private focusModel : Model =
             [ running firstOne first 61231
               running firstTwo first 61232
               running secondOne second 61233 ] }
+      DismissedEmbeddedTerminals = Set.empty
       ActiveEmbeddedTerminals =
         Map.ofList [
             first, firstTwo
@@ -449,6 +450,32 @@ type TerminalFocusTests() =
                 updated.ActiveEmbeddedTerminals,
                 Is.EqualTo(focusModel.ActiveEmbeddedTerminals)
             )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``New terminal shortcut targets the active terminal worktree``() =
+        let updated, cmd =
+            App.update
+                (StartEmbeddedTerminalFromTab firstTwo)
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(
+                tryStartState first updated.EmbeddedTerminalStarts,
+                Is.EqualTo(Some TerminalStartState.StartingAndFocus)
+            )
+            Assert.That(List.length cmd, Is.EqualTo(2)))
+
+    [<Test>]
+    member _.``New terminal shortcut from a stale terminal is ignored``() =
+        let updated, cmd =
+            App.update
+                (StartEmbeddedTerminalFromTab (terminalId "missing"))
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated, Is.EqualTo(focusModel))
             Assert.That(cmd, Is.Empty))
 
     [<Test>]
@@ -680,20 +707,82 @@ type TerminalFocusTests() =
             ))
 
     [<Test>]
-    member _.``Completed terminal close immediately refreshes worktree status``() =
-        let before = focusModel.EmbeddedTerminals
-        let after =
-            { Tabs =
-                before.Tabs
-                |> List.filter (fun tab -> tab.Id <> firstTwo) }
-
+    member _.``Terminal close immediately removes the tab before teardown completes``() =
         let updated, cmd =
             App.update
-                (EmbeddedTerminalClosed(firstTwo, before, after))
+                (CloseEmbeddedTerminal firstTwo)
                 focusModel
 
         Assert.Multiple(fun () ->
+            Assert.That(
+                updated.EmbeddedTerminals.Tabs
+                |> List.map _.Id,
+                Is.EqualTo([ firstOne; secondOne ])
+            )
+            Assert.That(
+                activeTerminalId
+                    (Some first)
+                    updated.ActiveEmbeddedTerminals
+                    updated.EmbeddedTerminals,
+                Is.EqualTo(Some firstOne)
+            )
+            Assert.That(
+                updated.DismissedEmbeddedTerminals,
+                Does.Contain(firstTwo)
+            )
+            Assert.That(
+                List.length cmd,
+                Is.EqualTo(2),
+                "closing the active tab should close it and focus its replacement"
+            ))
+
+    [<Test>]
+    member _.``Polling cannot restore a terminal while its close is unresolved``() =
+        let closing, _ =
+            App.update
+                (CloseEmbeddedTerminal firstTwo)
+                focusModel
+
+        let updated, cmd =
+            App.update
+                (EmbeddedTerminalSnapshotChanged focusModel.EmbeddedTerminals)
+                closing
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                updated.EmbeddedTerminals.Tabs
+                |> List.map _.Id,
+                Is.EqualTo([ firstOne; secondOne ])
+            )
+            Assert.That(
+                updated.DismissedEmbeddedTerminals,
+                Does.Contain(firstTwo)
+            )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``Completed terminal close immediately refreshes worktree status``() =
+        let after =
+            { Tabs =
+                focusModel.EmbeddedTerminals.Tabs
+                |> List.filter (fun tab -> tab.Id <> firstTwo) }
+
+        let closing, _ =
+            App.update
+                (CloseEmbeddedTerminal firstTwo)
+                focusModel
+
+        let updated, cmd =
+            App.update
+                (EmbeddedTerminalClosed after)
+                closing
+
+        Assert.Multiple(fun () ->
             Assert.That(updated.EmbeddedTerminals, Is.EqualTo(after))
+            Assert.That(
+                updated.DismissedEmbeddedTerminals,
+                Does.Contain(firstTwo)
+            )
             Assert.That(
                 updated.ActiveEmbeddedTerminals,
                 Is.EqualTo(
@@ -710,14 +799,31 @@ type TerminalFocusTests() =
             ))
 
     [<Test>]
-    member _.``Failed terminal close refreshes both registry and worktree status``() =
-        let updated, cmd =
+    member _.``Failed terminal close permits authoritative refresh to restore the tab``() =
+        let closing, _ =
             App.update
-                EmbeddedTerminalCloseFailed
+                (CloseEmbeddedTerminal firstTwo)
                 focusModel
 
+        let failed, cmd =
+            App.update
+                (EmbeddedTerminalCloseFailed firstTwo)
+                closing
+
+        let refreshed, _ =
+            App.update
+                (EmbeddedTerminalSnapshotChanged focusModel.EmbeddedTerminals)
+                failed
+
         Assert.Multiple(fun () ->
-            Assert.That(updated, Is.EqualTo(focusModel))
+            Assert.That(
+                failed.DismissedEmbeddedTerminals,
+                Does.Not.Contain(firstTwo)
+            )
+            Assert.That(
+                refreshed.EmbeddedTerminals,
+                Is.EqualTo(focusModel.EmbeddedTerminals)
+            )
             Assert.That(
                 List.length cmd,
                 Is.EqualTo(2),
