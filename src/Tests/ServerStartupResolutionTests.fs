@@ -48,6 +48,10 @@ type ServerStartupResolutionTests() =
         Assert.That(config.Demo, Is.False)
         Assert.That(config.Port, Is.EqualTo(5000))
         Assert.That(config.DashboardPort, Is.EqualTo None)
+        Assert.That(
+            config.LogDestination,
+            Is.EqualTo(Log.Destination.Isolated None)
+        )
         Assert.That(dashboardOrigins config, Is.Empty)
 
         Assert.That(
@@ -128,6 +132,28 @@ type ServerStartupResolutionTests() =
         let config = serverConfig [| "--demo" |]
         Assert.That(config.Demo, Is.True)
         Assert.That(config.WorktreeRoots, Is.Empty)
+
+    [<Test>]
+    member _.``parseArgs selects production logging only when explicitly requested``() =
+        let config = serverConfig [| "--production-log" |]
+        Assert.That(
+            config.LogDestination,
+            Is.EqualTo(Log.Destination.Production)
+        )
+
+    [<Test>]
+    member _.``parseArgs preserves an explicit isolated log directory``() =
+        let config =
+            serverConfig [| "--log-dir"; @"C:\temp\treemon-fixture" |]
+
+        Assert.That(
+            config.LogDestination,
+            Is.EqualTo(
+                Log.Destination.Isolated(
+                    Some @"C:\temp\treemon-fixture"
+                )
+            )
+        )
 
     // ----- resolveWorktreeRoots: priority + first-time persistence + orphan migration -----
 

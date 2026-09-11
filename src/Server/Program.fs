@@ -51,7 +51,8 @@ type ServerConfig =
       CanvasPort: int option
       DashboardPort: int option
       TestFixtures: string option
-      Demo: bool }
+      Demo: bool
+      LogDestination: Log.Destination }
 
 [<RequireQualifiedAccess>]
 type RunMode =
@@ -75,55 +76,97 @@ let parseArgs (args: string array) =
     | [ "--terminal-host-deployment-preflight" ] ->
         RunMode.TerminalHostDeploymentPreflight
     | serverArguments ->
-        let rec parse roots port canvasPort dashboardPort testFixtures demo remaining =
+        let rec parse roots port canvasPort dashboardPort testFixtures demo logDestination remaining =
             match remaining with
             | "--port" :: portStr :: rest ->
                 match System.Int32.TryParse(portStr) with
-                | true, p -> parse roots p canvasPort dashboardPort testFixtures demo rest
+                | true, p -> parse roots p canvasPort dashboardPort testFixtures demo logDestination rest
                 | false, _ ->
                     eprintfn $"Invalid port number: {portStr}"
                     exit 1
             | "--canvas-port" :: portStr :: rest ->
                 match System.Int32.TryParse(portStr) with
-                | true, p -> parse roots port (Some p) dashboardPort testFixtures demo rest
+                | true, p -> parse roots port (Some p) dashboardPort testFixtures demo logDestination rest
                 | false, _ ->
                     eprintfn $"Invalid canvas port number: {portStr}"
                     exit 1
             | "--dashboard-port" :: portStr :: rest ->
                 match System.Int32.TryParse(portStr) with
-                | true, p -> parse roots port canvasPort (Some p) testFixtures demo rest
+                | true, p -> parse roots port canvasPort (Some p) testFixtures demo logDestination rest
                 | false, _ ->
                     eprintfn $"Invalid dashboard port number: {portStr}"
                     exit 1
             | "--no-canvas" :: rest ->
-                parse roots port None dashboardPort testFixtures demo rest
+                parse roots port None dashboardPort testFixtures demo logDestination rest
             | "--test-fixtures" :: path :: rest ->
-                parse roots port canvasPort dashboardPort (Some path) demo rest
+                parse roots port canvasPort dashboardPort (Some path) demo logDestination rest
             | "--demo" :: rest ->
-                parse roots port canvasPort dashboardPort testFixtures true rest
+                parse roots port canvasPort dashboardPort testFixtures true logDestination rest
+            | "--log-dir" :: path :: rest ->
+                match logDestination with
+                | Log.Destination.Isolated None ->
+                    parse
+                        roots
+                        port
+                        canvasPort
+                        dashboardPort
+                        testFixtures
+                        demo
+                        (Log.Destination.Isolated(Some path))
+                        rest
+                | _ ->
+                    eprintfn "Specify only one log destination"
+                    exit 1
+            | "--production-log" :: rest ->
+                match logDestination with
+                | Log.Destination.Isolated None ->
+                    parse
+                        roots
+                        port
+                        canvasPort
+                        dashboardPort
+                        testFixtures
+                        demo
+                        Log.Destination.Production
+                        rest
+                | _ ->
+                    eprintfn "Specify only one log destination"
+                    exit 1
             | path :: rest when not (path.StartsWith("--")) ->
-                parse (roots @ [ path ]) port canvasPort dashboardPort testFixtures demo rest
-            | [] -> roots, port, canvasPort, dashboardPort, testFixtures, demo
+                parse (roots @ [ path ]) port canvasPort dashboardPort testFixtures demo logDestination rest
+            | [] ->
+                roots,
+                port,
+                canvasPort,
+                dashboardPort,
+                testFixtures,
+                demo,
+                logDestination
             | unexpected :: _ ->
                 eprintfn $"Unexpected argument: {unexpected}"
                 exit 1
 
         match
             serverArguments
-            |> parse [] 5000 (Some defaultCanvasPort) None None false
+            |> parse [] 5000 (Some defaultCanvasPort) None None false (Log.Destination.Isolated None)
         with
-        | _, _, _, _, Some _, true ->
+        | _, _, _, _, Some _, true, _ ->
             eprintfn "--demo and --test-fixtures are mutually exclusive"
             exit 1
-        | _, port, _, dashboardPort, _, true ->
+        | _, _, _, dashboardPort, testFixtures, demo, Log.Destination.Production
+            when demo || testFixtures.IsSome || dashboardPort.IsSome ->
+            eprintfn "--production-log is not valid for development, demo, or fixture mode"
+            exit 1
+        | _, port, _, dashboardPort, _, true, logDestination ->
             RunMode.Server
                 { WorktreeRoots = []
                   Port = port
                   CanvasPort = None
                   DashboardPort = dashboardPort
                   TestFixtures = None
-                  Demo = true }
-        | roots, port, canvasPort, dashboardPort, testFixtures, _ ->
+                  Demo = true
+                  LogDestination = logDestination }
+        | roots, port, canvasPort, dashboardPort, testFixtures, _, logDestination ->
             // Zero positional roots is valid in normal mode: `start`/`dev` no longer require a path.
             // When no roots are passed the server resolves them from global config (or migrates a
             // legacy/orphan set) at startup — see resolveWorktreeRoots in main.
@@ -140,7 +183,8 @@ let parseArgs (args: string array) =
                       CanvasPort = canvasPort
                       DashboardPort = dashboardPort
                       TestFixtures = testFixtures
-                      Demo = false }
+                      Demo = false
+                      LogDestination = logDestination }
 
 let internal dashboardOrigins (config: ServerConfig) =
     match config.DashboardPort with
@@ -386,7 +430,23 @@ let main args =
 
     let serverUrl = $"http://localhost:{config.Port}"
 
-    Log.init ()
+    let logPath =
+        match
+            Log.resolvePath
+                (System.IO.Directory.GetCurrentDirectory())
+                (System.IO.Path.GetTempPath())
+                config.Port
+                Environment.ProcessId
+                (Guid.NewGuid())
+                config.LogDestination
+        with
+        | Ok path -> path
+        | Error error ->
+            eprintfn $"Invalid log configuration: {error}"
+            exit 1
+
+    Log.init logPath
+    printfn $"Server log: {logPath}"
 
     // Effective roots: CLI args > global config > orphan import (persisted first-time). Resolution
     // is a pure decision; `persistResolvedRoots` applies the first-time persist + orphan cleanup at

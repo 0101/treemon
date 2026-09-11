@@ -45,6 +45,21 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - **Never destroy data.** An unparseable `config.json` is backed up to a timestamped `*.corrupt-<ts>` sibling before a fresh object is started, and each write touches only its own named keys — every unrelated key is left intact.
 - **Typed accessors over one store.** Watched roots (with the missing-vs-empty distinction the startup resolver depends on — see Multi-Repo above), pane visibility and workspace width, collapsed repos, last-viewed hashes, and the editor command/name reader are thin wrappers over the same locked store.
 
+### Runtime Logging
+
+- Only the production launcher opts into the stable internal log at `logs/server.log`, through the
+  non-inherited `--production-log` server argument. Demo, fixture, and Vite-backed development modes
+  reject that option.
+- Every other server writes a unique `server-<port>-<pid>-<instance>.log`. The default directory is
+  the OS temporary `treemon/server-logs` directory; `--log-dir` selects another directory without
+  changing the unique filename. Development and demo launchers use `logs/dev` and `logs/demo`.
+- Test and E2E launchers pass a fixture-owned temporary log directory. Teardown stops the exact
+  owned processes before removing that exact temporary directory; it never removes a shared log
+  root. In-process test logging also defaults to a unique process file and deletes only that file.
+- Log routing is selected from server arguments, not an environment variable, so terminals and
+  other child processes cannot inherit the production log destination. `treemon.ps1` continues to
+  capture production stdout and stderr in separate timestamped `treemon-prod*.log` files.
+
 ### Loopback Request Boundary
 
 - `HttpSecurity.csrfGuard` fronts the complete Fable.Remoting API and every state-changing canvas
@@ -319,6 +334,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
 | `src/Server/HttpSecurity.fs` | Shared loopback Origin/Referer guard for state-changing HTTP routes |
+| `src/Server/Log.fs` | Stable production log selection and unique per-process non-production log paths |
 | `src/Server/PathUtils.fs` | Canonical path normalization and `RepoId` / `WorktreePath` construction |
 | `src/Server/SessionManager.fs` | Explicit native card-terminal spawn/focus/new-tab/kill and persistence |
 | `src/Server/TerminalLaunch.fs` | Shared native-versus-embedded terminal launch policy |
@@ -331,6 +347,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Client/CanvasView.fs` | Canvas pane view wiring (`CanvasPane.view` callbacks/slices) |
 | `src/Client/Navigation.fs` | Keyboard navigation: spatial arrow keys, key bindings |
 | `src/Tests/fixtures/` | Captured AzDo/GitHub PR + build data and dashboard fixtures for offline tests |
+| `treemon.ps1` | Production-log opt-in plus isolated development and demo log directories |
 
 ## Decisions
 
@@ -370,6 +387,10 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Upstream remote auto-detection over config-only: `upstream` remote name is the universal convention for fork workflows; config override available for non-standard setups
 - Watched roots are server-owned and restart-to-apply (not live-updated): `tm add`/`remove` persist to the global config and take effect on the next server (re)start. The `treemon.ps1` shims trigger that restart when production is running outside an embedded terminal; an embedded invocation preserves the change but defers application until an external PowerShell restart. Chosen for simpler code — no per-root scheduler-state machinery; live application remains a clean future extension. The server is the single writer of `config.json` (with an internal write lock); the online-only CLI never writes config files, which removes the cross-process clobber hazard.
 - `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the repo-local `.treemon.json` (`autoSyncBranches`, `baseBranch`, `upstreamRemote`, `diffCategories`) are deliberately separate stores in separate modules, named so the machine-vs-repo scope is obvious and the two never collide.
+- Production logging is explicit rather than inferred from a port or working directory. This keeps
+  `logs/server.log` stable for production while making an ad hoc server, test process, fixture, or
+  `dotnet watch` child isolated by default; command-line selection also avoids leaking the sink into
+  child-process environments.
 - Create-worktree prompt auto-launch is **fire-and-forget, server-side, and reuses the embedded
   command-launch path**: repo root, provider, and the new path are all in scope on the server, so it
   orchestrates the launch there rather than via a client follow-up. A failed launch is logged, not

@@ -21,10 +21,12 @@ let private worktreeRoot = @"Q:\code\AITestAgent"
 let private thisRepoName = Path.GetFileName(repoRoot)
 
 let private startSmokeServerProc (configDir: string) (terminalHostStateDir: string) (args: string) =
+    let logDirectory = TestUtils.serverLogDirectory terminalHostStateDir
     let psi =
         ProcessStartInfo(
             FileName = "dotnet",
-            Arguments = $"""run --project "{serverProjectPath}" -- {args}""",
+            Arguments =
+                $"""run --project "{serverProjectPath}" -- {args} --log-dir "{logDirectory}" """,
             WorkingDirectory = repoRoot,
             UseShellExecute = false,
             RedirectStandardOutput = true,
