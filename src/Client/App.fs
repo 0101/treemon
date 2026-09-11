@@ -617,6 +617,13 @@ let update msg model =
                     model.EmbeddedTerminals
                     model.ActiveEmbeddedTerminals },
         Cmd.none
+    | NotifyEmbeddedTerminalVisibility(terminalId, origin, signal) ->
+        model,
+        Cmd.ofEffect (fun _ ->
+            TerminalPane.notifyTerminalVisibility
+                terminalId
+                origin
+                signal)
     | CycleEmbeddedTerminal (terminalId, direction) ->
         match
             TerminalPane.cycleTerminalFrom
@@ -1226,6 +1233,23 @@ let appSubscriptions (model: Model) : Sub<Msg> =
     let overviewSticky (dispatch: Dispatch<Msg>) =
         OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
 
+    let visibleTerminal =
+        let selectedWorktree =
+            TerminalPane.selectedWorktree
+                model.TerminalPaneTarget
+                model.FocusedElement
+
+        let activeTerminal =
+            TerminalPane.activeTerminalId
+                selectedWorktree
+                model.ActiveEmbeddedTerminals
+                model.EmbeddedTerminals
+
+        TerminalPane.visibleRunningTerminal
+            model.TerminalPaneOpen
+            activeTerminal
+            model.EmbeddedTerminals
+
     let baseSubs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
@@ -1234,13 +1258,28 @@ let appSubscriptions (model: Model) : Sub<Msg> =
           [ "global-keyboard"; if canOpenOverlay model then "enabled" else "blocked" ],
           globalKeyboard ]
 
-    let subs =
+    let panelSubs =
         if model.OverviewPanelOpen && OverviewBand.hasAgentGroups model.Repos then
             ([ "overview-sticky" ], overviewSticky) :: baseSubs
         else
             baseSubs
 
-    subs
+    match visibleTerminal with
+    | Some (terminalId, origin) ->
+        ([ "terminal-visible"
+           EmbeddedTerminalId.value terminalId
+           origin ],
+         fun dispatch ->
+             TerminalPane.observeVisibleTerminal terminalId (fun signal ->
+                 dispatch (
+                     NotifyEmbeddedTerminalVisibility(
+                         terminalId,
+                         origin,
+                         signal
+                     )
+                 )))
+        :: panelSubs
+    | None -> panelSubs
 
 let hasAnyActive (repos: RepoModel list) =
     repos |> List.exists (fun r ->

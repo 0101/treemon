@@ -2281,7 +2281,7 @@ type DashboardTests() =
             let secondTerminal = EmbeddedTerminalId "shortcut-second"
 
             let terminalPage label =
-                TerminalHost.TerminalProxy.customizeTerminalPage (
+                TerminalHost.TerminalProxy.customizeTerminalPage [] (
                     "<!doctype html><html><head><title>"
                     + label
                     + "</title></head><body><textarea class=\"xterm-helper-textarea\" id=\"terminal-target\">"

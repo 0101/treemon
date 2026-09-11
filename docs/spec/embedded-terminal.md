@@ -83,6 +83,22 @@ the persistent top-bar **Terminal** control hides or shows the pane, using the s
 as the **Canvas** control. Middle-clicking a tab invokes the same exact-terminal close action as its
 close button.
 
+When a running terminal becomes visible through pane open, tab selection, or worktree selection,
+the client routes one activation through Elmish and sends an exact-origin message to that iframe
+after its visible DOM state has committed. It repeats the signal when the top-level document becomes
+visible or focused after an interruption such as RDP reconnect. The terminal page accepts the
+message only from its parent and a configured dashboard origin. It reloads immediately when ttyd's
+exact manual reconnect overlay is present, or checks for that exact overlay during one coalesced,
+bounded recovery window when page initialization or the transport-close event trails the visibility
+signal. Repeated visibility signals refresh that window, while a document-local reload latch
+prevents paired browser events from replacing the same attachment twice. A receiver-initiated
+reload writes a marker that the new terminal document consumes and removes during initialization.
+The resulting suppression decision stays document-local and can suppress at most one iframe-load
+activation; when browser storage is unavailable, that decision fails closed rather than looping.
+Deactivation clears the child recovery window so a hidden pane, terminal, worktree, or browser tab
+cannot reclaim the single attachment. Healthy shell prompts, partially typed commands, password
+prompts, and full-screen applications receive no input and are not reloaded.
+
 ### Launch routing and command startup
 
 The card's `>` / Enter action remains the explicit native Windows Terminal choice, and its `+`
@@ -453,9 +469,13 @@ loopback, exact Host/Origin, bearer, and request-size checks as the control API.
 Every attachment HTTP response limits framing through a `Content-Security-Policy: frame-ancestors`
 directive built from the validated dashboard origins, or `'none'` when none are configured. A
 missing `Origin` remains valid for authenticated loopback non-browser protocol requests.
-The proxy injects a small style into ttyd's root HTML response that hides the native
-`.xterm-viewport` scrollbar without changing its overflow or scrollback. The terminal document is a
-separate origin, so the dashboard cannot apply this styling itself.
+Allowed dashboard values are canonical browser origins: loopback HTTP(S) authorities with no user
+information, path, query, or fragment. The same normalized values drive request checks, CSP, and
+the terminal document's exact message-origin comparison.
+The proxy decorates ttyd's root HTML response with a small style that hides the native
+`.xterm-viewport` scrollbar without changing its overflow or scrollback, plus the activation
+listener that recognizes ttyd 1.7.7's manual reconnect overlay. The terminal document is a separate
+origin, so the dashboard cannot inspect the overlay or apply this behavior directly.
 
 ### Treemon integration
 
@@ -480,7 +500,14 @@ The mailbox grants one replacement phase, keeps serving cached reads and bounded
 while replacement runs asynchronously, then alone applies the replacement's registry transition.
 The client stores active terminal IDs and in-flight start state per worktree. Registry refreshes
 retain exact selections while IDs remain valid, choose the same-worktree neighbor after a close,
-and preserve the selected sibling ordinal across replacement.
+and preserve the selected sibling ordinal across replacement. A subscription keyed by the active
+terminal ID and safe endpoint origin reports visibility triggers through Elmish. The resulting
+command retries for a small bounded number of animation frames until React has committed the active
+unhidden iframe, then posts only while that terminal and pane remain visible. A matching iframe load
+replays the same Elmish notification so a visibility signal sent to the initial document cannot be
+lost before the terminal page installs its receiver. The parent activates only from a visible,
+focused dashboard and sends deactivation on blur, top-level hiding, pane/tab/worktree changes, and
+subscription disposal.
 Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
 port into the loopback dashboard origins supplied to `EmbeddedTerminal`. Production omits the
 option and allows only the configured server origin aliases, so the terminal client never infers a
@@ -715,6 +742,11 @@ isolated server and fails on incomplete exact process cleanup.
   xterm consumes those keys. The dashboard accepts a forwarded shortcut only from the active
   loopback terminal iframe, then sends an exact-origin focus request back after terminal selection
   or worktree-search dismissal so the active xterm input keeps keyboard ownership.
+- **Overlay-gated browser reconnect:** terminal visibility alone never sends Enter or reloads a live
+  page. The cross-origin iframe reloads only after its injected listener positively identifies
+  ttyd 1.7.7's manual reconnect overlay, then the existing replaceable-attachment and bounded-replay
+  path restores recent output. This avoids a ttyd frontend fork while keeping normal shell and TUI
+  input untouched.
 - **Graceful shutdown before automatic Resume:** replacement requests exact SDK session shutdown
   for every exact target before terminal teardown and aborts while the old host is healthy if any
   shutdown is unavailable, rejected, or times out. Endpoint acceptance is not completion; exact
@@ -731,11 +763,11 @@ isolated server and fails on incomplete exact process cleanup.
 - **Safe lifecycle diagnostics:** record counts, typed outcomes, and exact safe identities for
   multiplicity, shutdown, replacement failure, and survivor cleanup without logging terminal
   content, capabilities, prompts, tokens, or raw records.
-- **Resume without widening the control API:** after each replacement terminal is
-  recreated, Treemon briefly attaches through the existing authenticated ttyd protocol and submits
-  selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no
-  input and remains a plain PowerShell shell. Submitted terminal input is a raw shell boundary:
-  direct commands carrying a control character are rejected rather than written, while
+- **Resume without widening the control API:** after each replacement terminal is recreated,
+  Treemon briefly attaches through the existing authenticated ttyd protocol and submits the opaque
+  command selected by `TerminalSessionActivity`. A terminal without an exact resumable session
+  receives no input and remains a plain PowerShell shell. Submitted terminal input is a raw shell
+  boundary: direct commands carrying a control character are rejected rather than written, while
   `CodingToolCli` first converts control-bearing prompt data to a control-free UTF-8/base64 form.
   A stored Copilot `SessionId` therefore cannot inject an extra command line into a recreated shell.
 - **Typed launch-operation routing:** `TerminalLaunch` is the only product-level start boundary.

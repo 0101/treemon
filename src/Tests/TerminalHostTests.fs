@@ -2029,11 +2029,19 @@ type TerminalHostProxyTests() =
                     ))))
 
     [<Test>]
-    member _.``terminal page adds chrome and global shortcut interception``() =
+    member _.``terminal page adds shortcuts and gates reconnect reload``() =
         let html =
             "<html><head><style>.xterm-viewport{overflow-y:scroll}</style></head><body></body></html>"
+        let allowedOrigins =
+            [ "http://localhost:5174"
+              "http://127.0.0.1:5174" ]
 
-        let customized = TerminalProxy.customizeTerminalPage html
+        let customized =
+            TerminalProxy.customizeTerminalPage allowedOrigins html
+        let serializedAction =
+            JsonSerializer.Serialize TerminalPane.TerminalVisibleAction
+        let serializedPrompt =
+            JsonSerializer.Serialize "Press \u23ce to Reconnect"
 
         Assert.Multiple(fun () ->
             Assert.That(
@@ -2054,6 +2062,71 @@ type TerminalHostProxyTests() =
             Assert.That(customized, Does.Contain("e.source!==parent"))
             Assert.That(customized, Does.Contain("e.stopImmediatePropagation()"))
             Assert.That(customized, Does.Contain("},true)"))
+            Assert.That(customized, Does.Contain($"action={serializedAction}"))
+            Assert.That(
+                customized,
+                Does.Contain($"reconnectPrompt={serializedPrompt}")
+            )
+            Assert.That(
+                customized,
+                Does.Contain(JsonSerializer.Serialize allowedOrigins)
+            )
+            Assert.That(
+                customized,
+                Does.Contain("event.source!==window.parent")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("allowedOrigins.indexOf(event.origin)<0")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("child.style.position==='absolute'")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("child.textContent===reconnectPrompt")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("poll=setInterval(reconnectIfWaiting,100)")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("deadline=setTimeout(clearPending,10000)")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("if(deadline!==null)clearTimeout(deadline)")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("reloading=true;clearPending()")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("sessionStorage.setItem(reloadMarker,'1')")
+            )
+            Assert.That(
+                customized,
+                Does.Contain(
+                    "suppressNextLoadedActivation=(function(){try{var marked=sessionStorage.getItem(reloadMarker)==='1';sessionStorage.removeItem(reloadMarker);return marked}catch(_){return true}})()"
+                )
+            )
+            Assert.That(
+                customized,
+                Does.Contain(
+                    "if(loaded&&suppressNextLoadedActivation){suppressNextLoadedActivation=false;return}"
+                )
+            )
+            Assert.That(
+                customized,
+                Does.Contain("if(event.data.active===false){clearPending();return}")
+            )
+            Assert.That(
+                customized,
+                Does.Contain("document.visibilityState!=='visible'")
+            )
 
             Assert.That(
                 customized.IndexOf("open-worktree-search", StringComparison.Ordinal),
@@ -2301,6 +2374,27 @@ type TerminalHostCommandLifetimeTests() =
 [<Category("Fast")>]
 [<Category("TerminalHost")>]
 type TerminalHostSecurityTests() =
+    [<TestCase("http://localhost:5174/", "http://localhost:5174")>]
+    [<TestCase("http://127.0.0.1:5174", "http://127.0.0.1:5174")>]
+    member _.``allowed origins normalize to exact browser origins``(
+        value: string,
+        expected: string
+    ) =
+        Assert.That(
+            RequestSecurity.tryAllowedOrigin value,
+            Is.EqualTo(Some expected)
+        )
+
+    [<TestCase("http://user@localhost:5174/")>]
+    [<TestCase("http://@localhost:5174/")>]
+    [<TestCase("http://localhost:5174/path")>]
+    [<TestCase("http://localhost:5174/?query=true")>]
+    member _.``allowed origins reject non-origin URI components``(value: string) =
+        Assert.That(
+            RequestSecurity.tryAllowedOrigin value,
+            Is.EqualTo(None)
+        )
+
     [<Test>]
     member _.``non-loopback peer is rejected even with valid host origin and token``() =
         let metadata =
