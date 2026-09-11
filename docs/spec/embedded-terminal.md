@@ -55,10 +55,13 @@ For each terminal, the host is ttyd's sole upstream WebSocket client for the ter
 continuously drains ttyd into a small bounded raw replay buffer and accepts one replaceable browser
 attachment. Replacing or losing the browser attachment does not replace the shell. A new attachment
 receives the bounded replay, the latest observed interactive DEC modes, and a resize so full-screen
-applications can redraw. The host restores the active alternate-screen buffer before replay, then
-reapplies mouse tracking and encoding, cursor visibility, focus reporting, bracketed paste, and
-related input modes afterward. ttyd's xterm reset would otherwise lose those settings when their
-original escape sequences have left the replay window. Attachment routing is data-plane behavior,
+applications can redraw. The host restores an active alternate-screen buffer and output-rendering
+modes before replay, then reapplies mouse tracking and encoding, cursor visibility, focus reporting,
+bracketed paste, and other input modes afterward. It never sends an inactive alternate-screen reset
+after replay because that reset can restore stale cursor state. A full terminal reset clears the
+retained projection; a soft reset clears only the modes xterm resets while preserving its active
+buffer and mouse modes. The scanner recognizes seven-bit `ESC [` control sequences and does not
+interpret UTF-8 continuation bytes as eight-bit controls. Attachment routing is data-plane behavior,
 not an additional lifecycle state. Output older than the buffer, terminal scrollback, and
 browser-rendered state are not durable.
 The host does not publish a terminal as started until that upstream has delivered its first terminal
@@ -108,12 +111,14 @@ Beside **New**, a selected running terminal with a validated attachment endpoint
 preserving its terminal ID, endpoint, selected tab, shell, agent, and every sibling iframe. It is
 hidden for an empty selection, an interrupted terminal, or a rejected endpoint. The replacement
 restores iframe focus only when that view generation is still current, the terminal remains
-selected, and the pane is visible; selection changes, closure, and newer reconnects make late load
-work inert. Reconnect does not call start, close, resume, command-input, host-replacement, or process
-APIs, and an iframe load does not create a connected-success state. The new attachment receives the
-host's current alternate-screen mode, bounded raw replay, and remaining interaction-mode projection,
-so the full-screen background, mouse input, cursor visibility, focus reporting, and bracketed paste
-survive even when their enabling sequences are older than the retained screen output.
+selected, and the pane is visible; ordinary worktree focus, tab selection, closure, pane hiding, and
+newer reconnects cancel the pending focus request so a late load cannot reclaim focus after the user
+moves elsewhere. Reconnect does not call start, close, resume, command-input, host-replacement, or
+process APIs, and an iframe load does not create a connected-success state. The new attachment
+receives the host's current alternate-screen mode, bounded raw replay, and remaining
+interaction-mode projection, so the full-screen background, mouse input, cursor visibility, focus
+reporting, and bracketed paste survive even when their enabling sequences are older than the
+retained screen output.
 
 ### Launch routing and command startup
 
@@ -517,7 +522,8 @@ It also stores a client-only view generation for terminals whose iframe is manua
 The generation participates only in the React iframe key; advancing one generation remounts that
 iframe without changing the authoritative registry. Iframe load completion returns through Elmish,
 and the focus effect re-resolves the current DOM node and checks its generation and visibility
-before focusing it.
+before focusing it. The shared ordinary-focus transition clears pending terminal-view focus while
+the no-retarget Canvas focus path preserves it.
 A subscription keyed by the active terminal ID and safe endpoint origin reports visibility triggers
 through Elmish. The resulting command retries for a small bounded number of animation frames until
 React has committed the active unhidden iframe, then posts only while that terminal and pane remain
@@ -696,11 +702,11 @@ isolated server and fails on incomplete exact process cleanup.
   testable while HTTP/WebSocket hosting shares one loopback-only Kestrel bootstrap with the control
   API, preventing security-sensitive host configuration from drifting.
 - **Raw bounded replay plus interaction modes:** reconnect gets useful recent output without
-  persisting terminal content or introducing a screen-state serializer. A small parser retains only
-  current DEC modes, restores alternate-screen selection before replay, and reapplies interaction
-  modes afterward because ttyd resets xterm before consuming a replacement attachment. Replay
-  capacity never doubles as an upstream transport limit; large output messages are streamed while
-  old retained frames are evicted.
+  persisting terminal content or introducing a screen-state serializer. A small seven-bit control
+  parser retains current DEC modes, preserves xterm's soft-reset exceptions, restores active-buffer
+  and rendering state before replay, and reapplies input state afterward because ttyd resets xterm
+  before consuming a replacement attachment. Replay capacity never doubles as an upstream transport
+  limit; large output messages are streamed while old retained frames are evicted.
 - **Explicit replay discontinuities:** replay reads distinguish a complete suffix from one whose
   requested prefix was evicted. Resuming across that gap resets and clears the emulator and shows an
   omission notice before the retained output.

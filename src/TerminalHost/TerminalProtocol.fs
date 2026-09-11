@@ -89,6 +89,12 @@ module internal TerminalProtocol =
 
 [<RequireQualifiedAccess>]
 module internal TerminalModeReplay =
+    [<RequireQualifiedAccess>]
+    type private ReplayPlacement =
+        | BeforeOutput
+        | BeforeOutputWhenEnabled
+        | AfterOutput
+
     let private trackedModes =
         set [ 1; 6; 7; 9; 12; 25; 45; 66; 1000; 1001; 1002; 1003
               1004; 1005; 1006; 1007; 1015; 1016; 1047; 1049; 47; 2004 ]
@@ -96,6 +102,8 @@ module internal TerminalModeReplay =
     let private mouseTrackingModes = set [ 9; 1000; 1001; 1002; 1003 ]
     let private mouseEncodingModes = set [ 1005; 1006; 1015; 1016 ]
     let private alternateScreenModes = set [ 47; 1047; 1049 ]
+    let private outputRenderingModes = set [ 6; 7; 45 ]
+    let private softResetModes = set [ 1; 6; 7; 25; 45; 66; 1004; 2004 ]
 
     let empty =
         { Modes = Map.empty
@@ -131,8 +139,14 @@ module internal TerminalModeReplay =
 
     let private pendingStart value =
         if value = 0x1Buy then "\u001b"
-        elif value = 0x9Buy then "\u001b["
         else ""
+
+    let private softReset state =
+        { Modes =
+            state.Modes
+            |> Map.filter (fun mode _ ->
+                not (softResetModes.Contains mode))
+          Pending = "" }
 
     let private observeByte state value =
         let character = char value
@@ -145,7 +159,7 @@ module internal TerminalModeReplay =
             { state with Pending = "\u001b[" }
         | "\u001b[" when character = '?' || character = '!' ->
             { state with Pending = state.Pending + string character }
-        | "\u001b[!" when character = 'p' -> empty
+        | "\u001b[!" when character = 'p' -> softReset state
         | pending
             when pending.StartsWith("\u001b[?", StringComparison.Ordinal)
                  && (Char.IsAsciiDigit character || character = ';')
@@ -166,11 +180,23 @@ module internal TerminalModeReplay =
             data[1..]
             |> Array.fold observeByte state
 
+    let private replayPlacement mode =
+        if alternateScreenModes.Contains mode then
+            ReplayPlacement.BeforeOutputWhenEnabled
+        elif outputRenderingModes.Contains mode then
+            ReplayPlacement.BeforeOutput
+        else
+            ReplayPlacement.AfterOutput
+
     let private frame matching state =
         state.Modes
         |> Map.toList
         |> List.filter matching
-        |> List.sortBy snd
+        |> List.sortBy (fun (mode, _) ->
+            match replayPlacement mode with
+            | ReplayPlacement.BeforeOutputWhenEnabled -> 0, mode
+            | ReplayPlacement.BeforeOutput -> 1, mode
+            | ReplayPlacement.AfterOutput -> 2, mode)
         |> List.map (fun (mode, enabled) ->
             let setting = if enabled then "h" else "l"
             $"\u001b[?{mode}{setting}")
@@ -182,12 +208,15 @@ module internal TerminalModeReplay =
     let beforeReplayFrame state =
         state
         |> frame (fun (mode, enabled) ->
-            enabled && alternateScreenModes.Contains mode)
+            match replayPlacement mode with
+            | ReplayPlacement.BeforeOutput -> true
+            | ReplayPlacement.BeforeOutputWhenEnabled -> enabled
+            | ReplayPlacement.AfterOutput -> false)
 
     let afterReplayFrame state =
         state
-        |> frame (fun (mode, enabled) ->
-            not (enabled && alternateScreenModes.Contains mode))
+        |> frame (fun (mode, _) ->
+            replayPlacement mode = ReplayPlacement.AfterOutput)
 
 [<RequireQualifiedAccess>]
 module internal ReplayBuffer =

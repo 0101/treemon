@@ -1278,14 +1278,53 @@ type TerminalFocusTests() =
         Assert.That(updated.TerminalPaneTarget, Is.EqualTo(None))
 
     [<Test>]
+    member _.``Worktree selection permanently cancels pending reconnect focus``() =
+        let reconnecting, _ =
+            App.update
+                (ReconnectEmbeddedTerminalView firstTwo)
+                focusModel
+
+        let selectedOther, _ =
+            App.update
+                (SetFocus (Some (Card (WorktreePath.value second))))
+                reconnecting
+
+        let selectedOriginal, _ =
+            App.update
+                (SetFocus (Some (Card (WorktreePath.value first))))
+                selectedOther
+
+        let loaded, cmd =
+            App.update
+                (EmbeddedTerminalViewLoaded(firstTwo, 1))
+                selectedOriginal
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                loaded.EmbeddedTerminalViewStates[firstTwo].FocusAfterLoad,
+                Is.False
+            )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
     member _.``Automatic canvas focus preserves an explicit terminal target``() =
+        let viewStates, _ =
+            Map.empty |> reconnectView firstTwo
+
         let updated, _ =
             App.update
                 (SetFocusNoRetarget
                     (Some (Card (WorktreePath.value second))))
-                { focusModel with TerminalPaneTarget = Some third }
+                { focusModel with
+                    TerminalPaneTarget = Some third
+                    EmbeddedTerminalViewStates = viewStates }
 
-        Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some third))
+        Assert.Multiple(fun () ->
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some third))
+            Assert.That(
+                updated.EmbeddedTerminalViewStates,
+                Is.EqualTo(viewStates)
+            ))
 
     [<Test>]
     member _.``Card focus with no terminals renders no active terminal``() =

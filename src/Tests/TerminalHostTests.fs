@@ -1534,7 +1534,7 @@ type TerminalHostDataPlaneTests() =
         let plane = TerminalDataPlane.createCore 8 upstream ignore
 
         try
-            [ "0\u001b[?1049;1003;1005h"
+            [ "0\u001b[?1049;1003;1005;6h"
               "0\u001b[?100"
               "02;1006h\u001b[?25l"
               "0redraw" ]
@@ -1557,7 +1557,7 @@ type TerminalHostDataPlaneTests() =
             Assert.That(
                 browser.Sent |> List.map Encoding.UTF8.GetString,
                 Is.EqualTo(
-                    [ "0\u001b[?1049h"
+                    [ "0\u001b[?1049h\u001b[?6h"
                       "0redraw"
                       "0\u001b[?25l\u001b[?1002h\u001b[?1006h" ]
                 )
@@ -1566,25 +1566,84 @@ type TerminalHostDataPlaneTests() =
             plane.Stop() |> Async.RunSynchronously
 
     [<Test>]
-    member _.``terminal resets clear retained interaction modes``() =
-        [ "\u001bc"; "\u001b[!p" ]
-        |> List.iter (fun reset ->
-            let replay =
-                TerminalModeReplay.empty
-                |> TerminalModeReplay.observeOutputFrame
-                    (frame "0\u001b[?1002;1006h")
-                |> TerminalModeReplay.observeOutputFrame
-                    (frame $"0{reset}")
+    member _.``inactive alternate screen mode is not replayed after output``() =
+        let replay =
+            TerminalModeReplay.empty
+            |> TerminalModeReplay.observeOutputFrame
+                (frame "0\u001b[?1049h")
+            |> TerminalModeReplay.observeOutputFrame
+                (frame "0\u001b[?1049l")
 
-            Assert.Multiple(fun () ->
-                Assert.That(
-                    TerminalModeReplay.beforeReplayFrame replay,
-                    Is.EqualTo(None)
-                )
-                Assert.That(
-                    TerminalModeReplay.afterReplayFrame replay,
-                    Is.EqualTo(None)
-                )))
+        Assert.Multiple(fun () ->
+            Assert.That(
+                TerminalModeReplay.beforeReplayFrame replay,
+                Is.EqualTo(None)
+            )
+            Assert.That(
+                TerminalModeReplay.afterReplayFrame replay,
+                Is.EqualTo(None)
+            ))
+
+    [<Test>]
+    member _.``full reset clears retained terminal modes``() =
+        let replay =
+            TerminalModeReplay.empty
+            |> TerminalModeReplay.observeOutputFrame
+                (frame "0\u001b[?1049;1002;1006h")
+            |> TerminalModeReplay.observeOutputFrame
+                (frame "0\u001bc")
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                TerminalModeReplay.beforeReplayFrame replay,
+                Is.EqualTo(None)
+            )
+            Assert.That(
+                TerminalModeReplay.afterReplayFrame replay,
+                Is.EqualTo(None)
+            ))
+
+    [<Test>]
+    member _.``soft reset preserves alternate screen and mouse modes``() =
+        let replay =
+            TerminalModeReplay.empty
+            |> TerminalModeReplay.observeOutputFrame
+                (frame "0\u001b[?1049;1002;1006;1;6;45;66;1004;2004h")
+            |> TerminalModeReplay.observeOutputFrame
+                (frame "0\u001b[?7;25l")
+            |> TerminalModeReplay.observeOutputFrame
+                (frame "0\u001b[!p")
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                replay
+                |> TerminalModeReplay.beforeReplayFrame
+                |> Option.map Encoding.UTF8.GetString,
+                Is.EqualTo(Some "0\u001b[?1049h")
+            )
+            Assert.That(
+                replay
+                |> TerminalModeReplay.afterReplayFrame
+                |> Option.map Encoding.UTF8.GetString,
+                Is.EqualTo(Some "0\u001b[?1002h\u001b[?1006h")
+            ))
+
+    [<Test>]
+    member _.``UTF-8 continuation bytes do not start private mode sequences``() =
+        let replay =
+            TerminalModeReplay.empty
+            |> TerminalModeReplay.observeOutputFrame
+                (frame "0ě?1002h")
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                TerminalModeReplay.beforeReplayFrame replay,
+                Is.EqualTo(None)
+            )
+            Assert.That(
+                TerminalModeReplay.afterReplayFrame replay,
+                Is.EqualTo(None)
+            ))
 
     [<Test>]
     member _.``command attachment accepts input without replay or output forwarding``() =

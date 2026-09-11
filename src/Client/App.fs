@@ -1000,7 +1000,10 @@ let update msg model =
         let focused, cmd =
             CanvasUpdate.applyFocus false target model
         // Idle canvas auto-display changes focus internally, not by selecting a card.
-        { focused with TerminalPaneTarget = model.TerminalPaneTarget }, cmd
+        { focused with
+            TerminalPaneTarget = model.TerminalPaneTarget
+            EmbeddedTerminalViewStates = model.EmbeddedTerminalViewStates },
+        cmd
 
     | ArchiveMsg archiveMsg ->
         let result, archiveCmd = ArchiveViews.update worktreeApi archiveMsg
