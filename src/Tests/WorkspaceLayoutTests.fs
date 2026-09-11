@@ -28,7 +28,25 @@ type WorkspaceLayoutTests() =
     let layoutWidth (page: IPage) =
         page.EvaluateAsync<float>("() => document.querySelector('.app-layout').getBoundingClientRect().width")
 
-    let settle (page: IPage) = page.WaitForTimeoutAsync(400.0f)
+    let widthButtons (page: IPage) =
+        page.Locator(".header-controls .workspace-width-btn")
+
+    let assertShares (page: IPage) shares =
+        task {
+            for selector, expected in shares do
+                let! _ =
+                    page.WaitForFunctionAsync(
+                        """({selector, expected}) => {
+                            const total = document.querySelector('.app-layout').getBoundingClientRect().width;
+                            const width = document.querySelector(selector).getBoundingClientRect().width;
+                            return Math.abs(width / total - expected) < 0.01;
+                        }""",
+                        {| selector = selector; expected = expected |},
+                        PageWaitForFunctionOptions(Timeout = 5000.0f))
+                let! total = layoutWidth page
+                let! actual = paneWidth page selector
+                Assert.That(actual / total, Is.EqualTo(expected).Within(0.01), $"{selector} workspace share")
+        }
 
     let terminalToggleBtn (page: IPage) =
         page.Locator(
@@ -47,9 +65,6 @@ type WorkspaceLayoutTests() =
                 pane.WaitForAsync(
                     LocatorWaitForOptions(Timeout = 5000.0f))
         }
-
-    let assertShare (actual: float) (total: float) (expected: float) (what: string) =
-        Assert.That(actual / total, Is.EqualTo(expected).Within(0.03), $"{what} has the expected workspace share")
 
     override this.ContextOptions() =
         let options = base.ContextOptions()
@@ -115,73 +130,113 @@ type WorkspaceLayoutTests() =
                 Assert.That(closedActive, Is.False))
         }
 
-    [<Test>]
-    member this.``All open workspace supports equal thirds and wide center``() =
+    [<TestCase(0, 1.0, 1.0, 1.0)>]
+    [<TestCase(1, 1.0, 2.0, 1.0)>]
+    [<TestCase(2, 2.0, 2.0, 1.0)>]
+    member this.``All open workspace supports each top-bar ratio``(index: int, terminal: float, canvas: float, dashboard: float) =
         task {
             do! focusFirstCard this.Page
             do! ensureCanvasPaneOpen this.Page
-            let buttons = this.Page.Locator(".canvas-tab-bar .canvas-width-btn")
-
-            do! buttons.First.ClickAsync()
             do! showTerminal this.Page
-            do! settle this.Page
-            let! equalTotal = layoutWidth this.Page
-            let! equalTerminal = paneWidth this.Page ".terminal-pane"
-            let! equalCanvas = paneWidth this.Page ".canvas-pane"
-            let! equalDashboard = paneWidth this.Page ".dashboard"
-
-            do! buttons.Nth(1).ClickAsync()
-            do! showTerminal this.Page
-            do! settle this.Page
-            let! wideTotal = layoutWidth this.Page
-            let! wideTerminal = paneWidth this.Page ".terminal-pane"
-            let! wideCanvas = paneWidth this.Page ".canvas-pane"
-            let! wideDashboard = paneWidth this.Page ".dashboard"
-
-            assertShare equalTerminal equalTotal 0.3333 "Terminal"
-            assertShare equalCanvas equalTotal 0.3333 "Canvas"
-            assertShare equalDashboard equalTotal 0.3333 "Dashboard"
-            assertShare wideTerminal wideTotal 0.25 "Terminal"
-            assertShare wideCanvas wideTotal 0.5 "Canvas"
-            assertShare wideDashboard wideTotal 0.25 "Dashboard"
-        }
-
-    [<Test>]
-    member this.``Terminal hidden workspace supports one-to-one and two-to-one``() =
-        task {
-            do! focusFirstCard this.Page
-            do! ensureCanvasPaneOpen this.Page
-            let buttons = this.Page.Locator(".canvas-tab-bar .canvas-width-btn")
+            let buttons = widthButtons this.Page
             let! labels = buttons.AllTextContentsAsync()
+            Assert.That(labels, Is.EqualTo([| "1:1:1"; "1:2:1"; "2:2:1" |]))
+            let! saved =
+                this.Page.RunAndWaitForResponseAsync(
+                    (fun () -> buttons.Nth(index).ClickAsync()),
+                    Func<IResponse, bool>(fun response -> response.Url.EndsWith("/IWorktreeApi/saveWorkspaceWidth")))
+            Assert.That(saved.Ok, Is.True, "The selected ratio must be accepted by the persistence API")
+            let total = terminal + canvas + dashboard
+            do! assertShares this.Page [
+                ".terminal-pane", terminal / total
+                ".canvas-pane", canvas / total
+                ".dashboard", dashboard / total
+            ]
+            let! active = this.Page.Locator(".workspace-width-btn.active").AllTextContentsAsync()
+            Assert.That(active, Is.EqualTo([| labels[index] |]))
+        }
 
-            do! buttons.First.ClickAsync()
-            do! settle this.Page
-            let! equalTotal = layoutWidth this.Page
-            let! equalCanvas = paneWidth this.Page ".canvas-pane"
-            let! equalDashboard = paneWidth this.Page ".dashboard"
-
-            do! buttons.Nth(1).ClickAsync()
-            do! settle this.Page
-            let! wideTotal = layoutWidth this.Page
-            let! wideCanvas = paneWidth this.Page ".canvas-pane"
-            let! wideDashboard = paneWidth this.Page ".dashboard"
-
+    [<TestCase(true)>]
+    [<TestCase(false)>]
+    member this.``Either single pane supports one-to-one and two-to-one``(canvasVisible: bool) =
+        task {
+            do! focusFirstCard this.Page
+            if canvasVisible then
+                do! ensureCanvasPaneOpen this.Page
+            else
+                do! showTerminal this.Page
+            let buttons = widthButtons this.Page
+            let! labels = buttons.AllTextContentsAsync()
             Assert.That(labels, Is.EqualTo([| "1:1"; "2:1" |]))
-            assertShare equalCanvas equalTotal 0.5 "Canvas"
-            assertShare equalDashboard equalTotal 0.5 "Dashboard"
-            assertShare wideCanvas wideTotal 0.6667 "Canvas"
-            assertShare wideDashboard wideTotal 0.3333 "Dashboard"
+            let pane = if canvasVisible then ".canvas-pane" else ".terminal-pane"
+            do! buttons.First.ClickAsync()
+            do! assertShares this.Page [ pane, 0.5; ".dashboard", 0.5 ]
+            do! buttons.Nth(1).ClickAsync()
+            do! assertShares this.Page [ pane, 2.0 / 3.0; ".dashboard", 1.0 / 3.0 ]
+        }
+
+    [<TestCase(true, 1)>]
+    [<TestCase(false, 1)>]
+    [<TestCase(true, 2)>]
+    [<TestCase(false, 2)>]
+    member this.``Hiding either pane preserves the selected wide mode``(hideCanvas: bool, index: int) =
+        task {
+            do! focusFirstCard this.Page
+            do! ensureCanvasPaneOpen this.Page
+            do! showTerminal this.Page
+            let buttons = widthButtons this.Page
+            do! buttons.Nth(index).ClickAsync()
+            let! selected = buttons.Nth(index).TextContentAsync()
+            let toggle = if hideCanvas then canvasToggleBtn this.Page else terminalToggleBtn this.Page
+            do! toggle.ClickAsync()
+            let! labels = buttons.AllTextContentsAsync()
+            Assert.That(labels, Is.EqualTo([| "1:1"; "2:1" |]))
+            let! active = this.Page.Locator(".workspace-width-btn.active").AllTextContentsAsync()
+            Assert.That(active, Is.EqualTo([| "2:1" |]))
+            let pane = if hideCanvas then ".terminal-pane" else ".canvas-pane"
+            do! assertShares this.Page [ pane, 2.0 / 3.0; ".dashboard", 1.0 / 3.0 ]
+            do! buttons.Nth(1).ClickAsync()
+            do! toggle.ClickAsync()
+            let! restored = this.Page.Locator(".workspace-width-btn.active").AllTextContentsAsync()
+            Assert.That(restored, Is.EqualTo([| selected |]), "The two-pane control retains the three-pane preference")
+            let terminal, canvas, dashboard =
+                if index = 1 then 0.25, 0.5, 0.25 else 0.4, 0.4, 0.2
+            do! assertShares this.Page [
+                ".terminal-pane", terminal
+                ".canvas-pane", canvas
+                ".dashboard", dashboard
+            ]
         }
 
     [<Test>]
-    member this.``Narrow workspace stacks panes without horizontal overflow``() =
+    member this.``Dashboard alone hides ratio controls and fills the workspace``() =
+        task {
+            do! focusFirstCard this.Page
+            do! ensureCanvasPaneOpen this.Page
+            do! showTerminal this.Page
+            do! (widthButtons this.Page).Nth(2).ClickAsync()
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (terminalToggleBtn this.Page).ClickAsync()
+            let! count = (widthButtons this.Page).CountAsync()
+            Assert.That(count, Is.Zero)
+            do! assertShares this.Page [ ".dashboard", 1.0 ]
+        }
+
+    [<TestCase(0)>]
+    [<TestCase(1)>]
+    [<TestCase(2)>]
+    member this.``Narrow workspace stacks panes without horizontal overflow``(index: int) =
         task {
             do! this.Page.SetViewportSizeAsync(720, 900)
             do! focusFirstCard this.Page
             do! ensureCanvasPaneOpen this.Page
-            do! this.Page.Locator(".canvas-tab-bar .canvas-width-btn").Nth(1).ClickAsync()
             do! showTerminal this.Page
-            do! settle this.Page
+            do! (widthButtons this.Page).Nth(index).ClickAsync()
+            do! assertShares this.Page [
+                ".terminal-pane", 1.0
+                ".canvas-pane", 1.0
+                ".dashboard", 1.0
+            ]
 
             let! tops =
                 this.Page.EvaluateAsync<float[]>(
@@ -193,6 +248,10 @@ type WorkspaceLayoutTests() =
                 this.Page.EvaluateAsync<bool>(
                     "() => document.documentElement.scrollWidth > document.documentElement.clientWidth")
             Assert.That(overflow, Is.False)
+            let! flex =
+                this.Page.EvaluateAsync<string[]>(
+                    "() => ['.terminal-pane', '.canvas-pane', '.dashboard'].map(s => getComputedStyle(document.querySelector(s)).flex)")
+            Assert.That(flex, Is.EqualTo([| "1 1 0px"; "1 1 0px"; "1 1 0px" |]), "Desktop ratios do not affect stacked panes")
         }
 
     [<Test>]

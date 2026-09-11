@@ -214,8 +214,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
 /// Named callbacks the canvas pane raises back to its host. Grouped into a record so same-typed
 /// handlers cannot be silently transposed.
 type CanvasPaneCallbacks =
-    { SetWidth: WorkspaceWidth -> unit
-      SelectDoc: string -> unit
+    { SelectDoc: string -> unit
       OnOverviewClick: string -> unit
       OnOverviewDocClick: string -> string -> unit
       ArchiveDoc: string -> unit
@@ -236,8 +235,6 @@ type CanvasPaneCallbacks =
 /// `Client.fsproj`, so that type isn't nameable here.
 type CanvasPaneState =
     { IsOpen: bool
-      TerminalPaneOpen: bool
-      Width: WorkspaceWidth
       SendState: CanvasSendState
       DocError: DocJsError option
       ClipboardNotice: string option
@@ -258,8 +255,6 @@ type CanvasPaneAwareness =
 
 let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (awareness: CanvasPaneAwareness) (callbacks: CanvasPaneCallbacks) =
     let { IsOpen = isOpen
-          TerminalPaneOpen = terminalPaneOpen
-          Width = width
           SendState = sendState
           DocError = docError
           ClipboardNotice = clipboardNotice
@@ -267,8 +262,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
           ActiveScopedKey = activeScopedKey
           ShareState = shareState
           BridgeLiveness = bridgeLiveness } = state
-    let { SetWidth = setWidth
-          SelectDoc = selectDoc
+    let { SelectDoc = selectDoc
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveDoc
@@ -282,30 +276,6 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
           UnviewedFilenames = unviewedFilenames
           VisitedDocs = visitedDocs } = awareness
     let isPathCopying = CanvasPathCopyState.isCopying pathCopyState
-    let toggleButton (baseClass: string) (isActive: bool) (onClick: unit -> unit) (label: string) (title: string) =
-        Html.button [
-            prop.className (if isActive then $"{baseClass} active" else baseClass)
-            prop.onClick (fun _ -> onClick ())
-            prop.title title
-            prop.text label
-        ]
-
-    let widthButton (workspaceWidth: WorkspaceWidth) label title =
-        toggleButton "canvas-width-btn" (workspaceWidth = width) (fun () -> setWidth workspaceWidth) label title
-
-    let widthButtons =
-        let choices =
-            if terminalPaneOpen then
-                [ WorkspaceWidth.EqualThirds, "1:1:1", "Equal thirds — Terminal, Canvas and Dashboard"
-                  WorkspaceWidth.WideCanvas, "1:2:1", "Wide canvas — 25% Terminal, 50% Canvas, 25% Dashboard" ]
-            else
-                [ WorkspaceWidth.EqualThirds, "1:1", "Equal split — Canvas and Dashboard"
-                  WorkspaceWidth.WideCanvas, "2:1", "Wide canvas — two-thirds Canvas, one-third Dashboard" ]
-
-        Html.div [
-            prop.className "canvas-width-group"
-            prop.children (choices |> List.map (fun (workspaceWidth, label, title) -> widthButton workspaceWidth label title))
-        ]
 
     let headerBar (tabs: Fable.React.ReactElement list) (activeDoc: CanvasDoc option) (showLaunchBtn: bool) =
         Html.div [
@@ -354,7 +324,6 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                                 prop.children [ ArchiveViews.archiveIcon ]
                             ]
                         | _ -> ()
-                        widthButtons
                     ]
                 ]
             ]

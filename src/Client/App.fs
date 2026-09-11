@@ -1303,6 +1303,24 @@ let viewSystemMetrics (metrics: SystemMetrics option) =
         ]
 
 let viewAppHeader model dispatch =
+    let widthChoices =
+        match model.TerminalPaneOpen, model.Canvas.CanvasPaneOpen with
+        | true, true ->
+            [ WorkspaceWidth.EqualThirds, "1:1:1", "Equal thirds - Terminal, Canvas and Dashboard"
+              WorkspaceWidth.WideCanvas, "1:2:1", "Wide canvas - 25% Terminal, 50% Canvas, 25% Dashboard"
+              WorkspaceWidth.WidePanes, "2:2:1", "Wide panes - 40% Terminal, 40% Canvas, 20% Dashboard" ]
+        | false, false -> []
+        | true, false
+        | false, true ->
+            let pane = if model.TerminalPaneOpen then "Terminal" else "Canvas"
+            let wideWidth =
+                match model.Canvas.WorkspaceWidth with
+                | WorkspaceWidth.EqualThirds
+                | WorkspaceWidth.WideCanvas -> WorkspaceWidth.WideCanvas
+                | WorkspaceWidth.WidePanes -> WorkspaceWidth.WidePanes
+            [ WorkspaceWidth.EqualThirds, "1:1", $"Equal split - {pane} and Dashboard"
+              wideWidth, "2:1", $"Wide {pane.ToLowerInvariant()} - two-thirds {pane}, one-third Dashboard" ]
+
     Html.div [
         prop.className "app-header"
         prop.children [
@@ -1373,6 +1391,22 @@ let viewAppHeader model dispatch =
                                         ]
                                 ]
                             ]
+                            if not (List.isEmpty widthChoices) then
+                                Html.div [
+                                    prop.className "workspace-width-group"
+                                    prop.children [
+                                        for width, label, title in widthChoices do
+                                            Html.button [
+                                                prop.className (
+                                                    if width = model.Canvas.WorkspaceWidth then "ctrl-btn workspace-width-btn active"
+                                                    else "ctrl-btn workspace-width-btn")
+                                                yield! noFocusProps
+                                                prop.onClick (fun _ -> dispatch (SetWorkspaceWidth width))
+                                                prop.title title
+                                                prop.text label
+                                            ]
+                                    ]
+                                ]
                         ]
                     ]
                 ]
@@ -1392,6 +1426,7 @@ let view model dispatch =
         match model.Canvas.WorkspaceWidth with
         | WorkspaceWidth.EqualThirds -> "workspace-thirds"
         | WorkspaceWidth.WideCanvas -> "workspace-wide-canvas"
+        | WorkspaceWidth.WidePanes -> "workspace-wide-panes"
 
     let dashboardClass =
         match model.Canvas.CanvasPaneOpen with
@@ -1401,7 +1436,7 @@ let view model dispatch =
     let layoutClass =
         [ "app-layout"
           if model.Canvas.CanvasPaneOpen then "canvas-open"
-          if model.Canvas.CanvasPaneOpen then workspaceWidthClass
+          workspaceWidthClass
           if not terminalPaneOpen then "terminal-hidden" ]
         |> String.concat " "
 
