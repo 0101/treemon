@@ -974,7 +974,9 @@ type DiffViewerE2ETests() =
                 )
             let! _ =
                 this.Page.WaitForFunctionAsync(
-                    "() => window.__summaryQueries.at(-1).includes('branch=main')"
+                    """() =>
+                        window.__summaryQueries.at(-1).includes('branch=main') &&
+                        document.getElementById('comparison-status').textContent === ''"""
                 )
 
             let! selected =
