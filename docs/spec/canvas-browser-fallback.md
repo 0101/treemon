@@ -22,13 +22,18 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 
 ### Treemon Detection
 
-At startup the extension POSTs `worktreePath`, `injectUrl`, and `sessionId` to
-`/api/canvas/register`. Treemon's response reports whether the worktree is actually monitored:
-`{ registered: bool, monitored: bool }`, always with HTTP 200. The extension enters
-**browser fallback mode** when registration is
-unreachable/fails **or** `monitored === false`. For backward compatibility with older Treemon
-servers that return a non-JSON body, a successful (200) response with no `monitored` field is
-treated as monitored (Treemon mode). In Treemon mode, behavior is unchanged — the existing
+At startup the extension POSTs `worktreePath`, `injectUrl`, `sessionId`, its parent Copilot PID,
+optional inherited terminal ID, and its opaque loopback shutdown endpoint/capability to
+`/api/canvas/register`. Treemon validates exact process identity before recording a monitored
+registration. Its response reports whether the worktree is actually monitored:
+`{ registered: bool, monitored: bool }`. An accepted monitored registration returns HTTP 200 with
+`{ registered: true, monitored: true }`; an otherwise acceptable request for an unmonitored
+worktree returns HTTP 200 with `{ registered: false, monitored: false }`. Malformed requests,
+invalid loopback or shutdown metadata, and exact-identity rejection for a monitored worktree return
+HTTP 400. The extension enters **browser fallback mode** when registration is unreachable, returns
+any non-2xx response, or reports `monitored === false`. For backward compatibility with older
+Treemon servers that return a non-JSON body, a successful (200) response with no `monitored` field
+is treated as monitored (Treemon mode). In Treemon mode, behavior is unchanged — the existing
 `/inject` endpoint and heartbeat remain active.
 
 `monitored` is computed server-side (`canvasRegisterHandler`) by checking whether the
@@ -36,8 +41,8 @@ normalized `worktreePath` matches any worktree the scheduler currently tracks
 (`PerRepoState.KnownPaths`). A monitored worktree is registered with the canvas bridge and
 returns `{ registered: true, monitored: true }`; an unmonitored worktree is **not** registered
 (no bridge session is created) and returns `{ registered: false, monitored: false }`. Either
-way the call returns 200, so HTTP success alone is not sufficient to conclude the canvas pane
-will display the docs.
+accepted outcome returns HTTP 200, so HTTP success alone is not sufficient to conclude the canvas
+pane will display the docs.
 
 ### HTTP Endpoints (browser mode only)
 
@@ -52,7 +57,8 @@ abuse: they require `Content-Type: application/json` (so a cross-origin call bec
 request the server never answers — the browser blocks it, closing the `text/plain` simple-request
 CSRF vector) and reject any request carrying a non-loopback `Origin`. The legitimate callers already
 comply — Treemon's server-side POST to `/inject` sends `application/json` and no `Origin`, and the
-same-origin transport shim posts `/_message` as `application/json`.
+same-origin transport shim posts `/_message` as `application/json`. Both use the shared capped
+request-body reader with a 1 MiB default and reject request-stream errors.
 
 ### Injected Scripts
 
@@ -99,7 +105,9 @@ accepts only the bare filename rather than stripping a path down to its final se
 
 ## Key Files
 
-- `src/Extension/extension.mjs` — mode detection, HTTP serving, ownership integration, runtime injection, message endpoint
+- `src/Extension/extension.mjs` — mode detection, exact registration, HTTP serving, ownership integration, runtime injection, message endpoint
+- `src/Extension/request-body.mjs` — shared capped request-body reader for injection, message, and shutdown endpoints
+- `src/Extension/shutdown-endpoint.mjs` — capability-guarded loopback routine-shutdown endpoint
 - `src/Extension/canvas-send.js` — canonical `window.canvasSend` runtime shared with the server
 - `src/Extension/canvas-selection-context.js` — canonical selected-text interaction runtime shared with the server
 - `src/Extension/canvas-doc-kinds.json` — canonical SystemView filename list shared with the server

@@ -9,6 +9,7 @@ open Shared.PathUtils
 open Newtonsoft.Json
 open FsToolkit.ErrorHandling
 open Server.GlobalConfig
+open Server.SessionActivity
 open Server.SessionActivityStore
 
 let loadFixtures (path: string) : Result<FixtureData, string> =
@@ -176,11 +177,13 @@ let private overviewWorktreeFields
       CodingToolData = codingToolData
       CodingTool = displayStatus
       CodingToolSince =
-        match displayStatus with
-        | Idle -> codingToolSince |> Map.tryFind wt.Path
-        | Working
-        | WaitingForUser
-        | NoSession -> None
+        if
+            displayStatus = codingToolData.Status
+            && displayStatus <> NoSession
+        then
+            codingToolSince |> Map.tryFind wt.Path
+        else
+            None
       IsArchived =
         wt.Branch
         |> Option.map (fun b -> Set.contains b archivedBranches)
@@ -277,7 +280,7 @@ let internal detachedBranchLabel (path: string) = $"(detached@{path})"
 type RepoAssemblyInputs =
     { Now: DateTimeOffset
       IgnorePredicate: string -> bool
-      RetainedByWorktree: Map<string, SessionActivityStore.StoredStatus>
+      RetainedByWorktree: Map<string, SessionActivityStore.RetainedSession>
       ArchivedBranches: Map<RepoId, Set<string>>
       AutoSyncBranches: Map<RepoId, Set<string>> }
 
@@ -320,7 +323,7 @@ let internal isOverviewCaptureReady
                 && Map.containsKey wt.Path repo.PlanningData)
         | _ -> false
 
-    state.SessionStatusesHydrated
+    state.SessionInstancesHydrated
     && (match inputs with
         | Some inputs -> rootPaths |> Map.forall (fun repoId _ -> repoReady inputs repoId)
         | None -> Map.isEmpty rootPaths)
@@ -391,10 +394,11 @@ let assembleRepos
     (state: SchedulerState.DashboardState)
     : RepoWorktrees list =
     let pushByWorktree =
-        state.SessionStatuses
+        state.SessionInstances
         |> Map.values
-        |> CodingToolStatus.includeRetainedSessions inputs.RetainedByWorktree
-        |> CodingToolStatus.collapseByWorktree inputs.Now
+        |> CodingToolStatus.collapseByWorktree
+            inputs.Now
+            inputs.RetainedByWorktree
 
     assembleReposCore
         inputs.IgnorePredicate
@@ -459,7 +463,9 @@ let assembleOverviewRepos
     (state: SchedulerState.DashboardState)
     : RepoWorktrees list =
     let pushByWorktree =
-        CodingToolStatus.collapseByWorktree inputs.Now (state.SessionStatuses |> Map.values)
+        state.SessionInstances
+        |> Map.values
+        |> CodingToolStatus.collapseByWorktree inputs.Now Map.empty
 
     assembleReposCore
         inputs.IgnorePredicate
@@ -598,6 +604,7 @@ let internal deleteWorktreeWith
 let private deleteWorktree
     agent
     embeddedTerminal
+    terminalSessionCleanup
     (clearAcceptedSync: string -> unit)
     rootPaths
     wtPath
@@ -611,7 +618,9 @@ let private deleteWorktree
 
     deleteWorktreeWith
         GitWorktree.removeWorktree
-        (EmbeddedTerminal.withReservedCleanup embeddedTerminal)
+        (WorktreeCleanup.withTerminalCleanup
+            terminalSessionCleanup
+            embeddedTerminal)
         removeWorktreeState
         agent
         rootPaths
@@ -697,6 +706,7 @@ type WorktreeApiDependencies =
       CardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>
       SessionAgent: SessionManager.SessionAgent
       EmbeddedTerminal: EmbeddedTerminal.Manager
+      TerminalSessionCleanup: WorktreeCleanup.PrepareSessionClose
       ActivityStore: SessionActivityStore.SessionActivityStore option
       SnapshotStore: OverviewSnapshotStore.OverviewSnapshotStore option
       AutoSyncStore: AutoSyncStore.Store option
@@ -713,6 +723,7 @@ let internal worktreeApiWithLaunch
           CardLog = cardLog
           SessionAgent = sessionAgent
           EmbeddedTerminal = embeddedTerminal
+          TerminalSessionCleanup = terminalSessionCleanup
           ActivityStore = activityStore
           SnapshotStore = snapshotStore
           AutoSyncStore = autoSyncStore
@@ -776,7 +787,7 @@ let internal worktreeApiWithLaunch
                 snapshot
                 |> TerminalSessionActivity.withReportedActivity
                     DateTimeOffset.UtcNow
-                    (state.SessionStatuses |> Map.values)
+                    (state.SessionInstances |> Map.values)
         }
 
     let terminalMutation operation =
@@ -813,7 +824,10 @@ let internal worktreeApiWithLaunch
         }
 
     let closeEmbeddedTerminal terminalId =
-        EmbeddedTerminal.close embeddedTerminal terminalId
+        WorktreeCleanup.closeEmbeddedTerminalWith
+            terminalSessionCleanup
+            embeddedTerminal
+            terminalId
         |> terminalMutation
 
     match fixtures with
@@ -912,7 +926,13 @@ let internal worktreeApiWithLaunch
                           | _ -> None)
                       |> Map.ofList
               }
-          deleteWorktree = deleteWorktree agent embeddedTerminal clearAcceptedRecord rootPaths
+          deleteWorktree =
+            deleteWorktree
+                agent
+                embeddedTerminal
+                terminalSessionCleanup
+                clearAcceptedRecord
+                rootPaths
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
                   async {
@@ -933,7 +953,9 @@ let internal worktreeApiWithLaunch
               updateArchivedBranchesWith
                   agent
                   rootPaths
-                  (EmbeddedTerminal.withReservedCleanup embeddedTerminal)
+                  (WorktreeCleanup.withTerminalCleanup
+                      terminalSessionCleanup
+                      embeddedTerminal)
                   Set.add
           unarchiveWorktree =
               updateArchivedBranchesWith
@@ -1067,7 +1089,11 @@ let internal worktreeApiWithLaunch
                           | CodingToolProvider.CopilotCli ->
                               activityStore
                               |> Option.bind _.LatestSessionIdForWorktree(PathUtils.toWorktreePath path)
-                      let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
+                      let inv =
+                          sessionId
+                          |> Option.map SessionId.value
+                          |> CodingToolCli.Resume
+                          |> CodingToolCli.build provider
                       let start () =
                           startEmbeddedCommand wtPath inv.AsShellString
                           |> terminalStart
@@ -1079,7 +1105,9 @@ let internal worktreeApiWithLaunch
                           let! state =
                               agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
                           let sessions =
-                              state.SessionStatuses |> Map.values |> Seq.toList
+                              state.SessionInstances
+                              |> Map.values
+                              |> Seq.toList
 
                           let now = DateTimeOffset.UtcNow
 
@@ -1087,7 +1115,7 @@ let internal worktreeApiWithLaunch
                               TerminalSessionActivity.tryFindLiveTerminalId
                                   now
                                   wtPath
-                                  (SessionActivity.SessionId targetSessionId)
+                                  targetSessionId
                                   sessions
                                   snapshot
                           with
@@ -1109,7 +1137,9 @@ let internal worktreeApiWithLaunch
                       let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
                       let! outcome =
-                          CanvasBridge.sendMessage (state.SessionStatuses |> Map.values) request
+                          CanvasBridge.sendMessage
+                              (state.SessionInstances |> Map.values)
+                              request
 
                       match outcome with
                       | CanvasBridge.Routed result -> return result

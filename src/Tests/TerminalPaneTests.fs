@@ -680,6 +680,51 @@ type TerminalFocusTests() =
             ))
 
     [<Test>]
+    member _.``Completed terminal close immediately refreshes worktree status``() =
+        let before = focusModel.EmbeddedTerminals
+        let after =
+            { Tabs =
+                before.Tabs
+                |> List.filter (fun tab -> tab.Id <> firstTwo) }
+
+        let updated, cmd =
+            App.update
+                (EmbeddedTerminalClosed(firstTwo, before, after))
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.EmbeddedTerminals, Is.EqualTo(after))
+            Assert.That(
+                updated.ActiveEmbeddedTerminals,
+                Is.EqualTo(
+                    Map.ofList [
+                        first, firstOne
+                        second, secondOne
+                    ]
+                )
+            )
+            Assert.That(
+                List.length cmd,
+                Is.EqualTo(1),
+                "the close result must fetch fresh card state without waiting for the next tick"
+            ))
+
+    [<Test>]
+    member _.``Failed terminal close refreshes both registry and worktree status``() =
+        let updated, cmd =
+            App.update
+                EmbeddedTerminalCloseFailed
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated, Is.EqualTo(focusModel))
+            Assert.That(
+                List.length cmd,
+                Is.EqualTo(2),
+                "partial cleanup may change both terminal and exact-session state"
+            ))
+
+    [<Test>]
     member _.``Launch errors preserve exact terminal state and stay scoped``() =
         let model =
             { focusModel with

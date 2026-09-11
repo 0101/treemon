@@ -19,6 +19,7 @@
     <Compile Include="ResilientMailbox.fs" />
     <Compile Include="LoopbackHost.fs" />
     <Compile Include="PathValidation.fs" />
+    <Compile Include="TerminalHostDiagnostics.fs" />
     <Compile Include="JobProcess.fs" />
     <Compile Include="TerminalProtocol.fs" />
     <Compile Include="RequestSecurity.fs" />

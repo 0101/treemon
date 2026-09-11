@@ -2,6 +2,7 @@ module Tests.SessionActivityTests
 
 open System
 open NUnit.Framework
+open Server
 open Server.SessionActivity
 open Shared
 open Tests.TestUtils

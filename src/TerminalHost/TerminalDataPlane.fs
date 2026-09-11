@@ -51,7 +51,7 @@ type TerminalDataPlane =
 module TerminalDataPlane =
     let private socketOperationTimeout = TimeSpan.FromSeconds 2.0
 
-    let [<Literal>] private ReplyTimeoutMilliseconds = 60_000
+    let private ReplyTimeoutMilliseconds, StopReplyTimeoutMilliseconds = 60_000, 30_000
 
     let private replayGapFrame =
         Encoding.UTF8.GetBytes(
@@ -398,4 +398,4 @@ module TerminalDataPlane =
           DetachSocket = fun attachmentId -> ask (fun reply -> Detach(attachmentId, reply))
           AcceptUpstreamFrame = fun frame -> ask (fun reply -> UpstreamFrame(Array.copy frame, reply))
           UpstreamEnded = fun () -> ask UpstreamClosed
-          Stop = fun () -> ask Stop }
+          Stop = fun () -> ResilientMailbox.ask StopReplyTimeoutMilliseconds Stop mailbox }

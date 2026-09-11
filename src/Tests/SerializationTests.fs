@@ -199,6 +199,36 @@ type CanvasDocKindSerializationTests() =
             Assert.That(allDocs |> List.exists (fun d -> d.Kind = AgentDoc),
                         Is.True, "Fixture should contain at least one AgentDoc")
 
+    [<Test>]
+    member _.``Overview fixture supplies a unique identity for every session marker``() =
+        let fixturePath =
+            System.IO.Path.Combine(__SOURCE_DIRECTORY__, "fixtures", "overview-band.json")
+
+        match Server.WorktreeApi.loadFixtures fixturePath with
+        | Error msg -> Assert.Fail($"Fixture failed to load: {msg}")
+        | Ok data ->
+            let sessions =
+                data.Worktrees.Repos
+                |> List.collect _.Worktrees
+                |> List.collect _.Sessions
+
+            let instanceIds =
+                sessions
+                |> List.map (_.InstanceId >> SessionInstanceId.value)
+
+            Assert.Multiple(fun () ->
+                Assert.That(sessions, Is.Not.Empty)
+                Assert.That(
+                    instanceIds |> List.forall (String.IsNullOrWhiteSpace >> not),
+                    Is.True,
+                    "every marker needs a non-empty identity"
+                )
+                Assert.That(
+                    instanceIds |> Set.ofList |> Set.count,
+                    Is.EqualTo(instanceIds.Length),
+                    "every marker needs a stable unique React key"
+                ))
+
     // Regression guard: the hand-written fixture omits the (non-optional) Planning record, so Newtonsoft
     // leaves it null. loadFixtures must default it to BeadsPlanning.zero — a null Planning is
     // un-deserializable by the Fable.Remoting client and silently breaks the dashboard's first load
