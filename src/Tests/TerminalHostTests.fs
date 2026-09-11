@@ -2049,6 +2049,8 @@ type TerminalHostProxyTests() =
             Assert.That(customized, Does.Contain("overflow-y:scroll"))
             Assert.That(customized, Does.Contain("open-worktree-search"))
             Assert.That(customized, Does.Contain("cycle-terminal"))
+            Assert.That(customized, Does.Contain("close-terminal"))
+            Assert.That(customized, Does.Contain("start-terminal"))
             Assert.That(customized, Does.Contain("focus-terminal"))
             Assert.That(customized, Does.Contain(".xterm-helper-textarea"))
             Assert.That(customized, Does.Contain("e.source!==parent"))

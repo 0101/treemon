@@ -35,6 +35,8 @@ type CycleDirection =
 type TerminalShortcut =
     | OpenWorktreeSearch of EmbeddedTerminalId
     | CycleTerminal of EmbeddedTerminalId * CycleDirection
+    | CloseTerminal of EmbeddedTerminalId
+    | StartTerminal of EmbeddedTerminalId
 
 let private samePath left right =
     Shared.PathUtils.pathEquals
@@ -64,6 +66,13 @@ let tabsForWorktree path snapshot =
 let tryFindTab terminalId snapshot =
     snapshot.Tabs
     |> List.tryFind (fun tab -> tab.Id = terminalId)
+
+let withoutTerminals (terminalIds: Set<EmbeddedTerminalId>) snapshot =
+    { snapshot with
+        Tabs =
+            snapshot.Tabs
+            |> List.filter (fun tab ->
+                not (terminalIds.Contains tab.Id)) }
 
 let activeTerminalId selectedWorktree selections snapshot =
     selectedWorktree
@@ -286,6 +295,10 @@ let messageListener (dispatch: TerminalShortcut -> unit) =
                 match action with
                 | "open-worktree-search" ->
                     dispatch (TerminalShortcut.OpenWorktreeSearch terminalId)
+                | "close-terminal" ->
+                    dispatch (TerminalShortcut.CloseTerminal terminalId)
+                | "start-terminal" ->
+                    dispatch (TerminalShortcut.StartTerminal terminalId)
                 | "cycle-terminal" ->
                     match
                         emitJsExpr<string>
