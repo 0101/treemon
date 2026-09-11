@@ -1,8 +1,10 @@
 const MAX_MESSAGE_CHARS = 2000;
 export const MAX_TOOL_CALL_ID_CHARS = 512;
+export const BACKGROUND_AGENT_CLOCK_RETENTION_MS = 5 * 60 * 1000;
 
 /**
  * @typedef ReportBaseContext
+ * @property {number} parentProcessId
  * @property {string} sessionId
  * @property {string} [terminalSessionId]
  * @property {string} worktreePath
@@ -11,6 +13,7 @@ export const MAX_TOOL_CALL_ID_CHARS = 512;
 
 /**
  * @typedef ReportContext
+ * @property {number} parentProcessId
  * @property {string} sessionId
  * @property {string} [terminalSessionId]
  * @property {string} worktreePath
@@ -23,7 +26,7 @@ export const MAX_TOOL_CALL_ID_CHARS = 512;
  * @param {unknown} value
  * @returns {value is Record<string, unknown>}
  */
-function isRecord(value) {
+export function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -57,6 +60,7 @@ function cap(text) {
 export function buildReport(context, kind) {
   const terminalSessionId = context.terminalSessionId?.trim();
   return {
+    parentProcessId: context.parentProcessId,
     sessionId: context.sessionId,
     ...(terminalSessionId ? { terminalSessionId } : {}),
     worktreePath: context.worktreePath,
@@ -148,6 +152,8 @@ export function mapSdkEvent(context, eventValue) {
       return buildReport(context, "turn_ended");
     case "session.idle":
       return buildReport(context, "went_idle");
+    case "session.shutdown":
+      return buildReport(context, "session_closed");
     case "skill.invoked": {
       const name = stringValue(data.name)?.trim() ?? "";
       return name ? { ...buildReport(context, "skill_invoked"), skillName: name } : null;
@@ -185,4 +191,178 @@ export function mapSdkEvent(context, eventValue) {
     default:
       return null;
   }
+}
+
+/**
+ * Historical shutdown belongs to an earlier physical CLI process. Replaying it for a newly resumed
+ * process would close the new exact identity immediately, so shutdown is live-only.
+ *
+ * @param {ReportBaseContext} context
+ * @param {unknown} eventValue
+ */
+export function reportForReplaySdkEvent(context, eventValue) {
+  return isRecord(eventValue) && eventValue.type === "session.shutdown"
+    ? null
+    : reportForSdkEvent(context, eventValue);
+}
+
+/** @param {Record<string, unknown>} report */
+function reportOccurrenceTime(report) {
+  const parsed = Date.parse(stringValue(report.occurredAt) ?? "");
+  return Number.isNaN(parsed) ? -Infinity : parsed;
+}
+
+/**
+ * @param {Record<string, unknown>} left
+ * @param {Record<string, unknown>} right
+ */
+export function compareReportsByOccurrence(left, right) {
+  const leftTime = reportOccurrenceTime(left);
+  const rightTime = reportOccurrenceTime(right);
+  if (leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
+
+  const leftId = stringValue(left.eventId) ?? "";
+  const rightId = stringValue(right.eventId) ?? "";
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+}
+
+/** @param {Record<string, unknown> | null} current @param {Record<string, unknown>} next */
+function newestReport(current, next) {
+  if (!current) return next;
+  return compareReportsByOccurrence(current, next) <= 0 ? next : current;
+}
+
+/**
+ * Keep only the last-write-wins process facts needed to reconstruct current session state.
+ * Matching event IDs make overlap between historical and live snapshots idempotent.
+ */
+export function createReplayAccumulator(now = Date.now) {
+  /** @type {Record<string, unknown> | null} */
+  let lifecycle = null;
+  /** @type {Record<string, unknown> | null} */
+  let skill = null;
+  /** @type {Record<string, unknown> | null} */
+  let intent = null;
+  /** @type {Record<string, unknown> | null} */
+  let title = null;
+  /** @type {Record<string, unknown> | null} */
+  let userMessage = null;
+  /** @type {Record<string, unknown> | null} */
+  let assistantMessage = null;
+  /** @type {Record<string, unknown> | null} */
+  let awaitingUser = null;
+  /** @type {Record<string, unknown> | null} */
+  let userInputCompleted = null;
+  /** @type {Record<string, unknown> | null} */
+  let usage = null;
+  /** @type {Map<string, { started: Record<string, unknown> | null, finished: Record<string, unknown> | null }>} */
+  const backgroundAgents = new Map();
+
+  function pruneBackgroundAgents() {
+    const cutoff = now() - BACKGROUND_AGENT_CLOCK_RETENTION_MS;
+    for (const [toolCallId, { started, finished }] of backgroundAgents) {
+      if (!started || !finished) continue;
+
+      const isActive = reportOccurrenceTime(started) > reportOccurrenceTime(finished);
+      const isRecentCompletion = reportOccurrenceTime(finished) > cutoff;
+      if (!isActive && !isRecentCompletion) backgroundAgents.delete(toolCallId);
+    }
+  }
+
+  /** @param {Record<string, unknown>} report */
+  function observe(report) {
+    const kind = stringValue(report.kind);
+    switch (kind) {
+      case "turn_started":
+      case "turn_ended":
+      case "went_idle":
+        lifecycle = newestReport(lifecycle, report);
+        break;
+      default:
+        break;
+    }
+
+    switch (kind) {
+      case "skill_invoked":
+        skill = newestReport(skill, report);
+        break;
+      case "intent_reported":
+        intent = newestReport(intent, report);
+        break;
+      case "title_reported":
+      case "title_bootstrap":
+        title = newestReport(title, report);
+        break;
+      case "user_prompt":
+        userMessage = newestReport(userMessage, report);
+        break;
+      case "assistant_message":
+        assistantMessage = newestReport(assistantMessage, report);
+        break;
+      case "awaiting_user_input":
+        awaitingUser = newestReport(awaitingUser, report);
+        break;
+      case "user_input_completed":
+        userInputCompleted = newestReport(userInputCompleted, report);
+        break;
+      case "usage_info":
+        usage = newestReport(usage, report);
+        break;
+      case "background_agent_started":
+      case "background_agent_finished": {
+        const toolCallId = stringValue(report.toolCallId);
+        if (!toolCallId) break;
+        const current = backgroundAgents.get(toolCallId) ?? {
+          started: null,
+          finished: null,
+        };
+        backgroundAgents.set(toolCallId, kind === "background_agent_started"
+          ? { ...current, started: newestReport(current.started, report) }
+          : { ...current, finished: newestReport(current.finished, report) });
+        break;
+      }
+      default:
+        break;
+    }
+
+    pruneBackgroundAgents();
+  }
+
+  function snapshot() {
+    pruneBackgroundAgents();
+    const reports = [
+      lifecycle,
+      skill,
+      intent,
+      title,
+      userMessage,
+      assistantMessage,
+      awaitingUser,
+      userInputCompleted,
+      usage,
+      ...[...backgroundAgents.values()].flatMap(({ started, finished }) => [
+        started,
+        finished,
+      ]),
+    ].filter((report) => report !== null);
+
+    return mergeReplayReports([], reports);
+  }
+
+  return { observe, snapshot };
+}
+
+/**
+ * @param {Record<string, unknown>[]} historical
+ * @param {Record<string, unknown>[]} current
+ */
+export function mergeReplayReports(historical, current) {
+  /** @type {Map<string, Record<string, unknown>>} */
+  const byEventId = new Map();
+  for (const report of [...historical, ...current]) {
+    const eventId = stringValue(report.eventId);
+    if (eventId) byEventId.set(eventId, report);
+  }
+
+  return [...byEventId.values()].sort(compareReportsByOccurrence);
 }

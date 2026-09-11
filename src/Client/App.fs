@@ -745,7 +745,11 @@ let update msg model =
             | Error _ -> EmbeddedTerminalCloseFailed)
             (fun _ -> EmbeddedTerminalCloseFailed)
     | EmbeddedTerminalCloseFailed ->
-        model, fetchEmbeddedTerminals worktreeApi
+        model,
+        Cmd.batch [
+            fetchEmbeddedTerminals worktreeApi
+            fetchWorktrees ()
+        ]
     | ToggleTerminalPane ->
         let isOpen = not model.TerminalPaneOpen
         { model with
@@ -768,7 +772,7 @@ let update msg model =
             EmbeddedTerminalViewStates =
                 model.EmbeddedTerminalViewStates
                 |> TerminalPane.reconcileViewStates snapshot },
-        Cmd.none
+        fetchWorktrees ()
     | OpenEditor path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 

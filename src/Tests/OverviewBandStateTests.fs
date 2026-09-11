@@ -22,7 +22,8 @@ let private reviewingWorktree =
         CodingTool = CodingToolStatus.Working
         CurrentSkill = Some "review"
         Sessions =
-            [ { Status = CodingToolStatus.Working
+            [ { InstanceId = SessionInstanceId "reviewing"
+                Status = CodingToolStatus.Working
                 Skill = Some "review"
                 ContextUsage = None } ] }
 

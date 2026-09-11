@@ -28,6 +28,9 @@ let log (context: string) (message: string) =
             writer.Write(line)
         with _ -> ())
 
+let logException (context: string) (message: string) (error: exn) =
+    log context $"{message}{Environment.NewLine}{error}"
+
 let timed (context: string) (label: string) (work: Async<'T>) =
     async {
         let sw = Diagnostics.Stopwatch.StartNew()

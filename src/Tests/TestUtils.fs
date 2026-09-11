@@ -6,10 +6,94 @@ open System.Globalization
 open System.IO
 open System.Net.Http
 open System.Runtime.InteropServices
+open System.Security.Cryptography
+open System.Text
 open System.Text.RegularExpressions
 open System.Threading.Tasks
 open NUnit.Framework
+open Server
 open Server.SessionActivity
+
+let syntheticProcessIdForSessionId (sessionId: string) =
+    sessionId
+    |> Seq.fold (fun value character ->
+        (value * 31 + int character) % 1_000_000) 10_000
+
+let syntheticProcessIdentityForProcessId processId =
+    ProcessIdentity.create processId (int64 processId * 1_000L + 1L)
+    |> Result.defaultWith invalidOp
+
+let syntheticProcessIdentityForSessionId sessionId =
+    sessionId
+    |> syntheticProcessIdForSessionId
+    |> syntheticProcessIdentityForProcessId
+
+let collisionResistantProcessIdentityForSessionId (sessionId: string) =
+    let hash =
+        sessionId
+        |> Encoding.UTF8.GetBytes
+        |> SHA256.HashData
+
+    let processId =
+        BitConverter.ToInt32(hash, 0)
+        |> fun value -> value &&& Int32.MaxValue
+        |> max 1
+
+    let startTicks =
+        BitConverter.ToInt64(hash, 8)
+        |> fun value -> value &&& Int64.MaxValue
+        |> max 1L
+
+    ProcessIdentity.create processId startTicks
+    |> Result.defaultWith invalidOp
+
+let fakeShutdownCapability paddingChar identity =
+    let processId, startTicks = ProcessIdentity.sortKey identity
+    let suffix = $"{processId:x8}{startTicks:x16}"
+    String(paddingChar, 43 - suffix.Length) + suffix
+
+let exactIdentityResolver identity =
+    ProcessIdentityResolver.create (fun processId ->
+        if processId = ProcessIdentity.processId identity then
+            Ok(Some identity)
+        else
+            Ok None)
+
+let bridgeRegistrationRequest
+    identity
+    worktreePath
+    injectUrl
+    sessionId
+    terminalSessionId
+    shutdownCapability
+    :
+    SessionBridge.RegistrationRequest =
+    { WorktreePath = worktreePath
+      InjectUrl = injectUrl
+      ShutdownUrl = "http://127.0.0.1:1/shutdown"
+      ShutdownCapability = shutdownCapability
+      SessionId = sessionId
+      ParentProcessId = ProcessIdentity.processId identity
+      TerminalSessionId = terminalSessionId }
+
+let registerExactSession
+    paddingChar
+    identity
+    worktreePath
+    injectUrl
+    sessionId
+    terminalSessionId
+    =
+    bridgeRegistrationRequest
+        identity
+        worktreePath
+        injectUrl
+        sessionId
+        terminalSessionId
+        (fakeShutdownCapability paddingChar identity)
+    |> SessionBridge.registerSession (exactIdentityResolver identity)
+    |> Result.defaultWith (fun failure ->
+        invalidOp $"registration failed: {failure}")
 
 /// Parse an ISO-8601 timestamp string as a DateTimeOffset using the invariant culture. Shared by the
 /// SessionActivity domain/store/service tests, which all build fixtures from literal timestamps.

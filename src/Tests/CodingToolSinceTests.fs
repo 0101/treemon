@@ -2,6 +2,7 @@ module Tests.CodingToolSinceTests
 
 open System
 open NUnit.Framework
+open Server
 open Server.GitWorktree
 open Server.RefreshScheduler
 open Server.SchedulerState
@@ -14,61 +15,110 @@ let private testRepoId = RepoId "TestRepo"
 let private makeWorktree path branch : WorktreeInfo =
     { Path = path; Head = "abc123"; Branch = Some branch }
 
-// The time-since-idle chip (WorktreeStatus.CodingToolSince) is stamped ONCE when a worktree's
-// collapsed coding-tool status enters Idle, FROZEN across the idle heartbeats that keep advancing
-// last_seen (so it reads time-in-category, not time-since-last-write), and MOVED (cleared, then
-// re-stamped) by a new Working turn. stampIdleSince is the pure core; the mailbox test drives the
-// real UpdateSessionStatus path end to end.
+// CodingToolSince is the transition time of the collapsed worktree status. Exact-instance
+// heartbeats and sibling updates preserve it while the aggregate status is unchanged.
 
-let private wtA = "C:/wt/a"
+let private wtA = Server.PathUtils.normalizePath "C:/wt/a"
+let private wtB = Server.PathUtils.normalizePath "C:/wt/b"
 
-let private storedWt (sid: string) (wt: string) (status: SessionLevelStatus) (seen: DateTimeOffset) : StoredStatus =
-    { SessionId = SessionId sid
+let private storedWt (sid: string) (wt: string) (status: SessionLevelStatus) (seen: DateTimeOffset) : StoredInstance =
+    { ProcessIdentity = TestUtils.syntheticProcessIdentityForSessionId sid
+      SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath wt
       Provider = CopilotCli
       Status = { emptyStatus with Status = status }
       UpdatedAt = seen
+      LifecycleAt = Some seen
       LastSeen = seen
-      ContextUsageAt = None }
+      ContextUsageAt = None
+      ClosedAt = None }
+
+let private postInstance (agent: MailboxProcessor<StateMsg>) (instance: StoredInstance) =
+    agent.Post(UpdateSessionInstance(instance, instance.LastSeen))
+
+/// The scheduler mailbox is a single writer, so a reply barrier is enough to observe every message
+/// posted before it.
+let private stateOf (agent: MailboxProcessor<StateMsg>) = agent.PostAndReply(GetState)
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type StampIdleSinceTests() =
+type GroupInstancesByWorktreeTests() =
+
+    [<Test>]
+    member _.``Grouping visits each exact instance once across a scale fixture``() =
+        let observedAt = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+        let worktreeCount = 128
+        let instancesPerWorktree = 4
+
+        let instances =
+            [ 1..worktreeCount ]
+            |> List.collect (fun worktreeIndex ->
+                let path =
+                    System.IO.Path.Combine(
+                        System.IO.Path.GetTempPath(),
+                        "treemon-scheduler-grouping",
+                        $"wt-{worktreeIndex}"
+                    )
+
+                [ 1..instancesPerWorktree ]
+                |> List.map (fun instanceIndex ->
+                    storedWt $"session-{worktreeIndex}-{instanceIndex}" path SessionLevelStatus.Idle observedAt))
+
+        let visited = System.Collections.Concurrent.ConcurrentQueue<ProcessIdentity>()
+
+        let grouped =
+            instances
+            |> Seq.map (fun instance ->
+                visited.Enqueue(instance.ProcessIdentity)
+                instance)
+            |> groupInstancesByWorktree
+
+        Assert.Multiple(fun () ->
+            Assert.That(visited.Count, Is.EqualTo(instances.Length), "grouping must enumerate the source once")
+            Assert.That(grouped.Count, Is.EqualTo(worktreeCount))
+            Assert.That(
+                grouped |> Map.forall (fun _ group -> List.length group = instancesPerWorktree),
+                Is.True))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CodingToolTransitionTests() =
 
     let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+    let firstIdle = updateCodingToolTransition t0 wtA Idle (Map.empty, Map.empty)
 
     [<Test>]
-    member _.``Entering Idle stamps the transition time``() =
-        let result = stampIdleSince t0 wtA Idle Map.empty
-        Assert.That(result |> Map.tryFind wtA, Is.EqualTo(Some t0))
+    member _.``First observed status stamps the transition time``() =
+        let statuses, since = firstIdle
+
+        Assert.Multiple(fun () ->
+            Assert.That(statuses |> Map.tryFind wtA, Is.EqualTo(Some Idle))
+            Assert.That(since |> Map.tryFind wtA, Is.EqualTo(Some t0)))
 
     [<Test>]
-    member _.``A second Idle poll freezes the original stamp``() =
-        let stamped = stampIdleSince t0 wtA Idle Map.empty
-        // A later idle heartbeat (last_seen advanced) must NOT move the stamp.
-        let frozen = stampIdleSince (t0 + TimeSpan.FromSeconds 60.0) wtA Idle stamped
-        Assert.That(frozen |> Map.tryFind wtA, Is.EqualTo(Some t0))
+    member _.``Repeated status preserves the original transition time``() =
+        let _, since = updateCodingToolTransition (t0.AddMinutes 1.0) wtA Idle firstIdle
+        Assert.That(since |> Map.tryFind wtA, Is.EqualTo(Some t0))
 
     [<Test>]
-    member _.``Leaving Idle for Working clears the stamp``() =
-        let stamped = stampIdleSince t0 wtA Idle Map.empty
-        let cleared = stampIdleSince (t0 + TimeSpan.FromSeconds 60.0) wtA Working stamped
-        Assert.That(cleared |> Map.containsKey wtA, Is.False)
+    member _.``Status change moves the transition time``() =
+        let changedAt = t0.AddMinutes 1.0
+        let statuses, since = updateCodingToolTransition changedAt wtA Working firstIdle
+
+        Assert.Multiple(fun () ->
+            Assert.That(statuses |> Map.tryFind wtA, Is.EqualTo(Some Working))
+            Assert.That(since |> Map.tryFind wtA, Is.EqualTo(Some changedAt)))
 
     [<Test>]
-    member _.``WaitingForUser and NoSession both clear the stamp``() =
-        let stamped = stampIdleSince t0 wtA Idle Map.empty
-        Assert.That(stampIdleSince t0 wtA WaitingForUser stamped |> Map.containsKey wtA, Is.False)
-        Assert.That(stampIdleSince t0 wtA NoSession stamped |> Map.containsKey wtA, Is.False)
+    member _.``NoSession removes the transition``() =
+        let statuses, since = updateCodingToolTransition (t0.AddMinutes 1.0) wtA NoSession firstIdle
 
-    [<Test>]
-    member _.``Stamps for different worktrees are independent``() =
-        let m = stampIdleSince t0 wtA Idle Map.empty
-        let m2 = stampIdleSince (t0 + TimeSpan.FromMinutes 1.0) "C:/wt/b" Idle m
-        Assert.That(m2 |> Map.tryFind wtA, Is.EqualTo(Some t0))
-        Assert.That(m2 |> Map.tryFind "C:/wt/b", Is.EqualTo(Some(t0 + TimeSpan.FromMinutes 1.0)))
+        Assert.Multiple(fun () ->
+            Assert.That(statuses |> Map.containsKey wtA, Is.False)
+            Assert.That(since |> Map.containsKey wtA, Is.False))
 
 
 [<TestFixture>]
@@ -77,48 +127,91 @@ type StampIdleSinceTests() =
 type CodingToolSinceByWorktreeTests() =
 
     let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
-
     let sinceFor (state: DashboardState) = state.CodingToolSinceByWorktree |> Map.tryFind wtA
 
     [<Test>]
-    member _.``CodingToolSince is stamped on entering Idle, frozen across idle heartbeats, and moved by a new Working turn``() =
-        async {
-            let agent = createAgent ()
-            // Working — no idle stamp yet.
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working t0))
-            let! working = agent.PostAndAsyncReply(GetState)
+    member _.``CodingToolSince moves only when the collapsed status changes``() =
+        let agent = createAgent ()
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Working t0)
+        let working = stateOf agent
 
-            // turn_ended → Idle: stamp the turn-end time (t0 + 30s).
-            let idledAt = t0 + TimeSpan.FromSeconds 30.0
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle idledAt))
-            let! entered = agent.PostAndAsyncReply(GetState)
+        let idledAt = t0 + TimeSpan.FromSeconds 30.0
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle idledAt)
+        let entered = stateOf agent
 
-            // Two idle heartbeats 60s/120s later keep advancing last_seen — the stamp must NOT move.
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle (idledAt + TimeSpan.FromSeconds 60.0)))
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle (idledAt + TimeSpan.FromSeconds 120.0)))
-            let! frozen = agent.PostAndAsyncReply(GetState)
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle (idledAt + TimeSpan.FromSeconds 60.0))
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle (idledAt + TimeSpan.FromSeconds 120.0))
+        let frozen = stateOf agent
 
-            // A new Working turn moves the chip off the idle stamp.
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working (idledAt + TimeSpan.FromSeconds 180.0)))
-            let! resumed = agent.PostAndAsyncReply(GetState)
+        let resumedAt = idledAt + TimeSpan.FromSeconds 180.0
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Working resumedAt)
+        let resumed = stateOf agent
 
-            // Idle again → a NEW stamp at the new turn-end time.
-            let reidledAt = idledAt + TimeSpan.FromSeconds 240.0
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle reidledAt))
-            let! reidled = agent.PostAndAsyncReply(GetState)
+        let reidledAt = idledAt + TimeSpan.FromSeconds 240.0
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle reidledAt)
+        let reidled = stateOf agent
 
-            Assert.That(sinceFor working, Is.EqualTo None, "no idle stamp while Working")
+        Assert.Multiple(fun () ->
+            Assert.That(sinceFor working, Is.EqualTo(Some t0))
             Assert.That(sinceFor entered, Is.EqualTo(Some idledAt), "stamped at the Idle transition")
             Assert.That(sinceFor frozen, Is.EqualTo(Some idledAt), "frozen across idle heartbeats")
-            Assert.That(sinceFor resumed, Is.EqualTo None, "cleared by a new Working turn")
-            Assert.That(sinceFor reidled, Is.EqualTo(Some reidledAt), "re-stamped at the new Idle transition")
-        }
-        |> Async.RunSynchronously
+            Assert.That(sinceFor resumed, Is.EqualTo(Some resumedAt))
+            Assert.That(sinceFor reidled, Is.EqualTo(Some reidledAt), "re-stamped at the new Idle transition"))
+
+    [<Test>]
+    member _.``An idle heartbeat after the prior openness window starts a new transition``() =
+        let agent = createAgent ()
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle t0)
+
+        let representedAt = t0 + openWindow + TimeSpan.FromSeconds 1.0
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle representedAt)
+
+        Assert.That(
+            sinceFor (stateOf agent),
+            Is.EqualTo(Some representedAt),
+            "the previous exact instance was no longer open at this observation"
+        )
+
+    [<Test>]
+    member _.``An unrelated heartbeat expires every worktree at the exact openness boundary``() =
+        let agent = createAgent ()
+        postInstance agent (storedWt "a" wtA SessionLevelStatus.Idle t0)
+        postInstance agent (storedWt "b" wtB SessionLevelStatus.Idle t0)
+
+        let boundary = t0 + openWindow
+        postInstance agent (storedWt "b" wtB SessionLevelStatus.Idle boundary)
+        let state = stateOf agent
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                state.CodingToolStatusByWorktree |> Map.containsKey wtA,
+                Is.False,
+                "the untouched worktree reaches NoSession at the strict open-window boundary")
+            Assert.That(
+                state.CodingToolSinceByWorktree |> Map.containsKey wtA,
+                Is.False,
+                "the untouched worktree's transition stamp is removed")
+            Assert.That(state.CodingToolStatusByWorktree |> Map.tryFind wtB, Is.EqualTo(Some Idle))
+            Assert.That(
+                state.CodingToolSinceByWorktree |> Map.tryFind wtB,
+                Is.EqualTo(Some boundary),
+                "the refreshed worktree starts a new open transition"))
+
+    [<Test>]
+    member _.``An idle sibling update does not reset a worktree that remains Working``() =
+        let agent = createAgent ()
+        postInstance agent (storedWt "working" wtA SessionLevelStatus.Working t0)
+        postInstance agent (storedWt "idle" wtA SessionLevelStatus.Idle (t0.AddSeconds 10.0))
+        let state = stateOf agent
+
+        Assert.Multiple(fun () ->
+            Assert.That(state.CodingToolStatusByWorktree |> Map.tryFind wtA, Is.EqualTo(Some Working))
+            Assert.That(sinceFor state, Is.EqualTo(Some t0)))
 
 
 // The display debounce (SessionActivity.debounceIdle, applied on the card read path) measures its
 // Working→Idle hold from the SAME CodingToolSinceByWorktree stamp the scheduler freezes above. The
-// DebounceIdleTests unit tests feed idleSince directly; these drive the real UpdateSessionStatus path
+// DebounceIdleTests unit tests feed idleSince directly; these drive the real exact-instance path
 // so a change to the scheduler's freeze/reset policy surfaces here instead of silently breaking the dot.
 
 [<TestFixture>]
@@ -133,18 +226,18 @@ type DebounceIdleSchedulerIntegrationTests() =
 
     [<Test>]
     member _.``The scheduler's frozen stamp drives debounceIdle: held Working within the window, Idle after, measured from the transition not the heartbeat``() =
-        async {
-            let agent = createAgent ()
-            let idledAt = t0 + TimeSpan.FromSeconds 30.0
+        let agent = createAgent ()
+        let idledAt = t0 + TimeSpan.FromSeconds 30.0
 
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working t0))
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle idledAt))
-            let! entered = agent.PostAndAsyncReply(GetState)
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Working t0)
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle idledAt)
+        let entered = stateOf agent
 
-            // An idle heartbeat 60s later advances last_seen, but the stamp stays frozen at idledAt.
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle (idledAt + TimeSpan.FromSeconds 60.0)))
-            let! afterHeartbeat = agent.PostAndAsyncReply(GetState)
+        // An idle heartbeat 60s later advances last_seen, but the stamp stays frozen at idledAt.
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle (idledAt + TimeSpan.FromSeconds 60.0))
+        let afterHeartbeat = stateOf agent
 
+        Assert.Multiple(fun () ->
             Assert.That(
                 displayAt (idledAt + TimeSpan.FromSeconds 3.0) entered,
                 Is.EqualTo Working,
@@ -159,26 +252,7 @@ type DebounceIdleSchedulerIntegrationTests() =
             Assert.That(
                 displayAt (idledAt + TimeSpan.FromSeconds 65.0) afterHeartbeat,
                 Is.EqualTo Idle,
-                "hold is measured from the transition, not the idle heartbeat")
-        }
-        |> Async.RunSynchronously
-
-    [<Test>]
-    member _.``A new Working turn clears the stamp so debounceIdle stops holding``() =
-        async {
-            let agent = createAgent ()
-            let idledAt = t0 + TimeSpan.FromSeconds 30.0
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle idledAt))
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working (idledAt + TimeSpan.FromSeconds 5.0)))
-            let! resumed = agent.PostAndAsyncReply(GetState)
-
-            Assert.That(sinceFor resumed, Is.EqualTo None, "Working clears the stamp")
-            Assert.That(
-                displayAt (idledAt + TimeSpan.FromSeconds 6.0) resumed,
-                Is.EqualTo Idle,
-                "no stamp after Working → a later real Idle falls straight through")
-        }
-        |> Async.RunSynchronously
+                "hold is measured from the transition, not the idle heartbeat"))
 
 
 // WorktreeApi.assembleFromState is where the frozen stamp + debounceIdle are actually WIRED onto the
@@ -196,10 +270,12 @@ type AssembleFromStateDebounceTests() =
     let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
 
     // Assemble the card for wtA at `displayNow`, deriving pushByWorktree from the scheduler state the
-    // same way the getWorktrees endpoint does (collapseByWorktree over the live session statuses).
+    // same way the getWorktrees endpoint does (collapseByWorktree over exact instances).
     let assembleAt (displayNow: DateTimeOffset) (state: DashboardState) =
         let pushByWorktree =
-            Server.CodingToolStatus.collapseByWorktree displayNow (state.SessionStatuses |> Map.values)
+            state.SessionInstances
+            |> Map.values
+            |> Server.CodingToolStatus.collapseByWorktree displayNow Map.empty
 
         Server.WorktreeApi.assembleFromState
             displayNow
@@ -212,32 +288,39 @@ type AssembleFromStateDebounceTests() =
             (makeWorktree wtA "feat")
 
     [<Test>]
+    member _.``assembleFromState exposes the transition time for a Working status``() =
+        let agent = createAgent ()
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Working t0)
+        let worktree = assembleAt (t0.AddSeconds 1.0) (stateOf agent)
+
+        Assert.Multiple(fun () ->
+            Assert.That(worktree.CodingTool, Is.EqualTo Working)
+            Assert.That(worktree.CodingToolSince, Is.EqualTo(Some t0)))
+
+    [<Test>]
     member _.``assembleFromState holds CodingTool Working (no chip) inside the window and surfaces Idle (with the frozen chip) after``() =
-        async {
-            let agent = createAgent ()
-            let idledAt = t0 + TimeSpan.FromSeconds 30.0
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working t0))
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle idledAt))
-            let! state = agent.PostAndAsyncReply(GetState)
+        let agent = createAgent ()
+        let idledAt = t0 + TimeSpan.FromSeconds 30.0
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Working t0)
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle idledAt)
+        let state = stateOf agent
 
-            let held = assembleAt (idledAt + TimeSpan.FromSeconds 3.0) state
-            let settled = assembleAt (idledAt + idleDebounceWindow + TimeSpan.FromSeconds 1.0) state
+        let held = assembleAt (idledAt + TimeSpan.FromSeconds 3.0) state
+        let settled = assembleAt (idledAt + idleDebounceWindow + TimeSpan.FromSeconds 1.0) state
 
+        Assert.Multiple(fun () ->
             Assert.That(held.CodingTool, Is.EqualTo Working, "card holds Working within the debounce window")
             Assert.That(held.CodingToolSince, Is.EqualTo None, "no time-since-idle chip while the dot is held Working")
             Assert.That(settled.CodingTool, Is.EqualTo Idle, "real Idle surfaces on the card once the window elapses")
             Assert.That(
                 settled.CodingToolSince,
                 Is.EqualTo(Some idledAt),
-                "chip surfaces the frozen transition once Idle is displayed")
-        }
-        |> Async.RunSynchronously
+                "chip surfaces the frozen transition once Idle is displayed"))
 
 
-// F10/C-13: CodingToolSinceByWorktree lives on DashboardState (GLOBAL), so — unlike SessionStatuses
+// CodingToolSinceByWorktree lives on DashboardState (GLOBAL), so — unlike SessionInstances
 // (evicted) or the per-repo data (removeWorktreeData) — it must be pruned when a worktree leaves.
-// Otherwise a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince freezes
-// existing keys), overstating the chip on reuse.
+// Otherwise a removed-then-recreated path inherits a stale transition stamp.
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -249,117 +332,104 @@ type CodingToolSincePruningTests() =
 
     [<Test>]
     member _.``RemoveWorktree drops the worktree's time-since-idle stamp``() =
-        async {
-            let agent = createAgent ()
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle t0))
-            let! stamped = agent.PostAndAsyncReply(GetState)
+        let agent = createAgent ()
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle t0)
+        let stamped = stateOf agent
 
-            agent.Post(RemoveWorktree(testRepoId, wtA))
-            let! pruned = agent.PostAndAsyncReply(GetState)
+        agent.Post(RemoveWorktree(testRepoId, wtA))
+        let pruned = stateOf agent
 
+        Assert.Multiple(fun () ->
             Assert.That(sinceFor stamped, Is.EqualTo(Some t0), "stamped on entering Idle")
-            Assert.That(sinceFor pruned, Is.EqualTo None, "stamp pruned on worktree removal")
-        }
-        |> Async.RunSynchronously
+            Assert.That(sinceFor pruned, Is.EqualTo None, "stamp pruned on worktree removal"))
 
     [<Test>]
     member _.``UpdateWorktreeList prunes the stamp for a worktree dropped from the list``() =
-        async {
-            let agent = createAgent ()
-            agent.Post(UpdateWorktreeList(testRepoId, [ makeWorktree wtA "feat" ]))
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle t0))
-            let! stamped = agent.PostAndAsyncReply(GetState)
+        let agent = createAgent ()
+        agent.Post(UpdateWorktreeList(testRepoId, [ makeWorktree wtA "feat" ]))
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle t0)
+        let stamped = stateOf agent
 
-            // The next discovery no longer lists wtA (removed) → its global stamp must be pruned.
-            agent.Post(UpdateWorktreeList(testRepoId, []))
-            let! pruned = agent.PostAndAsyncReply(GetState)
+        // The next discovery no longer lists wtA (removed) → its global stamp must be pruned.
+        agent.Post(UpdateWorktreeList(testRepoId, []))
+        let pruned = stateOf agent
 
+        Assert.Multiple(fun () ->
             Assert.That(sinceFor stamped, Is.EqualTo(Some t0))
-            Assert.That(sinceFor pruned, Is.EqualTo None, "stamp pruned when the worktree leaves the list")
-        }
-        |> Async.RunSynchronously
+            Assert.That(sinceFor pruned, Is.EqualTo None, "stamp pruned when the worktree leaves the list"))
 
     [<Test>]
     member _.``A reused worktree path gets a FRESH idle stamp, not the pre-removal frozen one``() =
-        async {
-            let agent = createAgent ()
-            // Worktree goes idle, is removed (pruning the stamp), then the path is reused by a NEW
-            // session that also goes idle 10 min later. Without the prune, stampIdleSince would freeze
-            // the old t0 stamp and the chip would overstate the reused session's idle time.
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle t0))
-            agent.Post(RemoveWorktree(testRepoId, wtA))
+        let agent = createAgent ()
+        // Worktree goes idle, is removed (pruning the stamp), then the path is reused by a NEW
+        // exact instance that also goes idle 10 min later.
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle t0)
+        agent.Post(RemoveWorktree(testRepoId, wtA))
 
-            let reusedAt = t0 + TimeSpan.FromMinutes 10.0
-            agent.Post(UpdateSessionStatus(storedWt "s2" wtA SessionLevelStatus.Idle reusedAt))
-            let! reused = agent.PostAndAsyncReply(GetState)
+        let reusedAt = t0 + TimeSpan.FromMinutes 10.0
+        postInstance agent (storedWt "s2" wtA SessionLevelStatus.Idle reusedAt)
 
-            Assert.That(sinceFor reused, Is.EqualTo(Some reusedAt), "fresh stamp after reuse, not the frozen t0")
-        }
-        |> Async.RunSynchronously
+        Assert.That(
+            sinceFor (stateOf agent),
+            Is.EqualTo(Some reusedAt),
+            "fresh stamp after reuse, not the frozen t0"
+        )
 
 
-// F11/C-14: on restart the store replays live statuses OLDEST-first (LoadLiveStatuses ORDER BY
-// last_seen). Feeding them one-by-one through UpdateSessionStatus lets the oldest idle row stamp and
-// FREEZE the chip, locking in a stale timestamp instead of the current open session's — the chip then
-// OVERSTATES time-since-idle. SeedSessionStatuses seeds in one batch and stamps each worktree from its
-// NEWEST session (the accepted "resets on restart" behaviour), WITHOUT reversing the seed order.
+// Restart seeds the exact collection in one batch and stamps every currently observed collapsed
+// status at the rebuild barrier.
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type SeedSessionStatusesTests() =
+type SeedSessionInstancesTests() =
 
     let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
     let sinceFor (state: DashboardState) = state.CodingToolSinceByWorktree |> Map.tryFind wtA
 
     [<Test>]
-    member _.``Seeding stamps time-since-idle from the newest per-worktree session, not the oldest replayed``() =
-        async {
-            let agent = createAgent ()
-            // Oldest-first, as LoadLiveStatuses returns: a long-stale idle session, then the current open
-            // idle session 90 min later — both within the 2h idle window (so both survive eviction).
-            let staleAt = t0
-            let currentAt = t0 + TimeSpan.FromMinutes 90.0
-            agent.Post(
-                SeedSessionStatuses
-                    [ storedWt "stale" wtA SessionLevelStatus.Idle staleAt
-                      storedWt "current" wtA SessionLevelStatus.Idle currentAt ])
-            let! seeded = agent.PostAndAsyncReply(GetState)
+    member _.``Seeding stamps the collapsed status at the rebuild time``() =
+        let agent = createAgent ()
+        let currentAt = t0 + TimeSpan.FromMinutes 90.0
+        let rebuiltAt = currentAt + TimeSpan.FromSeconds 5.0
 
+        agent.Post(
+            SeedSessionInstances(
+                rebuiltAt,
+                [ storedWt "stale" wtA SessionLevelStatus.Idle t0
+                  storedWt "current" wtA SessionLevelStatus.Idle currentAt ]
+            )
+        )
+
+        Assert.That(sinceFor (stateOf agent), Is.EqualTo(Some rebuiltAt))
+
+    [<Test>]
+    member _.``Seeding a Working worktree records its current transition``() =
+        let agent = createAgent ()
+        agent.Post(SeedSessionInstances(t0, [ storedWt "s1" wtA SessionLevelStatus.Working t0 ]))
+        Assert.That(sinceFor (stateOf agent), Is.EqualTo(Some t0))
+
+    [<Test>]
+    member _.``Seeding preserves every exact instance including duplicate durable session ids``() =
+        let agent = createAgent ()
+        let currentAt = t0 + TimeSpan.FromMinutes 90.0
+        let first = storedWt "shared" wtA SessionLevelStatus.Idle t0
+
+        let second =
+            { storedWt "shared" wtA SessionLevelStatus.Idle currentAt with
+                ProcessIdentity = TestUtils.syntheticProcessIdentityForSessionId "shared-second" }
+
+        agent.Post(SeedSessionInstances(currentAt, [ first; second ]))
+        let seeded = stateOf agent
+
+        Assert.Multiple(fun () ->
+            Assert.That(seeded.SessionInstances.Count, Is.EqualTo 2)
             Assert.That(
-                sinceFor seeded,
-                Is.EqualTo(Some currentAt),
-                "chip stamped from the newest (current) session, not the stale oldest-replayed one")
-        }
-        |> Async.RunSynchronously
-
-    [<Test>]
-    member _.``Seeding a Working worktree leaves no idle stamp``() =
-        async {
-            let agent = createAgent ()
-            agent.Post(SeedSessionStatuses [ storedWt "s1" wtA SessionLevelStatus.Working t0 ])
-            let! seeded = agent.PostAndAsyncReply(GetState)
-
-            Assert.That(sinceFor seeded, Is.EqualTo None)
-        }
-        |> Async.RunSynchronously
-
-    [<Test>]
-    member _.``Seeding preserves the full live status set (same as replaying each row)``() =
-        async {
-            let agent = createAgent ()
-            let staleAt = t0
-            let currentAt = t0 + TimeSpan.FromMinutes 90.0
-            agent.Post(
-                SeedSessionStatuses
-                    [ storedWt "stale" wtA SessionLevelStatus.Idle staleAt
-                      storedWt "current" wtA SessionLevelStatus.Idle currentAt ])
-            let! seeded = agent.PostAndAsyncReply(GetState)
-
-            let ids = seeded.SessionStatuses |> Map.keys |> Seq.map SessionId.value |> Set.ofSeq
-            Assert.That(ids, Is.EqualTo(Set.ofList [ "stale"; "current" ]))
-        }
-        |> Async.RunSynchronously
+                seeded.SessionInstances
+                |> Map.values
+                |> Seq.map (_.SessionId >> SessionId.value)
+                |> Seq.toList,
+                Is.EqualTo([ "shared"; "shared" ])))
 
 
 // The status-overview "Agent" row (category CodingToolRefresh) has no poll under the push model, so
@@ -377,63 +447,55 @@ type CodingToolPushRowTests() =
 
     [<Test>]
     member _.``A push stamps the Agent row with the worktree and push time as a success``() =
-        async {
-            let agent = createAgent ()
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working t0))
-            let! state = agent.PostAndAsyncReply(GetState)
+        let agent = createAgent ()
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Working t0)
 
-            match pushRow state with
-            | Some evt ->
+        match pushRow (stateOf agent) with
+        | Some evt ->
+            Assert.Multiple(fun () ->
                 Assert.That(evt.Message, Is.EqualTo wtA, "row names the pushing worktree")
                 Assert.That(evt.Timestamp, Is.EqualTo t0, "row timestamped at the push instant")
                 Assert.That(evt.Status, Is.EqualTo(Some StepStatus.Succeeded))
-                Assert.That(evt.Duration, Is.EqualTo None, "a push has no poll duration")
-            | None -> Assert.Fail "expected a CodingToolRefresh row after a push"
-        }
-        |> Async.RunSynchronously
+                Assert.That(evt.Duration, Is.EqualTo None, "a push has no poll duration"))
+        | None -> Assert.Fail "expected a CodingToolRefresh row after a push"
 
     [<Test>]
     member _.``The Agent row advances to the most recent push (any worktree)``() =
-        async {
-            let agent = createAgent ()
-            let wtB = "C:/wt/b"
-            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle t0))
-            agent.Post(UpdateSessionStatus(storedWt "s2" wtB SessionLevelStatus.Working (t0 + TimeSpan.FromSeconds 30.0)))
-            let! state = agent.PostAndAsyncReply(GetState)
+        let agent = createAgent ()
+        let pushedAt = t0 + TimeSpan.FromSeconds 30.0
+        postInstance agent (storedWt "s1" wtA SessionLevelStatus.Idle t0)
+        postInstance agent (storedWt "s2" wtB SessionLevelStatus.Working pushedAt)
 
-            match pushRow state with
-            | Some evt ->
+        match pushRow (stateOf agent) with
+        | Some evt ->
+            Assert.Multiple(fun () ->
                 Assert.That(evt.Message, Is.EqualTo wtB)
-                Assert.That(evt.Timestamp, Is.EqualTo(t0 + TimeSpan.FromSeconds 30.0))
-            | None -> Assert.Fail "expected a CodingToolRefresh row"
-        }
-        |> Async.RunSynchronously
+                Assert.That(evt.Timestamp, Is.EqualTo pushedAt))
+        | None -> Assert.Fail "expected a CodingToolRefresh row"
 
     [<Test>]
     member _.``Restart seeding primes the Agent row from the newest known session``() =
-        async {
-            let agent = createAgent ()
-            agent.Post(
-                SeedSessionStatuses
-                    [ storedWt "stale" wtA SessionLevelStatus.Idle t0
-                      storedWt "current" wtA SessionLevelStatus.Idle (t0 + TimeSpan.FromMinutes 90.0) ])
-            let! state = agent.PostAndAsyncReply(GetState)
+        let agent = createAgent ()
+        let newestAt = t0 + TimeSpan.FromMinutes 90.0
 
-            match pushRow state with
-            | Some evt ->
+        agent.Post(
+            SeedSessionInstances(
+                newestAt,
+                [ storedWt "stale" wtA SessionLevelStatus.Idle t0
+                  storedWt "current" wtA SessionLevelStatus.Idle newestAt ]
+            )
+        )
+
+        match pushRow (stateOf agent) with
+        | Some evt ->
+            Assert.Multiple(fun () ->
                 Assert.That(evt.Message, Is.EqualTo wtA)
-                Assert.That(evt.Timestamp, Is.EqualTo(t0 + TimeSpan.FromMinutes 90.0), "newest session, not oldest replayed")
-            | None -> Assert.Fail "expected the Agent row primed on restart seed"
-        }
-        |> Async.RunSynchronously
+                Assert.That(evt.Timestamp, Is.EqualTo newestAt, "newest session, not oldest replayed"))
+        | None -> Assert.Fail "expected the Agent row primed on restart seed"
 
     [<Test>]
     member _.``Seeding an empty set leaves the Agent row untouched (still pending)``() =
-        async {
-            let agent = createAgent ()
-            agent.Post(SeedSessionStatuses [])
-            let! state = agent.PostAndAsyncReply(GetState)
+        let agent = createAgent ()
+        agent.Post(SeedSessionInstances(t0, []))
 
-            Assert.That(pushRow state, Is.EqualTo None, "no sessions → no push row, row stays pending")
-        }
-        |> Async.RunSynchronously
+        Assert.That(pushRow (stateOf agent), Is.EqualTo None, "no sessions → no push row, row stays pending")

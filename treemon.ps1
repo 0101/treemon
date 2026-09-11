@@ -985,12 +985,12 @@ function Start-DualProcess(
     $hadStateDirOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_STATE_DIR
     $previousStateDirOverride = $env:TREEMON_TERMINAL_HOST_STATE_DIR
     $env:TREEMON_TERMINAL_HOST_STATE_DIR = $devTerminalHostStateDirectory
-    # The session-status reporting extension (src/Extension/reporting) only reads TREEMON_PORTS /
-    # TREEMON_PORT, defaulting to production's 5000. Without this, every embedded-terminal session
+    # The session-status reporting extension (src/Extension/reporting) only reads TREEMON_PORT,
+    # defaulting to production's 5000. Without this, every embedded-terminal session
     # started under dev/demo would silently report its activity to production instead of $devApiPort.
-    $hadPortsOverride = Test-Path Env:\TREEMON_PORTS
-    $previousPortsOverride = $env:TREEMON_PORTS
-    $env:TREEMON_PORTS = $devApiPort
+    $hadReportingPortOverride = Test-Path Env:\TREEMON_PORT
+    $previousReportingPortOverride = $env:TREEMON_PORT
+    $env:TREEMON_PORT = $devApiPort
 
     $serverProcess = $null
     $viteProcess = $null
@@ -1044,10 +1044,10 @@ function Start-DualProcess(
         } else {
             Remove-Item Env:\TREEMON_TERMINAL_HOST_STATE_DIR -ErrorAction SilentlyContinue
         }
-        if ($hadPortsOverride) {
-            $env:TREEMON_PORTS = $previousPortsOverride
+        if ($hadReportingPortOverride) {
+            $env:TREEMON_PORT = $previousReportingPortOverride
         } else {
-            Remove-Item Env:\TREEMON_PORTS -ErrorAction SilentlyContinue
+            Remove-Item Env:\TREEMON_PORT -ErrorAction SilentlyContinue
         }
 
         Write-Host "$ModeName mode stopped" -ForegroundColor Green
@@ -1152,13 +1152,21 @@ function Install-Skill {
     }
 }
 
+function Get-CopilotConfigDirectory {
+    if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
+        return [IO.Path]::GetFullPath($env:COPILOT_HOME)
+    }
+
+    return [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".copilot"))
+}
+
 function Install-CopilotExtension(
     [string]$SrcDir,
     [string]$DestName,
     [string]$FriendlyName,
     [string[]]$RequiredFiles
 ) {
-    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
+    $dest = Join-Path (Get-CopilotConfigDirectory) "extensions" $DestName
     if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
     Get-ChildItem -Path $SrcDir -Filter "*.mjs" -File |
         Copy-Item -Destination $dest -Force
@@ -1206,8 +1214,8 @@ function Install-ReportingExtension {
     # Phase 1 of the push status model: the passive, reporting-only extension. Installed ALONGSIDE
     # canvas-bridge (a separate extension dir), never replacing it — reporting registers no canvas
     # and no tools, so both load per session with no canvas_take_ownership collision. It forwards
-    # session-activity events to POST /api/session/activity; set TREEMON_PORTS (comma-separated) to
-    # fan out to several Treemon instances (side-by-side validation), else it uses TREEMON_PORT/5000.
+    # session-activity events to POST /api/session/activity on the single endpoint named by
+    # TREEMON_PORT, defaulting to production's 5000.
     $src = Join-Path $PSScriptRoot "src" "Extension" "reporting"
     Install-CopilotExtension $src "treemon-reporting" "Reporting extension" @("package.json")
 }

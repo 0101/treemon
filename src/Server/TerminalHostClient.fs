@@ -325,7 +325,7 @@ let private authoritativeRelist action lastRegistry config manifest requestResul
     }
 
 let internal waitForHostExit config manifest =
-    let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
+    let deadline = DateTimeOffset.UtcNow + config.ProcessExitTimeout
 
     let rec wait () =
         async {
@@ -335,7 +335,7 @@ let internal waitForHostExit config manifest =
             | Ok true when DateTimeOffset.UtcNow < deadline ->
                 do! Async.Sleep(probeDelayMilliseconds config)
                 return! wait ()
-            | Ok true -> return Error $"TerminalHost PID {manifest.Pid} did not exit within {config.StartupTimeout.TotalSeconds:g} seconds"
+            | Ok true -> return Error $"TerminalHost PID {manifest.Pid} did not exit within {config.ProcessExitTimeout.TotalSeconds:g} seconds"
         }
 
     wait ()
@@ -422,7 +422,19 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
                     return Error "Could not submit the terminal command"
     }
 
-let internal defaultConfig allowedOrigins = TerminalHostProcess.defaultConfig allowedOrigins sendTerminalCommandDefault
+let internal defaultConfigWithProcessIdentityResolver
+    processIdentityResolver
+    allowedOrigins
+    =
+    TerminalHostProcess.defaultConfigWithProcessIdentityResolver
+        processIdentityResolver
+        allowedOrigins
+        sendTerminalCommandDefault
+
+let internal defaultConfig allowedOrigins =
+    TerminalHostProcess.defaultConfig
+        allowedOrigins
+        sendTerminalCommandDefault
 
 let private preflightIncompatibleHost config manifest incompatibility =
     async {
@@ -497,6 +509,13 @@ let internal knownHostIsStillLive config = function
     | None -> Ok false
     | Some host -> processIdentityMatches config host
 
+let internal validateMissingHostGone config lastHost =
+    match knownHostIsStillLive config lastHost with
+    | Ok false -> Ok()
+    | Ok true ->
+        Error "The TerminalHost discovery manifest disappeared while the exact recorded host is still running"
+    | Error error -> Error error
+
 let private launchAndDiscover config =
     asyncResult {
         do! startHostProcess config
@@ -511,11 +530,9 @@ let internal ensureHost config lastHost =
         | IncompatibleHost(_, error)
         | UnusableHost error -> return Error error
         | MissingHost ->
-            match knownHostIsStillLive config lastHost with
+            match validateMissingHostGone config lastHost with
             | Error error -> return Error error
-            | Ok true ->
-                return Error "The TerminalHost discovery manifest disappeared while the exact recorded host is still running"
-            | Ok false -> return! launchAndDiscover config
+            | Ok() -> return! launchAndDiscover config
     }
 
 let internal startTerminalOnHost (config: Config) (manifest: DiscoveryManifest) (path: string) =
@@ -574,26 +591,4 @@ let internal closeTerminalOnHost config manifest sessionId =
                             | Ok _ -> "TerminalHost still lists the terminal after its close request"
 
                         return Error(MutationRejected(after, error))
-    }
-
-let internal closeTerminalsForWorktreeOnHost config manifest path =
-    async {
-        match! authoritativeRegistry config manifest with
-        | Error error -> return Error error
-        | Ok before ->
-            let terminalIds =
-                before.Terminals
-                |> List.filter (fun terminal -> samePath terminal.WorktreePath path)
-                |> List.map _.SessionId
-
-            let rec closeAll latest = function
-                | [] -> async.Return(Ok latest)
-                | sessionId :: remaining ->
-                    async {
-                        match! closeTerminalOnHost config manifest sessionId with
-                        | Error error -> return Error error
-                        | Ok after -> return! closeAll after remaining
-                    }
-
-            return! closeAll before terminalIds
     }

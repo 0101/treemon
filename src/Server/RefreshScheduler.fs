@@ -6,6 +6,7 @@ open System.IO
 open System.Threading
 open System.Threading.Tasks
 open Shared
+open Server.SessionActivity
 open Server.SchedulerState
 
 type SchedulerServices =
@@ -116,7 +117,11 @@ let internal autoSyncDependencies
         fun path ->
             async {
                 let! state = agent.PostAndAsyncReply(GetState)
-                return AutoSync.readOwnership activityStore (state.SessionStatuses |> Map.values) path
+                return
+                    AutoSync.readOwnership
+                        activityStore
+                        (state.SessionInstances |> Map.values)
+                        path
             }
       TryBeginOperation =
         fun path -> agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncOperation(path, reply))
@@ -665,14 +670,18 @@ module CanvasWatchers =
     /// Fallback attribution target for a worktree's scanner. Explicit `/api/canvas/attribute`
     /// declarations are the primary attribution path; the scanner only fills the gap for docs
     /// with no declared owner, and only when it can do so *unambiguously* — i.e. exactly one
-    /// session is registered for the worktree. Zero or many registered sessions (or a single
-    /// anonymous `SessionId = None` registration) leave the doc unowned. This replaces the
-    /// previous last-registered attribution (`getSessionForWorktree`) that credited every
-    /// changed doc to whichever session registered last — the misattribution bug that
-    /// cross-credited docs whenever two sessions shared a worktree.
-    let fallbackOwner (sessions: SessionBridge.SessionEntry list) : string option =
-        match sessions with
-        | [ single ] -> single.SessionId
+    /// durable session owns a live registration for the worktree. Duplicate physical processes
+    /// for that same durable session collapse to their freshest registration; zero or several
+    /// durable sessions (or one anonymous registration) leave the doc unowned.
+    let fallbackOwner
+        (now: DateTime)
+        (sessions: SessionBridge.SessionEntry list)
+        : string option =
+        match
+            sessions
+            |> SessionBridge.collapseLiveRegistrations now
+        with
+        | [ single ] -> single.SessionId |> Option.map SessionId.value
         | _ -> None
 
     /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. An AgentDoc is
@@ -688,7 +697,9 @@ module CanvasWatchers =
         (previousDocs: CanvasDoc list)
         (currentDocs: CanvasDoc list)
         =
-        match fallbackOwner sessions with
+        let now = DateTime.UtcNow
+
+        match fallbackOwner now sessions with
         | None -> ()
         | Some sessionId ->
             let prevByName = previousDocs |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
