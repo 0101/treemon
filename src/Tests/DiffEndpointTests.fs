@@ -70,6 +70,11 @@ let private layerQuery committed local untracked =
 
     $"?committed={value committed}&local={value local}&untracked={value untracked}"
 
+let private localBranchTarget branch =
+    WorktreeDiff.tryLocalBranchTarget branch
+    |> Option.defaultWith (fun () ->
+        failwith $"Expected a display-safe local branch target: {branch}")
+
 let private serializedLayerCounts =
     { AlreadyCommitted = DiffLayerCountResult.Available 2
       LocalChanges = DiffLayerCountResult.Available 3
@@ -542,11 +547,9 @@ type DiffEndpointHttpTests() =
                     Assert.That(
                         observed.ToArray(),
                         Is.EqualTo(
-                            [| WorktreeDiff.DiffComparisonTarget.ConfiguredBase
-                               WorktreeDiff.DiffComparisonTarget.LocalBranch
-                                   "feature/topic&mode=100%"
-                               WorktreeDiff.DiffComparisonTarget.LocalBranch
-                                   "feature/%09x" |]
+                            [| WorktreeDiff.configuredBaseTarget
+                               localBranchTarget "feature/topic&mode=100%"
+                               localBranchTarget "feature/%09x" |]
                         )
                     )))
 
@@ -1073,6 +1076,8 @@ type DiffEndpointHttpTests() =
                   "?committed=true&local=true&untracked=false&branch=one&branch=two"
                   "?committed=true&local=true&untracked=false&branch=main%00forged"
                   "?committed=true&local=true&untracked=false&branch=ma%E2%80%8Bin"
+                  "?committed=true&local=true&untracked=false&branch=feature%E2%80%A8hidden"
+                  "?committed=true&local=true&untracked=false&branch=feature%E2%80%A9hidden"
                   "?layer=committed" ]
                 |> List.iter (fun query ->
                     use response = get client (summaryUrl + query)
@@ -1267,7 +1272,8 @@ type DiffEndpointHttpTests() =
                     let port = Uri(baseUrl).Port
                     let host = $"attacker.example:{port}"
 
-                    [ worktreeUrl baseUrl worktree "diff-summary"
+                    [ worktreeUrl baseUrl worktree "diff-comparisons"
+                      worktreeUrl baseUrl worktree "diff-summary"
                       worktreeUrl baseUrl worktree "diff-file?identity=forged"
                       worktreeUrl baseUrl worktree filename
                       baseUrl + DiffAssets.cssPath ]

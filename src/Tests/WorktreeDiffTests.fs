@@ -30,6 +30,11 @@ let private comparisonContext worktreePath : DiffComparisonContext =
       UpstreamRemote = "origin"
       BaseBranch = "main" }
 
+let private localBranchTarget branch =
+    tryLocalBranchTarget branch
+    |> Option.defaultWith (fun () ->
+        failwith $"Expected a display-safe local branch target: {branch}")
+
 let private expectOk description result =
     match result with
     | Ok value -> value
@@ -532,10 +537,11 @@ type WorktreeDiffIntegrationTests() =
         writeText repoDir "untracked.txt" "untracked"
 
         let counts =
-            getWorktreeDiffLayerCountsWithinDeadline
+            getWorktreeDiffLayerCountsForTargetWithinDeadline
                 (ProcessRunner.createResponseDeadline
                     ProcessRunner.argumentListResponseDeadlineMs)
                 (comparisonContext repoDir)
+                configuredBaseTarget
             |> TestUtils.runAsync
 
         Assert.Multiple(fun () ->
@@ -1203,8 +1209,12 @@ type WorktreeDiffIntegrationTests() =
         initRepoOnMain repoDir
         let deceptive = "ma\u200Bin"
         let supplementary = "feature/\U000E0001hidden"
+        let lineSeparator = "feature/\u2028hidden"
+        let paragraphSeparator = "feature/\u2029hidden"
         gitOk repoDir [ "branch"; deceptive ]
         gitOk repoDir [ "branch"; supplementary ]
+        gitOk repoDir [ "branch"; lineSeparator ]
+        gitOk repoDir [ "branch"; paragraphSeparator ]
         gitOk repoDir [ "branch"; "feature/žluťoučký" ]
 
         let targets =
@@ -1218,32 +1228,70 @@ type WorktreeDiffIntegrationTests() =
                 targets.LocalBranches,
                 Does.Not.Contain(supplementary)
             )
+            Assert.That(targets.LocalBranches, Does.Not.Contain(lineSeparator))
+            Assert.That(
+                targets.LocalBranches,
+                Does.Not.Contain(paragraphSeparator)
+            )
             Assert.That(
                 targets.LocalBranches,
                 Does.Contain("feature/žluťoučký")
             ))
 
     [<Test>]
-    member _.``local configured base uses canonical Windows ref casing``() =
+    member _.``packed local refs preserve canonical Windows branch identity``() =
         if not (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) then
             Assert.Ignore("Git ref casing behavior is Windows-specific")
 
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
+        let context =
+            { comparisonContext repoDir with
+                BaseBranch = "MAIN" }
+
+        let beforePacking =
+            getWorktreeDiffSummary context
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        gitOk repoDir [ "pack-refs"; "--all"; "--prune" ]
 
         let targets =
-            getDiffComparisonTargets
-                { comparisonContext repoDir with
-                    BaseBranch = "MAIN" }
+            getDiffComparisonTargets context
             |> TestUtils.runAsync
             |> assertComparisonTargetsOk
 
+        let afterPacking =
+            getWorktreeDiffSummary context
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        let wrongCase =
+            getWorktreeDiffSummaryForTarget
+                context
+                (localBranchTarget "MAIN")
+            |> TestUtils.runAsync
+
+        let exactCase =
+            getWorktreeDiffSummaryForTarget
+                context
+                (localBranchTarget "main")
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
         Assert.Multiple(fun () ->
+            Assert.That(beforePacking.BaseRef, Is.EqualTo("main"))
             Assert.That(
                 targets.ConfiguredBase,
                 Is.EqualTo(ConfiguredDiffComparison.Local "main")
             )
-            Assert.That(targets.LocalBranches, Is.Empty))
+            Assert.That(targets.LocalBranches, Is.Empty)
+            Assert.That(afterPacking.BaseRef, Is.EqualTo("main"))
+            Assert.That(
+                (wrongCase = Error(ComparisonTargetNotFound "MAIN")),
+                Is.True
+            )
+            Assert.That(exactCase.BaseRef, Is.EqualTo("main")))
 
     [<Test>]
     member _.``missing configured base keeps local alternatives available``() =
@@ -1285,7 +1333,7 @@ type WorktreeDiffIntegrationTests() =
         let summary =
             getWorktreeDiffSummaryForTarget
                 (comparisonContext repoDir)
-                (DiffComparisonTarget.LocalBranch "target")
+                (localBranchTarget "target")
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -1315,7 +1363,7 @@ type WorktreeDiffIntegrationTests() =
         let result =
             getWorktreeDiffSummaryForTarget
                 (comparisonContext repoDir)
-                (DiffComparisonTarget.LocalBranch "target^{}")
+                (localBranchTarget "target^{}")
             |> TestUtils.runAsync
 
         match result with
@@ -1332,7 +1380,7 @@ type WorktreeDiffIntegrationTests() =
         let result =
             getWorktreeDiffSummaryForTarget
                 (comparisonContext nonRepo)
-                (DiffComparisonTarget.LocalBranch "target")
+                (localBranchTarget "target")
             |> TestUtils.runAsync
 
         match result with
@@ -1386,11 +1434,12 @@ type WorktreeDiffIntegrationTests() =
             |> assertSummaryOk
 
         let counts =
-            getWorktreeDiffLayerCountsWithinDeadline
+            getWorktreeDiffLayerCountsForTargetWithinDeadline
                 (ProcessRunner.createResponseDeadline
                     ProcessRunner.argumentListResponseDeadlineMs)
                 { comparisonContext repoDir with
                     BaseBranch = "missing" }
+                configuredBaseTarget
             |> TestUtils.runAsync
 
         Assert.Multiple(fun () ->

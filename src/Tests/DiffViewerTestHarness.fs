@@ -300,14 +300,13 @@ type DiffViewerHarness() =
     member this.RouteComparisons(body) =
         this.RouteBody("**/diff-comparisons", "application/json", body)
 
-    member this.RouteComparisonResponses(responses: string array) =
-        // The route callback is the stateful boundary: each browser refresh must receive the next
-        // scripted repository branch snapshot.
+    member private this.RouteSequentialJson(glob: string, responses: string array) =
+        // Playwright gives each callback no cursor, so the scripted sequence must retain one.
         let mutable index = 0
 
         this.Page.RouteAsync(
-            "**/diff-comparisons",
-            fun route ->
+            glob,
+            fun (route: IRoute) ->
                 let body = responses[Math.Min(index, responses.Length - 1)]
                 index <- index + 1
 
@@ -319,48 +318,19 @@ type DiffViewerHarness() =
                 )
         )
 
+    member this.RouteComparisonResponses(responses: string array) =
+        this.RouteSequentialJson("**/diff-comparisons", responses)
+
     /// Answers the categorization poll the configure action watches. `revisions` is served one per
     /// request, in order, with the last entry answering once the list is exhausted, so a test can
     /// script "unchanged, unchanged, then rewritten".
     member this.RouteCategorizations(revisions: string array) =
-        // Same reason as RouteSummaries: Playwright hands the handler no place to carry a cursor.
-        let mutable index = 0
-
-        this.Page.RouteAsync(
-            "**/diff-categorization",
-            fun (route: IRoute) ->
-                let body = revisions[min index (revisions.Length - 1)]
-                index <- index + 1
-
-                route.FulfillAsync(
-                    RouteFulfillOptions(
-                        ContentType = "application/json",
-                        Body = body
-                    )
-                )
-                |> ignore
-        )
+        this.RouteSequentialJson("**/diff-categorization", revisions)
 
     /// Serves `summaries` one per summary request, in order, so a test can script what Load, each
     /// Refresh and a reload see. The last entry keeps answering once the list is exhausted.
     member this.RouteSummaries(summaries: string array) =
-        // Playwright calls the route handler once per request and gives it nowhere to carry a
-        // position, so the cursor into the scripted sequence has to survive between invocations.
-        let mutable summaryIndex = 0
-
-        this.Page.RouteAsync(
-            "**/diff-summary?*",
-            fun (route: IRoute) ->
-                let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
-                summaryIndex <- summaryIndex + 1
-
-                route.FulfillAsync(
-                    RouteFulfillOptions(
-                        ContentType = "application/json",
-                        Body = body
-                    )
-                )
-        )
+        this.RouteSequentialJson("**/diff-summary?*", summaries)
 
     member this.RouteFiles() =
         this.Page.RouteAsync(

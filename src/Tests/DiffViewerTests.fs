@@ -876,7 +876,7 @@ type DiffViewerE2ETests() =
         }
 
     [<Test>]
-    member this.``missing persisted branch stays explicit then refresh falls back to the base``() =
+    member this.``missing persisted branch falls back and explicit selection clears the notice``() =
         task {
             do!
                 this.Page.AddInitScriptAsync(
@@ -961,6 +961,37 @@ type DiffViewerE2ETests() =
                        "Saved branch no longer exists; using configured base.";
                        "true";
                        "?committed=true&local=true&untracked=false" |]
+                )
+            )
+
+            let! _ =
+                this.Page.EvaluateAsync<obj>(
+                    """() => {
+                        const select = document.getElementById('comparison-target');
+                        select.value = 'main';
+                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                    }"""
+                )
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__summaryQueries.at(-1).includes('branch=main')"
+                )
+
+            let! selected =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.getElementById('comparison-target').value,
+                        document.getElementById('comparison-status').textContent,
+                        window.__summaryQueries.at(-1)
+                    ]"""
+                )
+
+            Assert.That(
+                selected,
+                Is.EqualTo(
+                    [| "main";
+                       "";
+                       "?committed=true&local=true&untracked=false&branch=main" |]
                 )
             )
         }
@@ -1055,6 +1086,137 @@ type DiffViewerE2ETests() =
                            "?committed=true&local=true&untracked=false&branch=main" |]
                     )
                 ))
+        }
+
+    [<Test>]
+    member this.``refresh keeps the page target and fresh configured-base label``() =
+        task {
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        window.__summaryQueries = [];
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            if (url.includes('diff-summary')) {
+                                window.__summaryQueries.push(new URL(url, location.href).search);
+                            }
+                            return originalFetch.apply(this, arguments);
+                        };
+                    })()"""
+                )
+            do!
+                this.RouteComparisonResponses(
+                    [| comparisonTargetsJson
+                           "origin/main"
+                           true
+                           [| "main"; "feature" |];
+                       comparisonTargetsJson
+                           "origin/dev"
+                           true
+                           [| "main"; "feature" |] |]
+                )
+            do!
+                this.RouteSummaries(
+                    [| readySummaryJson [| firstFile |]
+                       summaryStateJson "base-error" |]
+                )
+            do! this.Goto()
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+            let! _ =
+                this.Page.EvaluateAsync<obj>(
+                    """() => localStorage.setItem(
+                        'treemon.diff.target:/e2e-diff-worktree',
+                        'feature'
+                    )"""
+                )
+
+            do! this.Page.Locator("#refresh").ClickAsync()
+            do! this.Page.Locator("[data-state='base-error']").WaitForAsync()
+            let! state =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.getElementById('comparison-target').value,
+                        document.getElementById('comparison-target').options[0].textContent,
+                        window.__summaryQueries.at(-1),
+                        localStorage.getItem('treemon.diff.target:/e2e-diff-worktree')
+                    ]"""
+                )
+
+            Assert.That(
+                state,
+                Is.EqualTo(
+                    [| "";
+                       "origin/dev";
+                       "?committed=true&local=true&untracked=false";
+                       "feature" |]
+                )
+            )
+        }
+
+    [<Test>]
+    member this.``metadata failure preserves summary loading and a state-owned base label``() =
+        task {
+            let summaryRequested =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+            let releaseSummary =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            do!
+                this.RouteComparisons(
+                    JsonSerializer.Serialize {| status = "git-error" |}
+                )
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-summary?*",
+                    Func<IRoute, Task>(fun route ->
+                        (task {
+                            summaryRequested.TrySetResult(true) |> ignore
+                            let! _ = releaseSummary.Task
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = readySummaryJson [| firstFile |]
+                                    )
+                                )
+                        } :> Task))
+                )
+            do! this.Goto()
+            let! _ =
+                summaryRequested.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.getElementById('comparison-status').textContent.includes('Branch list unavailable')"
+                )
+
+            let! pending =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const status = document.getElementById('comparison-status').textContent;
+                        return [
+                            document.getElementById('comparison-target').options[0].textContent,
+                            String(status.includes('Loading comparison')),
+                            String(status.includes('Branch list unavailable'))
+                        ];
+                    }"""
+                )
+
+            releaseSummary.TrySetResult(true) |> ignore
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+            let! settledLabel =
+                this.Page.Locator("#comparison-target option").First.TextContentAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    pending,
+                    Is.EqualTo([| "Configured base"; "true"; "true" |])
+                )
+                Assert.That(settledLabel, Is.EqualTo("origin/main")))
         }
 
     [<Test>]
@@ -1350,6 +1512,113 @@ type DiffViewerE2ETests() =
                     [| "?committed=true&local=true&untracked=false&branch=zeta" |]
                 )
             )
+        }
+
+    [<Test>]
+    member this.``a newer branch selection aborts the in-flight summary``() =
+        task {
+            let featureStarted =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+            let releaseFeature =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+            let featureHandlerFinished =
+                TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        window.__featureSummaryOutcome = null;
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            const request = originalFetch.apply(this, arguments);
+                            if (url.includes('diff-summary') && url.includes('branch=feature')) {
+                                request.then(
+                                    () => { window.__featureSummaryOutcome = 'completed'; },
+                                    error => { window.__featureSummaryOutcome = error.name; }
+                                );
+                            }
+                            return request;
+                        };
+                    })()"""
+                )
+            do!
+                this.RouteComparisons(
+                    comparisonTargetsJson
+                        "origin/main"
+                        true
+                        [| "main"; "feature"; "zeta" |]
+                )
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-summary?*",
+                    fun route ->
+                        task {
+                            let query = Uri(route.Request.Url).Query
+
+                            if query.Contains("branch=feature") then
+                                featureStarted.TrySetResult(true) |> ignore
+                                let! _ = releaseFeature.Task
+                                ()
+
+                            try
+                                do!
+                                    route.FulfillAsync(
+                                        RouteFulfillOptions(
+                                            ContentType = "application/json",
+                                            Body = readySummaryJson [| firstFile |]
+                                        )
+                                    )
+                            with _ ->
+                                ()
+
+                            if query.Contains("branch=feature") then
+                                featureHandlerFinished.TrySetResult(true) |> ignore
+                        }
+                        :> Task
+                )
+            do! this.Goto()
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").WaitForAsync()
+
+            let selectBranch branch =
+                this.Page.EvaluateAsync<obj>(
+                    """branch => {
+                        const select = document.getElementById('comparison-target');
+                        select.value = branch;
+                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    branch
+                )
+
+            let! _ = selectBranch "feature"
+            let! _ =
+                featureStarted.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+            let! _ = selectBranch "zeta"
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__featureSummaryOutcome === 'AbortError'"
+                )
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => state.targetBranch === 'zeta' && state.summaryAbort === null"
+                )
+
+            releaseFeature.TrySetResult(true) |> ignore
+            let! _ =
+                featureHandlerFinished.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+
+            let! outcome =
+                this.Page.EvaluateAsync<string>(
+                    "() => window.__featureSummaryOutcome"
+                )
+
+            Assert.That(outcome, Is.EqualTo("AbortError"))
         }
 
     [<Test>]

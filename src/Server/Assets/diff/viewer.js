@@ -51,16 +51,18 @@ var state = {
     currentPatch: null,
     view: readViewPreference(),
     filters: readFilterPreference(),
-    targetBranch: null,
+    targetBranch: readStorage(TARGET_KEY),
     comparisonReady: false,
     comparisonRequest: 0,
     comparisonWarning: '',
+    comparisonWarningKind: null,
     comparisonStatus: '',
     refreshPromise: null,
     comparisonTimer: null,
     fileRequest: 0,
     fileAbort: null,
     summaryRequest: 0,
+    summaryAbort: null,
     selectedButton: null,
     panel: null,
     // Explicit expand/collapse choices for this page instance only, keyed by a JSON-serialized
@@ -129,8 +131,9 @@ function setComparisonStatus(message) {
             .join(' · ');
 }
 
-function setComparisonWarning(message) {
+function setComparisonWarning(message, kind) {
     state.comparisonWarning = message || '';
+    state.comparisonWarningKind = message ? kind : null;
     setComparisonStatus(state.comparisonStatus);
 }
 
@@ -170,7 +173,9 @@ function showComparisonLoading() {
     }
 
     select.disabled = true;
-    setComparisonStatus(state.comparisonReady ? 'Refreshing branches…' : '');
+    if (!state.comparisonStatus) {
+        setComparisonStatus(state.comparisonReady ? 'Refreshing branches…' : '');
+    }
 }
 
 function showComparisonUnavailable(reason) {
@@ -179,17 +184,14 @@ function showComparisonUnavailable(reason) {
     select.removeAttribute('aria-busy');
 
     if (!state.comparisonReady) {
-        var currentLabel = select.options[0] && select.options[0].textContent;
+        var currentLabel =
+            state.targetBranch ||
+            (state.filters.committed && state.summaryBaseRef) ||
+            'Configured base';
         select.replaceChildren(
             comparisonOption(
                 state.targetBranch || '',
-                state.targetBranch ||
-                    (
-                        currentLabel &&
-                        currentLabel !== 'Loading branches…'
-                            ? currentLabel
-                            : 'Configured base'
-                    )
+                currentLabel
             )
         );
         select.value = state.targetBranch || '';
@@ -199,7 +201,7 @@ function showComparisonUnavailable(reason) {
         keepsCurrent
             ? '; keeping the current comparison.'
             : '; using configured base.'
-    ));
+    ), 'refresh');
     updateComparisonControl();
 }
 
@@ -272,7 +274,7 @@ function showComparisonTargets(metadata, preferred) {
     select.value = state.targetBranch || '';
     select.removeAttribute('aria-busy');
     state.comparisonReady = true;
-    setComparisonWarning(fallbackNotice);
+    setComparisonWarning(fallbackNotice, fallbackNotice ? 'fallback' : null);
     updateComparisonControl();
 }
 
@@ -305,8 +307,7 @@ async function refreshComparisonsAndSummary() {
     if (state.refreshPromise) return state.refreshPromise;
 
     var refresh = document.getElementById('refresh');
-    var requestedTarget = state.targetBranch || readStorage(TARGET_KEY);
-    state.targetBranch = requestedTarget || null;
+    var requestedTarget = state.targetBranch;
 
     if (state.comparisonTimer) {
         clearTimeout(state.comparisonTimer);
@@ -344,6 +345,10 @@ function comparisonChanged() {
 
     if (state.targetBranch) writeStorage(TARGET_KEY, state.targetBranch);
     else removeStorage(TARGET_KEY);
+
+    if (state.comparisonWarningKind === 'fallback') {
+        setComparisonWarning('', null);
+    }
 
     if (state.comparisonTimer) clearTimeout(state.comparisonTimer);
 
@@ -1460,19 +1465,29 @@ async function loadSummary(targetBranch) {
     if (state.fileAbort) state.fileAbort.abort();
     state.fileAbort = null;
     state.fileRequest += 1;
+    if (state.summaryAbort) state.summaryAbort.abort();
     var request = ++state.summaryRequest;
+    var controller = new AbortController();
+    state.summaryAbort = controller;
+    state.summaryBaseRef = null;
     clearNavigator();
     setComparisonStatus('Loading comparison…');
     renderState('loading-summary', 'Loading changed files…', '', true);
 
     try {
-        var summary = await fetchJson(summaryUrl(targetBranch), { cache: 'no-store' });
+        var summary = await fetchJson(
+            summaryUrl(targetBranch),
+            { cache: 'no-store', signal: controller.signal }
+        );
         if (request !== state.summaryRequest) return;
+        state.summaryAbort = null;
         applyLayerCounts(summary.layerCounts);
         if (summary.status === 'ready') renderReadySummary(summary);
         else renderSummaryState(summary);
-    } catch (_) {
+    } catch (error) {
+        if (error && error.name === 'AbortError') return;
         if (request !== state.summaryRequest) return;
+        state.summaryAbort = null;
         renderSummaryState({ status: 'git-error' });
     }
 }

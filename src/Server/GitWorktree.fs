@@ -494,7 +494,9 @@ let private hasUnsafeComparisonCharacters (value: string) =
     |> Seq.exists (fun character ->
         match Text.Rune.GetUnicodeCategory(character) with
         | Globalization.UnicodeCategory.Control
-        | Globalization.UnicodeCategory.Format -> true
+        | Globalization.UnicodeCategory.Format
+        | Globalization.UnicodeCategory.LineSeparator
+        | Globalization.UnicodeCategory.ParagraphSeparator -> true
         | _ -> false)
 
 let internal isSafeComparisonBranch (branchName: string) =

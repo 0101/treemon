@@ -878,33 +878,20 @@ let private queryBoolean
 
 let private summaryTarget (ctx: HttpContext) =
     if not (ctx.Request.Query.ContainsKey("branch")) then
-        Some WorktreeDiff.DiffComparisonTarget.ConfiguredBase
+        Some WorktreeDiff.configuredBaseTarget
     else
         let values = ctx.Request.Query["branch"]
 
-        if
-            values.Count <> 1
-            || not (GitWorktree.isSafeComparisonBranch values[0])
-        then
+        if values.Count <> 1 then
             None
         else
-            Some(WorktreeDiff.DiffComparisonTarget.LocalBranch values[0])
+            WorktreeDiff.tryLocalBranchTarget values[0]
 
 let private summaryRequest (ctx: HttpContext) =
-    let rawQuery = ctx.Request.QueryString.Value
-    let hasEncodedNull =
-        not (System.String.IsNullOrEmpty rawQuery)
-        && rawQuery.Contains(
-            "%00",
-            System.StringComparison.OrdinalIgnoreCase
-        )
-
-    if hasEncodedNull then
-        None
-    elif ctx.Request.Query.Count = 0 then
+    if ctx.Request.Query.Count = 0 then
         Some
             {| Layers = WorktreeDiff.allWorktreeDiffLayers
-               Target = WorktreeDiff.DiffComparisonTarget.ConfiguredBase |}
+               Target = WorktreeDiff.configuredBaseTarget |}
     else
         let hasBranch = ctx.Request.Query.ContainsKey("branch")
         let expectedCount = if hasBranch then 4 else 3

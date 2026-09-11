@@ -483,6 +483,7 @@ let private handleCanvasRequest
         let worktreePath = System.Net.WebUtility.UrlDecode worktreePathEncoded |> Server.PathUtils.normalizePath
         let diffDeadline =
             ProcessRunner.createResponseDeadline diffResponseDeadlineMs
+            |> ProcessRunner.withCancellationToken ctx.RequestAborted
 
         let! diffTarget =
             resolveDiffTarget agent worktreePath
