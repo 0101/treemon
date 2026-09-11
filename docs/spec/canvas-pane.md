@@ -90,9 +90,9 @@ theme and an inert `canvasSend` so author controls remain harmless outside Treem
 
 - The pane opens and closes from the header Canvas button and the `C` key.
 - Open or closed state persists in global config.
-- The workspace order is fixed as `Terminal | Canvas | Dashboard`. The width selector persists equal
-  or wide Canvas mode: `1:1:1` / `1:2:1` while Terminal is visible and `1:1` / `2:1` while it is
-  hidden. Narrow screens stack the same order and ignore the desktop ratio.
+- Workspace width controls live in the app header, not the canvas tab bar. The fixed
+  `Terminal | Canvas | Dashboard` order, persisted ratios, and hidden-pane behavior are described
+  in `docs/spec/worktree-monitor.md` (Dashboard Layout).
 - The pane normally follows the focused worktree. An explicit card-level SystemView action may target another worktree without moving dashboard card focus; the next explicit card selection clears that override.
 - The worktree diff is explicit-only when another canvas document exists. Automatic fallback and explicit card selection prefer another document; `diff.html` is selected automatically only when it is the worktree's sole canvas document. The card Diff action and direct tab selection still open it. The server omits the generated `diff.html` from a confirmed-clean worktree's inventory (`docs/spec/worktree-diff-viewer.md`), so a clean worktree shows no diff tab — the tab strip needs no per-view visibility rule of its own.
 - Worktrees with multiple docs show tab buttons. The active doc's tab always renders — a lone `AgentDoc` gets a labeled tab instead of a bare iframe, and a lone `SystemView` still shows its `.canvas-system-tab` entry so its beads-count badge stays visible. Each `AgentDoc` tab reserves a fixed-width metadata slot: it shows compact last-modified age normally, then swaps in an outlined Copy button only while hovered. Copy writes the doc's full on-disk path using the worktree path's separator; success replaces the rectangles with a green checkmark for 1.2 seconds, while failure uses the existing actionable error banner. Path copy and Canvas Share disable each other until the active clipboard workflow settles. The overlay changes opacity only, so tab dimensions stay fixed.
@@ -127,7 +127,10 @@ theme and an inert `canvasSend` so author controls remain harmless outside Treem
 
 ### Liveness and Session Routing
 
-- The bridge registry is keyed by `sessionId`, so multiple sessions in one worktree coexist instead of overwriting a single per-worktree slot (see `docs/spec/canvas-interaction-routing.md`).
+- The bridge registry is keyed by exact Copilot process identity. Secondary worktree and durable
+  `SessionId` lookup keeps multiple sessions in one worktree and multiple physical processes for one
+  durable session without overwriting either. Canvas ownership collapses same-`SessionId` duplicates
+  to the freshest live physical registration (see `docs/spec/canvas-interaction-routing.md`).
 - Each canvas filename has a persistent routing target in `CanvasDocOwnership.fs`; AgentDocs assign it from authoring writes, while SystemViews assign it from their affinity policy.
 - `BridgeLiveness.LiveSessionIds` exposes every identified session whose registration is within the liveness TTL. The worktree-level `SessionId` remains the freshest registration for aggregate status and SystemView fallback behavior, but it does not decide authored-document liveness.
 - The liveness dot shown in tabs and overview checks the doc's `OwnerSessionId` against `LiveSessionIds`, so two concurrently heartbeating sessions in one worktree both keep their own documents alive regardless of heartbeat order. It renders only for `AgentDoc` docs (via `livenessDotFor`); a `SystemView` has no owner session and shows no liveness dot.
@@ -181,8 +184,20 @@ theme and an inert `canvasSend` so author controls remain harmless outside Treem
 ### Bridge Protocol
 
 - The session bridge is the extension process started inside a coding session.
-- It calls `POST /api/canvas/register` with `worktreePath`, `injectUrl`, and `sessionId`.
-- Registration is loopback-only: `/api/canvas/register` accepts an `injectUrl` only when it is an absolute `http(s)` URL whose host is a loopback IP (`IPAddress.IsLoopback`) or the literal `localhost` (rejected `400` otherwise), and only for a known worktree (`isKnownWorktree`, mirroring the heartbeat and doc routes; unknown worktree → `404`). The route is wired with the scheduler agent, so demo mode (no agent) omits it entirely.
+- It calls `POST /api/canvas/register` with `worktreePath`, `injectUrl`, `sessionId`, its parent
+  Copilot PID, optional inherited `TerminalSessionId`, and an opaque loopback shutdown URL and
+  capability. The server resolves PID start ticks through the same injected process-identity
+  resolver as activity ingestion and rejects dead, reused, mismatched, or malformed registrations.
+- Registration is loopback-only: `/api/canvas/register` accepts an `injectUrl` only when it is an
+  absolute `http(s)` URL whose host is a loopback IP (`IPAddress.IsLoopback`) or the literal
+  `localhost` (rejected `400` otherwise). A known worktree records the bridge; an unmonitored
+  worktree returns `{ registered:false, monitored:false }` without recording one so the extension
+  can use browser fallback. The route is wired with the scheduler agent, so demo mode (no agent)
+  omits it entirely.
+- The shutdown URL is validated by the same loopback predicate. Its endpoint validates the opaque
+  capability and loopback caller, finishes a `202` acknowledgement, then invokes
+  `session.rpc.shutdown({ type: "routine" })`. Server completion is a later exact activity closure
+  or verified process exit; the endpoint response alone is never completion.
 - After startup it re-registers every 30 seconds as a heartbeat.
 - Failed extension heartbeats back off exponentially up to 120 seconds, then reset after reconnect.
 - Served docs receive an injected heartbeat script that posts to `/bridge/heartbeat` every 30 seconds.
@@ -326,7 +341,7 @@ changed rows already use).
 | `src/Server/IdiomorphScript.fs` | Vendored idiomorph runtime (library only — the controller lives in `CanvasMorphScript.fs`) |
 | `src/Server/CanvasMorphScript.fs` | Morph controller injection: the embedded `canvas-morph.js` source plus the `canvas-updated` highlight style |
 | `src/Extension/canvas-morph.js` | Live-update controller — morphs body-only changes, reloads scripts and document-shell changes, and marks the blocks a morph changed |
-| `src/Extension/extension.mjs`, `injection-request.mjs`, `session-prompt.mjs`, `send-queue.mjs` | Session bridge registration, guarded local HTTP headers, SDK session-ID compatibility, typed prompt-transport decoding, serialized send queue with pending-duplicate coalescing, heartbeat, and reconnect backoff |
+| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, `injection-request.mjs`, `session-prompt.mjs`, `send-queue.mjs` | Exact-process bridge registration, guarded local HTTP headers and prompt/shutdown endpoints, SDK session-ID compatibility, typed prompt-transport decoding, serialized send queue with pending-duplicate coalescing, heartbeat, and reconnect backoff |
 | `src/Extension/skill/SKILL.md` | Authoring contract for agent-created canvas docs |
 
 ## Decisions

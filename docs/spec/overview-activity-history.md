@@ -8,7 +8,7 @@ missed time, late inputs, or downtime.
 
 ## Goals
 
-- Persist the same task and per-session agent projection shown by the live Overview.
+- Persist the same task and per-physical-instance agent projection shown by the live Overview.
 - Keep captured 12-hour, 24-hour, and 72-hour history available across restart without requiring an
   open browser.
 - Store only task and agent counts, never drill-down membership or session content.
@@ -63,7 +63,7 @@ missed time, late inputs, or downtime.
 - Treemon downtime produces no rows. Captured rows before the gap remain available.
 - Legacy liveness, task-snapshot, rollup, staging, publication-state, and observation-bound history
   tables are removed. Existing reconstructed history is not migrated.
-- `activity_events` remains unchanged for ingestion idempotency and is not read by Overview history.
+- `activity_events` holds ingestion dedupe keys only and is not read by Overview history.
 
 ### Sampling and API
 

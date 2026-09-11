@@ -9,10 +9,7 @@ open System.Threading
 open System.Threading.Tasks
 open Treemon.TerminalHosting
 
-type private HostConfig =
-    { Control: ControlApiConfig
-      Layout: TerminalHostLayout
-      TerminalLaunch: TerminalLaunchConfig }
+type private HostConfig = { Control: ControlApiConfig; Layout: TerminalHostLayout; TerminalLaunch: TerminalLaunchConfig }
 
 [<RequireQualifiedAccess>]
 module private HostConfig =
@@ -20,16 +17,12 @@ module private HostConfig =
         // Uri.TryCreate is a byref-only framework parser; mutation stays at this boundary.
         let mutable uri = Unchecked.defaultof<Uri>
         let parsed = Uri.TryCreate(value, UriKind.Absolute, &uri)
-
         let loopbackHost =
-            if not parsed then
-                false
+            if not parsed then false
             else
                 match IPAddress.TryParse uri.Host with
                 | true, address -> IPAddress.IsLoopback address
-                | false, _ ->
-                    String.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
-
+                | false, _ -> String.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
         if
             parsed
             && (uri.Scheme = Uri.UriSchemeHttp || uri.Scheme = Uri.UriSchemeHttps)
@@ -37,25 +30,16 @@ module private HostConfig =
             && uri.AbsolutePath = "/"
             && String.IsNullOrEmpty uri.Query
             && String.IsNullOrEmpty uri.Fragment
-        then
-            Ok(uri.GetLeftPart(UriPartial.Authority))
-        else
-            Error $"Invalid allowed origin '{value}'"
+        then Ok(uri.GetLeftPart(UriPartial.Authority))
+        else Error $"Invalid allowed origin '{value}'"
 
     let parse arguments =
         let initial =
-            { Control =
-                { Port = 0
-                  AllowedOrigins = [] }
+            { Control = { Port = 0; AllowedOrigins = [] }
               Layout = TerminalHostLayout.current ()
               TerminalLaunch =
-                { TtydExecutable =
-                    Path.Combine(
-                        AppContext.BaseDirectory,
-                        TerminalHostLayout.TtydExecutableName
-                    )
-                  ShellCommand = "pwsh"
-                  StartupTimeout = TimeSpan.FromSeconds 10.0 } }
+                { TtydExecutable = Path.Combine(AppContext.BaseDirectory, TerminalHostLayout.TtydExecutableName)
+                  ShellCommand = "pwsh"; StartupTimeout = TimeSpan.FromSeconds 10.0 } }
 
         let rec collect config remaining =
             match remaining with
@@ -66,27 +50,16 @@ module private HostConfig =
                     collect { config with Control.Port = port } tail
                 | _ -> Error $"Invalid control port '{value}'"
             | "--state-dir" :: value :: tail when not (String.IsNullOrWhiteSpace value) ->
-                collect
-                    { config with
-                        Layout =
-                            TerminalHostLayout.forStateDirectory value }
-                    tail
+                collect { config with Layout = TerminalHostLayout.forStateDirectory value } tail
             | "--ttyd" :: value :: tail when not (String.IsNullOrWhiteSpace value) ->
-                collect
-                    { config with
-                        TerminalLaunch.TtydExecutable = Path.GetFullPath value }
-                    tail
+                collect { config with TerminalLaunch.TtydExecutable = Path.GetFullPath value } tail
             | "--shell" :: value :: tail when not (String.IsNullOrWhiteSpace value) ->
                 collect { config with TerminalLaunch.ShellCommand = value } tail
             | "--allowed-origin" :: value :: tail ->
                 match parseOrigin value with
                 | Error error -> Error error
                 | Ok origin ->
-                    collect
-                        { config with
-                            Control.AllowedOrigins =
-                                origin :: config.Control.AllowedOrigins }
-                        tail
+                    collect { config with Control.AllowedOrigins = origin :: config.Control.AllowedOrigins } tail
             | option :: _ -> Error $"Unknown or incomplete TerminalHost option '{option}'"
 
         try
@@ -118,63 +91,38 @@ module private HostRuntime =
                 |> Option.filter (String.IsNullOrWhiteSpace >> not)
                 |> Option.defaultValue "1.0.0"
             let token = Manifest.generateBearerToken ()
-
             let registry =
                 TerminalRegistry.create
                     (TerminalLauncher.start config.TerminalLaunch)
                     (TerminalProxy.start config.TerminalLaunch.StartupTimeout config.Control.AllowedOrigins token)
-
             let! control =
-                ControlApi.start
-                    config.Control
-                    token
-                    hostPid
-                    processStartTimeUtcTicks
-                    version
-                    registry
-
+                ControlApi.start config.Control token hostPid processStartTimeUtcTicks version registry
             let identity =
-                { Pid = hostPid
-                  ProcessStartTimeUtcTicks = processStartTimeUtcTicks
-                  Endpoint = control.Endpoint
-                  HostVersion = version
-                  ControlApiVersion = Protocol.ControlApiVersion }
-
+                { Pid = hostPid; ProcessStartTimeUtcTicks = processStartTimeUtcTicks; Endpoint = control.Endpoint
+                  HostVersion = version; ControlApiVersion = Protocol.ControlApiVersion }
             let manifest =
-                { Identity = identity
-                  BearerToken = token
-                  StagedExecutableVersion =
-                        Manifest.readStagedExecutableVersion config.Layout }
-
+                { Identity = identity; BearerToken = token
+                  StagedExecutableVersion = Manifest.readStagedExecutableVersion config.Layout }
             match Manifest.write config.Layout.StateDirectory manifest with
             | Error error ->
-                do! TerminalRegistry.shutdown registry |> Async.StartAsTask
+                let! _ = TerminalRegistry.shutdown registry |> Async.StartAsTask
                 do! ControlApi.stop control
                 return Error error
             | Ok() ->
                 use monitorCancellation = new CancellationTokenSource()
-
                 let monitor =
-                    Manifest.monitor
-                        config.Layout.StateDirectory
-                        config.Layout
-                        identity
-                        token
-                        manifest.StagedExecutableVersion
-                        monitorCancellation.Token
-
+                    Manifest.monitor config.Layout.StateDirectory config.Layout identity token
+                        manifest.StagedExecutableVersion monitorCancellation.Token
                 let! outcome =
                     task {
                         try
                             do! ControlApi.waitForShutdown control
                             return Ok()
-                        with error ->
-                            return Error error.Message
+                        with error -> return Error error.Message
                     }
-
                 monitorCancellation.Cancel()
                 do! monitor
-                do! TerminalRegistry.shutdown registry |> Async.StartAsTask
+                let! _ = TerminalRegistry.shutdown registry |> Async.StartAsTask
                 do! ControlApi.stop control
                 Manifest.removeIfOwned config.Layout.StateDirectory identity
                 return outcome

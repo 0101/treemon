@@ -231,24 +231,27 @@ END;
     member _.``migration repeatedly drops only legacy overview tables and keeps direct snapshots``() =
         withDbPath "treemon-overview-snapshot-migration" (fun path ->
             (use legacy = new SessionActivityStore(path)
+             let identity =
+                 ProcessIdentity.create 1001 2001L
+                 |> Result.defaultWith invalidOp
+
              let stored =
-                 { SessionId = SessionId "session-1"
+                 { ProcessIdentity = identity
+                   SessionId = SessionId "session-1"
                    TerminalSessionId = None
                    WorktreePath = WorktreePath "worktree-1"
                    Provider = CopilotCli
                    Status = { emptyStatus with Status = SessionLevelStatus.Working }
                    UpdatedAt = anchor
+                   LifecycleAt = Some anchor
                    LastSeen = anchor
-                   ContextUsageAt = None }
+                   ContextUsageAt = None
+                   ClosedAt = None }
 
              legacy.AppendAndUpsert(
-                 { EventId = EventId "event-1"
+                 { ProcessIdentity = identity
                    SessionId = stored.SessionId
-                   WorktreePath = stored.WorktreePath
-                   Provider = stored.Provider
-                   Kind = "turn_start"
-                   Status = SessionLevelStatus.Working
-                   Skill = None
+                   EventId = EventId "event-1"
                    Ts = anchor },
                  stored
              )
@@ -330,15 +333,15 @@ VALUES ({anchor.ToUnixTimeSeconds()}, '[{{"Kind":"Queued","Count":2}},{{"Kind":"
             Assert.Multiple(fun () ->
                 Assert.That(schemaNames path "table" legacyTables, Is.Empty)
                 Assert.That(
-                    schemaNames path "table" [ "session_status"; "activity_events"; "overview_snapshots_v2" ],
-                    Is.EqualTo [ "activity_events"; "overview_snapshots_v2"; "session_status" ]
+                    schemaNames path "table" [ "session_instances"; "resume_sessions"; "activity_events"; "overview_snapshots_v2" ],
+                    Is.EqualTo [ "activity_events"; "overview_snapshots_v2"; "resume_sessions"; "session_instances" ]
                 )
-                Assert.That(scalarInt path "SELECT count(*) FROM session_status;", Is.EqualTo 1)
+                Assert.That(scalarInt path "SELECT count(*) FROM session_instances;", Is.EqualTo 1)
                 Assert.That(scalarInt path "SELECT count(*) FROM activity_events;", Is.EqualTo 1)
                 Assert.That(
                     schemaNames
                         path
                         "index"
-                        [ "ix_status_worktree"; "ix_events_ts"; "ix_events_session_ts" ],
-                    Is.EqualTo [ "ix_events_session_ts"; "ix_events_ts"; "ix_status_worktree" ]
+                        [ "ix_instances_worktree_activity"; "ix_events_ts"; "ix_resume_worktree_activity" ],
+                    Is.EqualTo [ "ix_events_ts"; "ix_instances_worktree_activity"; "ix_resume_worktree_activity" ]
                 )))

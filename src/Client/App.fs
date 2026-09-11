@@ -658,7 +658,11 @@ let update msg model =
             | Error _ -> EmbeddedTerminalCloseFailed)
             (fun _ -> EmbeddedTerminalCloseFailed)
     | EmbeddedTerminalCloseFailed ->
-        model, fetchEmbeddedTerminals worktreeApi
+        model,
+        Cmd.batch [
+            fetchEmbeddedTerminals worktreeApi
+            fetchWorktrees ()
+        ]
     | ToggleTerminalPane ->
         let isOpen = not model.TerminalPaneOpen
         { model with TerminalPaneOpen = isOpen },
@@ -671,7 +675,7 @@ let update msg model =
                     before
                     snapshot
                     model.ActiveEmbeddedTerminals },
-        Cmd.none
+        fetchWorktrees ()
     | OpenEditor path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
@@ -1311,6 +1315,26 @@ let viewSystemMetrics (metrics: SystemMetrics option) =
         ]
 
 let viewAppHeader model dispatch =
+    let widthChoices =
+        match model.TerminalPaneOpen, model.Canvas.CanvasPaneOpen with
+        | true, true ->
+            [ WorkspaceWidth.EqualThirds, "1:1:1", "Equal thirds - Terminal, Canvas and Dashboard"
+              WorkspaceWidth.WideCanvas, "1:2:1", "Wide canvas - 25% Terminal, 50% Canvas, 25% Dashboard"
+              WorkspaceWidth.WidePanes, "2:2:1", "Wide panes - 40% Terminal, 40% Canvas, 20% Dashboard" ]
+        | false, false -> []
+        | true, false
+        | false, true ->
+            let pane = if model.TerminalPaneOpen then "Terminal" else "Canvas"
+            let wideWidth =
+                match model.Canvas.WorkspaceWidth with
+                | WorkspaceWidth.EqualThirds ->
+                    if model.TerminalPaneOpen then WorkspaceWidth.WidePanes
+                    else WorkspaceWidth.WideCanvas
+                | WorkspaceWidth.WideCanvas -> WorkspaceWidth.WideCanvas
+                | WorkspaceWidth.WidePanes -> WorkspaceWidth.WidePanes
+            [ WorkspaceWidth.EqualThirds, "1:1", $"Equal split - {pane} and Dashboard"
+              wideWidth, "2:1", $"Wide {pane.ToLowerInvariant()} - two-thirds {pane}, one-third Dashboard" ]
+
     Html.div [
         prop.className "app-header"
         prop.children [
@@ -1381,6 +1405,23 @@ let viewAppHeader model dispatch =
                                         ]
                                 ]
                             ]
+                            if not (List.isEmpty widthChoices) then
+                                Html.div [
+                                    prop.className "workspace-width-group"
+                                    prop.children [
+                                        for width, label, title in widthChoices do
+                                            let isSelected = width = model.Canvas.WorkspaceWidth
+                                            Html.button [
+                                                prop.className (
+                                                    if isSelected then "ctrl-btn workspace-width-btn active"
+                                                    else "ctrl-btn workspace-width-btn")
+                                                prop.ariaPressed isSelected
+                                                prop.onClick (fun _ -> dispatch (SetWorkspaceWidth width))
+                                                prop.title title
+                                                prop.text label
+                                            ]
+                                    ]
+                                ]
                         ]
                     ]
                 ]
@@ -1400,6 +1441,7 @@ let view model dispatch =
         match model.Canvas.WorkspaceWidth with
         | WorkspaceWidth.EqualThirds -> "workspace-thirds"
         | WorkspaceWidth.WideCanvas -> "workspace-wide-canvas"
+        | WorkspaceWidth.WidePanes -> "workspace-wide-panes"
 
     let dashboardClass =
         match model.Canvas.CanvasPaneOpen with
@@ -1409,7 +1451,7 @@ let view model dispatch =
     let layoutClass =
         [ "app-layout"
           if model.Canvas.CanvasPaneOpen then "canvas-open"
-          if model.Canvas.CanvasPaneOpen then workspaceWidthClass
+          workspaceWidthClass
           if not terminalPaneOpen then "terminal-hidden" ]
         |> String.concat " "
 

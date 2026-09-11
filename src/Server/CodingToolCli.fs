@@ -29,6 +29,9 @@ let private promptArgument (prompt: string) =
     else
         quoted prompt
 
+let private withExtensionDiscovery arguments =
+    $"--experimental {arguments}"
+
 let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvocation =
     let p = provider |> Option.defaultValue CodingToolProvider.Default
 
@@ -38,13 +41,15 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
           Args = "--yolo" }
     | CodingToolProvider.CopilotCli, Interactive prompt ->
         { Executable = "copilot"
-          Args = $"--yolo -i {promptArgument prompt}" }
+          Args = withExtensionDiscovery $"--yolo -i {promptArgument prompt}" }
     | CodingToolProvider.CopilotCli, Resume (Some id) ->
         { Executable = "copilot"
-          Args = $"--yolo --resume {quoted id}" }
+          Args = withExtensionDiscovery $"--yolo --session-id={quoted id}" }
     | CodingToolProvider.CopilotCli, Resume None ->
         { Executable = "copilot"
-          Args = "--yolo --continue" }
+          Args = withExtensionDiscovery "--yolo --continue" }
     | CodingToolProvider.CopilotCli, NonInteractive prompt ->
         { Executable = "copilot"
-          Args = $"-p \"{escape prompt}\" --allow-all --no-ask-user -s --autopilot" }
+          Args =
+            withExtensionDiscovery
+                $"-p \"{escape prompt}\" --allow-all --no-ask-user -s --autopilot" }
