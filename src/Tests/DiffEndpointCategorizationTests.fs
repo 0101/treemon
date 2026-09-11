@@ -48,9 +48,10 @@ type DiffEndpointCategorizationTests() =
                     Patterns = [ "docs/**" ] } ]
 
     let service: WorktreeDiffApi.Service =
-        { GetSummary = fun _ _ _ -> async.Return(Ok(summary changed))
+        { GetComparisonTargets = getDefaultComparisonTargets
+          GetSummary = fun _ _ _ _ -> async.Return(Ok(summary changed))
           GetLayerCounts =
-            fun _ _ -> async.Return(uniformLayerCounts changed.Length)
+            fun _ _ _ -> async.Return(uniformLayerCounts changed.Length)
           GetFile =
             fun _ _ _ _ requested ->
                 async.Return(Ok(WorktreeDiff.Text requested.Path)) }
@@ -328,9 +329,11 @@ type DiffEndpointRepositoryConfigurationTests() =
             // Any Git work here would be a bug: the poll exists so a waiting viewer costs a file
             // read, not a diff.
             let neverCallService: WorktreeDiffApi.Service =
-                { GetSummary = fun _ _ _ -> failwith "the categorization route ran a diff"
+                { GetComparisonTargets =
+                    fun _ _ -> failwith "the categorization route listed comparisons"
+                  GetSummary = fun _ _ _ _ -> failwith "the categorization route ran a diff"
                   GetLayerCounts =
-                    fun _ _ -> failwith "the categorization route counted layers"
+                    fun _ _ _ -> failwith "the categorization route counted layers"
                   GetFile = fun _ _ _ _ -> failwith "the categorization route read a file" }
 
             withServer
@@ -398,9 +401,11 @@ type DiffEndpointRepositoryConfigurationTests() =
             File.WriteAllText(Path.Combine(repoRoot, ".treemon.json"), rootConfiguration)
 
             let neverCallService: WorktreeDiffApi.Service =
-                { GetSummary = fun _ _ _ -> failwith "the categorization route ran a diff"
+                { GetComparisonTargets =
+                    fun _ _ -> failwith "the categorization route listed comparisons"
+                  GetSummary = fun _ _ _ _ -> failwith "the categorization route ran a diff"
                   GetLayerCounts =
-                    fun _ _ -> failwith "the categorization route counted layers"
+                    fun _ _ _ -> failwith "the categorization route counted layers"
                   GetFile = fun _ _ _ _ _ -> failwith "the categorization route read a file" }
 
             withServer
@@ -445,9 +450,11 @@ type DiffEndpointRepositoryConfigurationTests() =
             File.WriteAllText(Path.Combine(repoRoot, ".treemon.json"), rootConfiguration)
 
             let neverCallService: WorktreeDiffApi.Service =
-                { GetSummary = fun _ _ _ -> failwith "Unknown worktree reached diff summary"
+                { GetComparisonTargets =
+                    fun _ _ -> failwith "Unknown worktree reached comparison metadata"
+                  GetSummary = fun _ _ _ _ -> failwith "Unknown worktree reached diff summary"
                   GetLayerCounts =
-                    fun _ _ -> failwith "Unknown worktree reached diff layer counts"
+                    fun _ _ _ -> failwith "Unknown worktree reached diff layer counts"
                   GetFile = fun _ _ _ _ _ -> failwith "Unknown worktree reached diff file" }
 
             withServer

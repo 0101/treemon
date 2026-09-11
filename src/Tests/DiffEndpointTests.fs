@@ -70,6 +70,11 @@ let private layerQuery committed local untracked =
 
     $"?committed={value committed}&local={value local}&untracked={value untracked}"
 
+let private localBranchTarget branch =
+    WorktreeDiff.tryLocalBranchTarget branch
+    |> Option.defaultWith (fun () ->
+        failwith $"Expected a display-safe local branch target: {branch}")
+
 let private serializedLayerCounts =
     { AlreadyCommitted = DiffLayerCountResult.Available 2
       LocalChanges = DiffLayerCountResult.Available 3
@@ -253,6 +258,10 @@ type DiffSerializationTests() =
                """{"status":"stale","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.BaseError,
                """{"status":"base-error","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+              (DiffSummaryResult.TargetMissing,
+               """{"status":"target-missing","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+              (DiffSummaryResult.NoCommonAncestor,
+               """{"status":"no-common-ancestor","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.TimedOut,
                """{"status":"timeout","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.GitError,
@@ -267,6 +276,36 @@ type DiffSerializationTests() =
                 serializedLayerCounts
                 DiffCategories.Missing
             |> assertJson expected)
+
+    [<Test>]
+    member _.``comparison targets serialize availability and typed failures``() =
+        let ready: Result<WorktreeDiff.DiffComparisonTargets, WorktreeDiff.WorktreeDiffError> =
+            Ok
+                { ConfiguredBase =
+                    WorktreeDiff.ConfiguredDiffComparison.Remote
+                        "origin/main"
+                  LocalBranches = [ "main"; "feature/topic&mode=100%" ] }
+
+        [ ready,
+          """{"status":"ready","configuredBase":{"label":"origin/main","available":true,"localBranch":null},"localBranches":["main","feature/topic&mode=100%"]}"""
+          Error(WorktreeDiff.GitTimedOut WorktreeDiff.EnumerateBranches),
+          """{"status":"timeout"}"""
+          Error(WorktreeDiff.GitFailed(WorktreeDiff.EnumerateBranches, 1)),
+          """{"status":"git-error"}""" ]
+        |> List.iter (fun (result, expected) ->
+            result
+            |> WorktreeDiffApi.serializeComparisonTargetsResult
+            |> assertJson expected)
+
+        Ok
+            ({ ConfiguredBase =
+                WorktreeDiff.ConfiguredDiffComparison.Local
+                    "main"
+               LocalBranches = [ "feature" ] }
+             : WorktreeDiff.DiffComparisonTargets)
+        |> WorktreeDiffApi.serializeComparisonTargetsResult
+        |> assertJson
+            """{"status":"ready","configuredBase":{"label":"main","available":true,"localBranch":"main"},"localBranches":["feature"]}"""
 
     [<Test>]
     member _.``ready summaries report the categorization state without exposing patterns``() =
@@ -386,11 +425,12 @@ type DiffEndpointHttpTests() =
               if layers.Untracked then untracked ]
 
         let service: WorktreeDiffApi.Service =
-            { GetSummary =
-                fun _ _ layers ->
+            { GetComparisonTargets = getDefaultComparisonTargets
+              GetSummary =
+                fun _ _ _ layers ->
                     async.Return(Ok(summary (filesFor layers)))
               GetLayerCounts =
-                fun _ _ -> async.Return(availableLayerCounts 1 1 1)
+                fun _ _ _ -> async.Return(availableLayerCounts 1 1 1)
               GetFile =
                 fun _ _ _ _ _ ->
                     failwith "Layer summary test does not load files" }
@@ -459,6 +499,151 @@ type DiffEndpointHttpTests() =
                         Assert.That(summaryPaths body, Is.EqualTo(expected))))
 
     [<Test>]
+    member _.``summary selects a local branch without changing no-query base compatibility``() =
+        let worktree = fakePath "branch-target"
+        let observed =
+            System.Collections.Concurrent.ConcurrentQueue<
+                WorktreeDiff.DiffComparisonTarget
+             >()
+
+        let service: WorktreeDiffApi.Service =
+            { GetComparisonTargets = getDefaultComparisonTargets
+              GetSummary =
+                fun _ _ target _ ->
+                    observed.Enqueue(target)
+                    async.Return(Ok(summary []))
+              GetLayerCounts =
+                fun _ _ _ -> async.Return(uniformLayerCounts 0)
+              GetFile =
+                fun _ _ _ _ _ ->
+                    failwith "Branch target test does not load files" }
+
+        withDiffServer
+            [ worktree ]
+            service
+            (fun _ -> "unused")
+            (fun client baseUrl ->
+                let summaryUrl =
+                    worktreeUrl baseUrl worktree "diff-summary"
+
+                use configuredBase = get client summaryUrl
+                use localBranch =
+                    get
+                        client
+                        (summaryUrl
+                         + layerQuery true true false
+                         + "&branch=feature%2Ftopic%26mode%3D100%25")
+                use percentBranch =
+                    get
+                        client
+                        (summaryUrl
+                         + layerQuery true true false
+                         + "&branch=feature%2F%2509x")
+
+                Assert.Multiple(fun () ->
+                    Assert.That(configuredBase.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(localBranch.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(percentBranch.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(
+                        observed.ToArray(),
+                        Is.EqualTo(
+                            [| WorktreeDiff.configuredBaseTarget
+                               localBranchTarget "feature/topic&mode=100%"
+                               localBranchTarget "feature/%09x" |]
+                        )
+                    )))
+
+    [<Test>]
+    member _.``comparison metadata exposes configured base and unchecked-out local branches``() =
+        let tempDir = fakePath "comparison-targets"
+        let repoDir, _ = GitTestHelpers.initRepoWithOrigin tempDir
+
+        try
+            GitTestHelpers.gitOk repoDir [ "branch"; "zeta" ]
+            GitTestHelpers.gitOk repoDir [ "branch"; "feature/topic&mode=100%" ]
+
+            withDiffServer
+                [ repoDir ]
+                WorktreeDiffApi.liveService
+                (fun _ -> failwith "Comparison metadata issued a file identity")
+                (fun client baseUrl ->
+                    use response =
+                        get
+                            client
+                            (worktreeUrl
+                                baseUrl
+                                repoDir
+                                "diff-comparisons")
+
+                    Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    response
+                    |> getResponseBody
+                    |> assertJson
+                        """{"status":"ready","configuredBase":{"label":"origin/main","available":true,"localBranch":null},"localBranches":["main","feature/topic&mode=100%","zeta"]}""")
+        finally
+            if Directory.Exists(tempDir) then
+                try
+                    Directory.Delete(tempDir, recursive = true)
+                with _ ->
+                    ()
+
+    [<Test>]
+    member _.``comparison metadata uses the injected service for semantic results``() =
+        let cases =
+            [ Ok
+                  ({ ConfiguredBase =
+                      WorktreeDiff.ConfiguredDiffComparison.Local
+                          "main"
+                     LocalBranches = [ "feature" ] }
+                   : WorktreeDiff.DiffComparisonTargets),
+              """{"status":"ready","configuredBase":{"label":"main","available":true,"localBranch":"main"},"localBranches":["feature"]}"""
+              Error(
+                  WorktreeDiff.GitTimedOut
+                      WorktreeDiff.EnumerateBranches
+              ),
+              """{"status":"timeout"}"""
+              Error(
+                  WorktreeDiff.GitFailed(
+                      WorktreeDiff.EnumerateBranches,
+                      1
+                  )
+              ),
+              """{"status":"git-error"}""" ]
+
+        cases
+        |> List.iter (fun (comparisonResult, expected) ->
+            let worktree = fakePath "comparison-service"
+
+            let service: WorktreeDiffApi.Service =
+                { GetComparisonTargets =
+                    fun _ _ -> async.Return comparisonResult
+                  GetSummary =
+                    fun _ _ _ _ ->
+                        failwith "Comparison metadata ran a summary"
+                  GetLayerCounts =
+                    fun _ _ _ ->
+                        failwith "Comparison metadata counted layers"
+                  GetFile =
+                    fun _ _ _ _ _ ->
+                        failwith "Comparison metadata loaded a file" }
+
+            withDiffServer
+                [ worktree ]
+                service
+                (fun _ -> failwith "Comparison metadata issued an identity")
+                (fun client baseUrl ->
+                    use response =
+                        get
+                            client
+                            (worktreeUrl
+                                baseUrl
+                                worktree
+                                "diff-comparisons")
+
+                    Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    response |> getResponseBody |> assertJson expected))
+
+    [<Test>]
     member _.``summary exposes independent layer counts while a local-only comparison survives a missing base``() =
         let worktree = fakePath "layer-count-errors"
         let local = entry "local.txt" None WorktreeDiff.Modified
@@ -473,12 +658,13 @@ type DiffEndpointHttpTests() =
               UntrackedCount = Ok 1 }
 
         let service: WorktreeDiffApi.Service =
-            { GetSummary =
-                fun _ _ selected ->
+            { GetComparisonTargets = getDefaultComparisonTargets
+              GetSummary =
+                fun _ _ _ selected ->
                     Assert.That(selected, Is.EqualTo(expectedSelection))
                     async.Return(Ok(summary [ local ]))
               GetLayerCounts =
-                fun _ _ -> async.Return counts
+                fun _ _ _ -> async.Return counts
               GetFile =
                 fun _ _ _ _ _ ->
                     failwith "Layer count summary test does not load files" }
@@ -547,11 +733,12 @@ type DiffEndpointHttpTests() =
         let changed = entry "changed.txt" None WorktreeDiff.Modified
 
         let service: WorktreeDiffApi.Service =
-            { GetSummary =
-                fun _ _ _ ->
+            { GetComparisonTargets = getDefaultComparisonTargets
+              GetSummary =
+                fun _ _ _ _ ->
                     async.Return(Ok(summary [ changed ]))
               GetLayerCounts =
-                fun _ _ -> async.Return(uniformLayerCounts 1)
+                fun _ _ _ -> async.Return(uniformLayerCounts 1)
               GetFile =
                 fun _ _ _ layers _ ->
                     let patch =
@@ -619,8 +806,9 @@ type DiffEndpointHttpTests() =
             TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
 
         let service: WorktreeDiffApi.Service =
-            { GetSummary =
-                fun _ _ layers ->
+            { GetComparisonTargets = getDefaultComparisonTargets
+              GetSummary =
+                fun _ _ _ layers ->
                     async {
                         if layers.AlreadyCommitted && not layers.LocalChanges then
                             firstStarted.TrySetResult(true) |> ignore
@@ -630,7 +818,7 @@ type DiffEndpointHttpTests() =
                         return Ok(summary [ changed ])
                     }
               GetLayerCounts =
-                fun _ _ -> async.Return(uniformLayerCounts 1)
+                fun _ _ _ -> async.Return(uniformLayerCounts 1)
               GetFile =
                 fun _ _ _ layers _ ->
                     let patch =
@@ -700,10 +888,11 @@ type DiffEndpointHttpTests() =
             TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
 
         let service: WorktreeDiffApi.Service =
-            { GetSummary =
-                fun _ _ _ -> async.Return(Ok(summary [ changed ]))
+            { GetComparisonTargets = getDefaultComparisonTargets
+              GetSummary =
+                fun _ _ _ _ -> async.Return(Ok(summary [ changed ]))
               GetLayerCounts =
-                fun _ _ ->
+                fun _ _ _ ->
                     async {
                         if firstLayerCountsStarted.TrySetResult(true) then
                             let! _ =
@@ -783,8 +972,9 @@ type DiffEndpointHttpTests() =
             TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
 
         let service: WorktreeDiffApi.Service =
-            { GetSummary =
-                fun _ _ layers ->
+            { GetComparisonTargets = getDefaultComparisonTargets
+              GetSummary =
+                fun _ _ _ layers ->
                     async {
                         if layers.AlreadyCommitted && not layers.LocalChanges then
                             firstStarted.TrySetResult(true) |> ignore
@@ -794,7 +984,7 @@ type DiffEndpointHttpTests() =
                             return Ok(summary [ changed ])
                     }
               GetLayerCounts =
-                fun _ _ -> async.Return(uniformLayerCounts 1)
+                fun _ _ _ -> async.Return(uniformLayerCounts 1)
               GetFile =
                 fun _ _ _ layers _ ->
                     let patch =
@@ -858,11 +1048,14 @@ type DiffEndpointHttpTests() =
         let worktree = fakePath "invalid-layers"
 
         let service: WorktreeDiffApi.Service =
-            { GetSummary =
-                fun _ _ _ ->
+            { GetComparisonTargets =
+                fun _ _ ->
+                    failwith "Invalid filters reached comparison targets"
+              GetSummary =
+                fun _ _ _ _ ->
                     failwith "Invalid filters reached diff summary"
               GetLayerCounts =
-                fun _ _ ->
+                fun _ _ _ ->
                     failwith "Invalid filters reached diff layer counts"
               GetFile =
                 fun _ _ _ _ _ ->
@@ -879,10 +1072,20 @@ type DiffEndpointHttpTests() =
                   "?committed=yes&local=true&untracked=false"
                   "?committed=true&local=true&untracked=false&path=secret"
                   "?committed=true&committed=false&local=true&untracked=false"
+                  "?committed=true&local=true&untracked=false&branch="
+                  "?committed=true&local=true&untracked=false&branch=one&branch=two"
+                  "?committed=true&local=true&untracked=false&branch=main%00forged"
+                  "?committed=true&local=true&untracked=false&branch=ma%E2%80%8Bin"
+                  "?committed=true&local=true&untracked=false&branch=feature%E2%80%A8hidden"
+                  "?committed=true&local=true&untracked=false&branch=feature%E2%80%A9hidden"
                   "?layer=committed" ]
                 |> List.iter (fun query ->
                     use response = get client (summaryUrl + query)
-                    Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                    Assert.That(
+                        response.StatusCode,
+                        Is.EqualTo(HttpStatusCode.BadRequest),
+                        query
+                    )
                     Assert.That(
                         getResponseBody response,
                         Is.EqualTo("Invalid diff-summary query")
@@ -904,8 +1107,9 @@ type DiffEndpointHttpTests() =
                   "pause" ]
 
         let service: WorktreeDiffApi.Service =
-            { GetSummary =
-                fun deadline _ _ ->
+            { GetComparisonTargets = getDefaultComparisonTargets
+              GetSummary =
+                fun deadline _ _ _ ->
                     async {
                         let! earlier = runDelayedGit deadline 1
 
@@ -927,7 +1131,7 @@ type DiffEndpointHttpTests() =
                                 failwith $"Expected earlier Git success, got {other}"
                     }
               GetLayerCounts =
-                fun _ _ -> async.Return(uniformLayerCounts 0)
+                fun _ _ _ -> async.Return(uniformLayerCounts 0)
               GetFile =
                 fun _ _ _ _ _ ->
                     failwith "File endpoint was not expected" }
@@ -1040,11 +1244,14 @@ type DiffEndpointHttpTests() =
         let filename = "secret.html"
 
         let service: WorktreeDiffApi.Service =
-            { GetSummary =
-                fun _ _ _ ->
+            { GetComparisonTargets =
+                fun _ _ ->
+                    failwith "Attacker Host reached diff-comparisons"
+              GetSummary =
+                fun _ _ _ _ ->
                     failwith "Attacker Host reached diff-summary"
               GetLayerCounts =
-                fun _ _ ->
+                fun _ _ _ ->
                     failwith "Attacker Host reached diff layer counts"
               GetFile =
                 fun _ _ _ _ _ ->
@@ -1065,7 +1272,8 @@ type DiffEndpointHttpTests() =
                     let port = Uri(baseUrl).Port
                     let host = $"attacker.example:{port}"
 
-                    [ worktreeUrl baseUrl worktree "diff-summary"
+                    [ worktreeUrl baseUrl worktree "diff-comparisons"
+                      worktreeUrl baseUrl worktree "diff-summary"
                       worktreeUrl baseUrl worktree "diff-file?identity=forged"
                       worktreeUrl baseUrl worktree filename
                       baseUrl + DiffAssets.cssPath ]
@@ -1175,6 +1383,12 @@ type DiffEndpointHttpTests() =
                   )
               ),
               ("""{"status":"base-error"}""" |> withUniformLayerError "base-error")
+              Error(WorktreeDiff.ComparisonTargetNotFound "gone"),
+              ("""{"status":"target-missing"}"""
+               |> withUniformLayerError "target-missing")
+              Error(WorktreeDiff.NoCommonAncestor "orphan"),
+              ("""{"status":"no-common-ancestor"}"""
+               |> withUniformLayerError "no-common-ancestor")
               Error(
                   WorktreeDiff.GitFailed(
                       WorktreeDiff.ResolveMergeBase,
@@ -1579,6 +1793,8 @@ type DiffEndpointHttpTests() =
             service
             (fun _ -> "issued-id")
             (fun _ baseUrl ->
+                let comparisonsUrl =
+                    worktreeUrl baseUrl worktree "diff-comparisons"
                 let summaryUrl =
                     worktreeUrl baseUrl worktree "diff-summary"
 
@@ -1586,6 +1802,7 @@ type DiffEndpointHttpTests() =
                     worktreeUrl baseUrl worktree "diff-file?identity=issued-id"
 
                 use missingClient = new HttpClient()
+                use missingComparisons = get missingClient comparisonsUrl
                 use missingSummary = get missingClient summaryUrl
                 use missingFile = get missingClient fileUrl
 
@@ -1595,13 +1812,18 @@ type DiffEndpointHttpTests() =
                     "not-a-viewer"
                 )
 
+                use invalidComparisons = get invalidClient comparisonsUrl
                 use invalidSummary = get invalidClient summaryUrl
 
                 Assert.Multiple(fun () ->
+                    Assert.That(missingComparisons.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                    Assert.That(getResponseBody missingComparisons, Is.EqualTo("Invalid diff viewer"))
                     Assert.That(missingSummary.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
                     Assert.That(getResponseBody missingSummary, Is.EqualTo("Invalid diff viewer"))
                     Assert.That(missingFile.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
                     Assert.That(getResponseBody missingFile, Is.EqualTo("Invalid diff-file query"))
+                    Assert.That(invalidComparisons.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                    Assert.That(getResponseBody invalidComparisons, Is.EqualTo("Invalid diff viewer"))
                     Assert.That(invalidSummary.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
                     Assert.That(getResponseBody invalidSummary, Is.EqualTo("Invalid diff viewer"))))
 
@@ -1611,11 +1833,14 @@ type DiffEndpointHttpTests() =
         let unknown = Path.Combine(fakePath "outside", "..", "outside-secret")
 
         let neverCallService: WorktreeDiffApi.Service =
-            { GetSummary =
-                fun _ _ _ ->
+            { GetComparisonTargets =
+                fun _ _ ->
+                    failwith "Unknown worktree reached comparison metadata"
+              GetSummary =
+                fun _ _ _ _ ->
                     failwith "Unknown worktree reached diff summary"
               GetLayerCounts =
-                fun _ _ ->
+                fun _ _ _ ->
                     failwith "Unknown worktree reached diff layer counts"
               GetFile =
                 fun _ _ _ _ _ ->
@@ -1626,13 +1851,24 @@ type DiffEndpointHttpTests() =
             neverCallService
             (fun _ -> failwith "Unknown worktree issued an identity")
             (fun client baseUrl ->
+                use unknownComparisons =
+                    get
+                        client
+                        (worktreeUrl
+                            baseUrl
+                            unknown
+                            "diff-comparisons")
+
                 use unknownResponse =
                     get
                         client
                         (worktreeUrl baseUrl unknown "diff-summary")
 
-                Assert.That(unknownResponse.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
-                Assert.That(getResponseBody unknownResponse, Is.EqualTo("Unknown worktree")))
+                Assert.Multiple(fun () ->
+                    Assert.That(unknownComparisons.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
+                    Assert.That(getResponseBody unknownComparisons, Is.EqualTo("Unknown worktree"))
+                    Assert.That(unknownResponse.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
+                    Assert.That(getResponseBody unknownResponse, Is.EqualTo("Unknown worktree"))))
 
         let changed = entry "changed.txt" None WorktreeDiff.Modified
 
@@ -1648,8 +1884,19 @@ type DiffEndpointHttpTests() =
             (fun client baseUrl ->
                 let summaryUrl =
                     worktreeUrl baseUrl known "diff-summary"
+                let comparisonsUrl =
+                    worktreeUrl baseUrl known "diff-comparisons"
                 let fileUrl =
                     worktreeUrl baseUrl known "diff-file"
+
+                use invalidComparisons =
+                    get client (comparisonsUrl + "?branch=main")
+
+                Assert.That(invalidComparisons.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                Assert.That(
+                    getResponseBody invalidComparisons,
+                    Is.EqualTo("Invalid diff-comparisons query")
+                )
 
                 [ "?baseRef=HEAD"
                   $"?root={Uri.EscapeDataString(unknown)}"
@@ -1940,10 +2187,12 @@ type DiffEndpointHttpTests() =
                       "tracked.txt" ]
 
             let liveService: WorktreeDiffApi.Service =
-                { GetSummary =
-                    WorktreeDiff.getWorktreeDiffSummaryWithinDeadline
+                { GetComparisonTargets =
+                    WorktreeDiff.getDiffComparisonTargetsWithinDeadline
+                  GetSummary =
+                    WorktreeDiff.getWorktreeDiffSummaryForTargetWithinDeadline
                   GetLayerCounts =
-                    WorktreeDiff.getWorktreeDiffLayerCountsWithinDeadline
+                    WorktreeDiff.getWorktreeDiffLayerCountsForTargetWithinDeadline
                   GetFile =
                     WorktreeDiff.getWorktreeDiffFileWithinDeadline }
 
