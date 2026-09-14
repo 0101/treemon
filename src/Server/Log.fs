@@ -76,13 +76,10 @@ let private fallbackLogPath =
         $"process-{Environment.ProcessId}-{Guid.NewGuid():N}.log"
     )
 
-// AppContext keeps the one-time destination process-local; unlike an environment variable, it
-// cannot leak the production sink into terminals or other child processes.
-let private logPath =
-    lazy
-        match AppContext.GetData(configuredPathKey) with
-        | :? string as path -> path
-        | _ -> fallbackLogPath
+let private currentLogPath () =
+    match AppContext.GetData(configuredPathKey) with
+    | :? string as path -> path
+    | _ -> fallbackLogPath
 
 let private ensureLogDirectory (path: string) =
     path
@@ -111,18 +108,17 @@ let init path =
            || containsControlCharacter path
            || not (Path.IsPathFullyQualified path) then
             Error InitializationError.InvalidPath
-        elif logPath.IsValueCreated then
+        elif AppContext.GetData(configuredPathKey) :? string then
             Error InitializationError.AlreadyInitialized
         else
             match tryCreateLogFile path with
             | Error _ as error -> error
             | Ok() ->
                 AppContext.SetData(configuredPathKey, path)
-                logPath.Value |> ignore
                 Ok())
 
 let internal currentPath () =
-    lock lockObj (fun () -> logPath.Value)
+    lock lockObj currentLogPath
 
 let internal isSlowOperation (elapsed: TimeSpan) =
     elapsed >= TimeSpan.FromSeconds 5.0
@@ -132,7 +128,7 @@ let log (context: string) (message: string) =
     let line = $"{timestamp} [{context}] {message}{Environment.NewLine}"
     lock lockObj (fun () ->
         try
-            let path = logPath.Value
+            let path = currentLogPath ()
             ensureLogDirectory path
             use stream =
                 new FileStream(

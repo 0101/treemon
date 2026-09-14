@@ -54,9 +54,16 @@ worktree-local selection to a remaining sibling when one exists.
 For each terminal, the host is ttyd's sole upstream WebSocket client for the terminal lifetime. It
 continuously drains ttyd into a small bounded raw replay buffer and accepts one replaceable browser
 attachment. Replacing or losing the browser attachment does not replace the shell. A new attachment
-receives the bounded replay and a resize so full-screen applications can redraw. Attachment routing
-is data-plane behavior, not an additional lifecycle state. Output older than the buffer, terminal
-scrollback, and browser-rendered state are not durable.
+receives the bounded replay, the latest observed interactive DEC modes, and a resize so full-screen
+applications can redraw. The host restores an active alternate-screen buffer and output-rendering
+modes before replay, then reapplies mouse tracking and encoding, cursor visibility, focus reporting,
+bracketed paste, and other input modes afterward. It never sends an inactive alternate-screen reset
+after replay because that reset can restore stale cursor state. A full terminal reset clears the
+retained projection; a soft reset clears only the modes xterm resets while preserving its active
+buffer and mouse modes. The scanner recognizes seven-bit `ESC [` control sequences and does not
+interpret UTF-8 continuation bytes as eight-bit controls. Attachment routing is data-plane behavior,
+not an additional lifecycle state. Output older than the buffer, terminal scrollback, and
+browser-rendered state are not durable.
 The host does not publish a terminal as started until that upstream has delivered its first terminal
 output frame within the terminal startup timeout; a bound ttyd TCP port alone is not evidence that
 PowerShell is ready for input. Upstream output is streamed into protocol-valid chunks, so the
@@ -86,6 +93,37 @@ immediately and remembers that exact terminal ID so stale registry, start, or cl
 cannot restore it while authoritative teardown continues. A registry read that no longer lists the
 terminal confirms teardown and releases the dismissal; a failed teardown releases it at once so the
 next authoritative registry read restores the tab.
+
+When a running terminal becomes visible through pane open, tab selection, or worktree selection,
+the client routes one activation through Elmish and sends an exact-origin message to that iframe
+after its visible DOM state has committed. It repeats the signal when the top-level document becomes
+visible or focused after an interruption such as RDP reconnect. The terminal page accepts the
+message only from its parent and a configured dashboard origin. It reloads immediately when ttyd's
+exact manual reconnect overlay is present, or checks for that exact overlay during one coalesced,
+bounded recovery window when page initialization or the transport-close event trails the visibility
+signal. Repeated visibility signals refresh that window, while a document-local reload latch
+prevents paired browser events from replacing the same attachment twice. A receiver-initiated
+reload writes a marker that the new terminal document consumes and removes during initialization.
+The resulting suppression decision stays document-local and can suppress at most one iframe-load
+activation; when browser storage is unavailable, that decision fails closed rather than looping.
+Deactivation clears the child recovery window so a hidden pane, terminal, worktree, or browser tab
+cannot reclaim the single attachment. Healthy shell prompts, partially typed commands, password
+prompts, and full-screen applications receive no input and are not reloaded.
+
+Beside **New**, a selected running terminal with a validated attachment endpoint shows
+**Reconnect view**. The action replaces only that terminal's browser iframe and attachment while
+preserving its terminal ID, endpoint, selected tab, shell, agent, and every sibling iframe. It is
+hidden for an empty selection, an interrupted terminal, or a rejected endpoint. The replacement
+restores iframe focus only when that view generation is still current, the terminal remains
+selected, the pane is visible, and no modal overlay is active when the deferred focus effect runs;
+ordinary worktree focus, tab selection, closure, pane hiding, and newer reconnects cancel the
+pending focus request so a late load cannot reclaim focus after the user moves elsewhere. Reconnect
+does not call start, close, resume, command-input, host-replacement, or process APIs, and an iframe
+load does not create a connected-success state. The new attachment receives the host's current
+alternate-screen mode, bounded raw replay, and remaining
+interaction-mode projection, so the full-screen background, mouse input, cursor visibility, focus
+reporting, and bracketed paste survive even when their enabling sequences are older than the
+retained screen output.
 
 ### Launch routing and command startup
 
@@ -235,9 +273,13 @@ queue, delay, or proactively block new terminals, prompts, or Copilot sessions.
 After a Treemon server start, activity ingress becomes available before replacement reconciliation.
 Surviving reporters retry their acknowledged presence bootstrap. Every recently open persisted
 instance with a current terminal origin remains pending until that exact PID and process-start
-identity re-presents, is proven dead, loses its origin from the authoritative registry, or reaches
-`openWindow`. Pending instances gate replacement, so a truly empty terminal remains distinguishable
-from one whose reporter has not reconnected without a global startup delay.
+identity re-presents or sends a validated heartbeat, is proven dead, loses its origin from the
+authoritative registry, or reaches `openWindow`. Presence creates unknown bindings; a heartbeat can
+only reconcile an already-known, non-closed binding with matching metadata and a currently resolved
+exact process identity. Its current receipt re-establishes liveness even when the prior observation
+has just crossed `openWindow`, without widening the set of processes that may gate replacement.
+Pending instances gate replacement, so a truly empty terminal remains distinguishable from one
+whose reporter has not reconnected without a global startup delay.
 
 Whenever all currently owned Copilot sessions are naturally idle, Treemon captures the authoritative
 host registry revision and the owned-session activity epoch, then immediately rechecks both. It
@@ -489,6 +531,19 @@ while replacement runs asynchronously, then alone applies the replacement's regi
 The client stores active terminal IDs and in-flight start state per worktree. Registry refreshes
 retain exact selections while IDs remain valid, choose the same-worktree neighbor after a close,
 and preserve the selected sibling ordinal across replacement.
+It also stores a client-only view generation for terminals whose iframe is manually reconnected.
+The generation participates only in the React iframe key; advancing one generation remounts that
+iframe without changing the authoritative registry. Iframe load completion returns through Elmish,
+and the focus effect re-resolves the current DOM node and checks its generation, visibility, and
+absence of an active modal overlay before focusing it. The shared ordinary-focus transition clears
+pending terminal-view focus while the no-retarget Canvas focus path preserves it.
+A subscription keyed by the active terminal ID and safe endpoint origin reports visibility triggers
+through Elmish. The resulting command retries for a small bounded number of animation frames until
+React has committed the active unhidden iframe, then posts only while that terminal and pane remain
+visible. A matching iframe load replays the same Elmish notification so a visibility signal sent to
+the initial document cannot be lost before the terminal page installs its receiver. The parent
+activates only from a visible, focused dashboard and sends deactivation on blur, top-level hiding,
+pane/tab/worktree changes, and subscription disposal.
 Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
 port into the loopback dashboard origins supplied to `EmbeddedTerminal`. Production omits the
 option and allows only the configured server origin aliases, so the terminal client never infers a
@@ -648,11 +703,22 @@ isolated server and fails on incomplete exact process cleanup.
   cycle while making stale notices harmless.
 - **One upstream and one browser writer per terminal:** the host preserves each shell across browser
   reconnects without defining multi-writer input semantics.
+- **Client-only manual view reconnect:** a per-terminal React key generation replaces one browser
+  attachment without introducing a lifecycle API or claiming connection health. Generation,
+  selection, and visibility guards prevent stale load focus from targeting a newer or hidden view.
+- **Overlay-gated browser reconnect:** terminal visibility alone never sends Enter or reloads a live
+  page. The cross-origin iframe reloads only after its injected listener positively identifies
+  ttyd 1.7.7's manual reconnect overlay, then the existing replaceable-attachment path restores the
+  tracked screen and interaction modes plus recent output. This avoids a ttyd frontend fork while
+  keeping normal shell and TUI input untouched.
 - **Separate state from proxy hosting:** the replay/attachment mailbox remains independently
   testable while HTTP/WebSocket hosting shares one loopback-only Kestrel bootstrap with the control
   API, preventing security-sensitive host configuration from drifting.
-- **Raw bounded replay:** reconnect gets useful recent output without persisting terminal content or
-  introducing a terminal-state serializer. Replay capacity never doubles as an upstream transport
+- **Raw bounded replay plus interaction modes:** reconnect gets useful recent output without
+  persisting terminal content or introducing a screen-state serializer. A small seven-bit control
+  parser retains current DEC modes, preserves xterm's soft-reset exceptions, restores active-buffer
+  and rendering state before replay, and reapplies input state afterward because ttyd resets xterm
+  before consuming a replacement attachment. Replay capacity never doubles as an upstream transport
   limit; large output messages are streamed while old retained frames are evicted.
 - **Explicit replay discontinuities:** replay reads distinguish a complete suffix from one whose
   requested prefix was evicted. Resuming across that gap resets and clears the emulator and shows an
@@ -673,8 +739,15 @@ isolated server and fails on incomplete exact process cleanup.
   resetting the global sequence.
 - **Acknowledged startup reconciliation:** activity ingress starts before replacement coordination,
   and surviving reporters retry presence until acknowledged. Recently open persisted identities
-  gate individually until they re-present, die, lose their origin, or reach `openWindow`;
-  replacement does not infer absence from a missed first event or title.
+  gate individually until they re-present or send a validated exact heartbeat, die, lose their
+  origin, or reach `openWindow`; replacement does not infer absence from a missed first event or
+  title.
+- **Transition-based replacement diagnostics:** the coordinator logs only when its observable
+  blocker changes, distinguishing pending startup reconciliation from genuinely non-idle sessions
+  and reporting recheck races without writing one line per one-second poll. Activity-query failures
+  carry their elapsed time. An unexpected pre-commit coordinator exception is logged and retried on
+  the next poll; the replacement commit boundary already converts its own failures to explicit
+  outcomes, so the outer retry cannot repeat an uncertain mutation.
 - **Opportunistic replacement, not draining:** normal work is never rejected in anticipation of an
   update. A race cancels the attempt rather than delaying the work.
 - **Non-idle sessions are never shut down for replacement:** every open `Working` or
@@ -812,12 +885,13 @@ isolated server and fails on incomplete exact process cleanup.
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
 | `src/Server/Program.fs` | Host client and replacement-loop lifecycle without terminal shutdown on server stop |
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
+| `src/Client/AppTypes.fs` and `src/Client/App.fs` | Reconnect view generation, Elmish messages, guarded load completion, and focus effect |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus real proxy command delivery, control rejection, UTF-8 frame boundaries, replacement, crash, security, and cleanup coverage |
 | `src/Tests/SessionIsolationVerifier/` and `scripts/verify-session-isolation.ps1` | Durable five-phase concurrent same-session process-isolation harness and clean-checkout runner |
 | `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
 | `src/Tests/EmbeddedLaunchEndToEndTests.fs`, `src/Tests/TestAgentRecorder`, and `scripts/verify-embedded-launch-routing.ps1` | Reproducible isolated real-host launch matrix, exact argv recorder, raw route evidence, forced-delivery rollback, native HWND preservation, and exact cleanup |
-| `src/Tests/TerminalPaneTests.fs` | Exact server-returned terminal selection and direct Canvas launch routing |
+| `src/Tests/TerminalPaneTests.fs` and `src/Tests/WorkspaceLayoutTests.fs` | Terminal selection, reconnect generation/focus guards, and selected-only iframe replacement |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
 | `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |
 

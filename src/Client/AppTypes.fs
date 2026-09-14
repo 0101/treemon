@@ -55,6 +55,7 @@ type Model =
       DismissedEmbeddedTerminals: Set<EmbeddedTerminalId>
       ActiveEmbeddedTerminals: Map<WorktreePath, EmbeddedTerminalId>
       EmbeddedTerminalStarts: Map<WorktreePath, TerminalPane.TerminalStartState>
+      EmbeddedTerminalViewStates: Map<EmbeddedTerminalId, TerminalPane.TerminalViewState>
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
       OverviewAgentsStuck: bool
@@ -89,6 +90,12 @@ type Msg =
         Result<EmbeddedTerminalStartResult, string>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
     | SelectEmbeddedTerminal of EmbeddedTerminalId
+    | ReconnectEmbeddedTerminalView of EmbeddedTerminalId
+    | EmbeddedTerminalViewLoaded of EmbeddedTerminalId * generation: int
+    | NotifyEmbeddedTerminalVisibility of
+        terminalId: EmbeddedTerminalId *
+        origin: string *
+        signal: TerminalPane.TerminalVisibilitySignal
     | CycleEmbeddedTerminal of EmbeddedTerminalId * TerminalPane.CycleDirection
     | CloseEmbeddedTerminal of EmbeddedTerminalId
     | StartEmbeddedTerminalFromTab of EmbeddedTerminalId

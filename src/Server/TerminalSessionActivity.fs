@@ -151,13 +151,15 @@ let internal replacementSessionPlan
     (terminals: TerminalHostReplacement.ReplacementTerminal list)
     (snapshot: OwnedSessionSnapshot)
     =
-    if
-        not (Set.isEmpty snapshot.PendingReconciliation)
-        || snapshot.OpenSessions
-           |> List.exists (fun session ->
-               session.Status <> SessionLevelStatus.Idle)
-    then
-        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+    let blockers: TerminalHostReplacement.ReplacementBlockers =
+        { PendingReconciliationCount = snapshot.PendingReconciliation.Count
+          NonIdleSessionCount =
+            snapshot.OpenSessions
+            |> List.sumBy (fun session ->
+                if session.Status = SessionLevelStatus.Idle then 0 else 1) }
+
+    if blockers.PendingReconciliationCount + blockers.NonIdleSessionCount > 0 then
+        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle blockers
     else
         let terminalsById =
             terminals

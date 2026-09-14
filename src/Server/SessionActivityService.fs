@@ -799,24 +799,44 @@ type SessionActivityService internal
         if isDisposed () then
             Error "session activity service is stopped"
         else
+            let timer = Diagnostics.Stopwatch.StartNew()
+
             try
-                mailbox.PostAndReply(
-                    (fun reply ->
-                        QueryTerminalActivity(
-                            now,
-                            reconciliationScope,
-                            terminalSessionIds,
-                            reply
-                        )),
-                    timeout = acknowledgedWriteTimeout
-                )
+                let result =
+                    mailbox.PostAndReply(
+                        (fun reply ->
+                            QueryTerminalActivity(
+                                now,
+                                reconciliationScope,
+                                terminalSessionIds,
+                                reply
+                            )),
+                        timeout = acknowledgedWriteTimeout
+                    )
+
+                timer.Stop()
+
+                match result with
+                | Ok _ ->
+                    if Log.isSlowOperation timer.Elapsed then
+                        Log.log
+                            "Activity"
+                            $"Exact terminal activity query completed in {timer.ElapsedMilliseconds}ms"
+
+                    result
+                | Error error ->
+                    Error
+                        $"{error} (activity query failed after {timer.ElapsedMilliseconds}ms)"
             with error ->
+                timer.Stop()
+
                 Log.logException
                     "Activity"
-                    "Exact terminal activity query failed"
+                    $"Exact terminal activity query failed after {timer.ElapsedMilliseconds}ms"
                     error
 
-                Error "exact terminal activity query failed"
+                Error
+                    $"exact terminal activity query failed after {timer.ElapsedMilliseconds}ms"
 
     member internal this.QueryTerminalActivityAt
         (

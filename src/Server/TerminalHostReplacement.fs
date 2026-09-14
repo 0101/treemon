@@ -22,9 +22,11 @@ type internal ReplacementResumeCommand =
     { CopilotSessionId: SessionId
       Command: string }
 
+type internal ReplacementBlockers = { PendingReconciliationCount: int; NonIdleSessionCount: int }
+
 [<RequireQualifiedAccess>]
 type internal ReplacementSessionPlan =
-    | WaitingForIdle
+    | WaitingForIdle of ReplacementBlockers
     | Ready of
         activityEpoch: int64 *
         shutdownTargets: ReplacementShutdownTarget list *
@@ -35,7 +37,7 @@ type internal ReplacementPolicyQuery = DateTimeOffset -> ReplacementTerminal lis
 [<RequireQualifiedAccess>]
 type internal ReplacementOutcome =
     | NoCandidate
-    | WaitingForIdle
+    | WaitingForIdle of ReplacementBlockers
     | RaceLost
     | Replaced of stagedVersion: string
     | Failed of stagedVersion: string * error: string
@@ -597,7 +599,8 @@ let private recheckReplacement
                 | Ok terminals ->
                     match queryReplacementPolicy query terminals with
                     | Error error -> return RecheckFailed error
-                    | Ok ReplacementSessionPlan.WaitingForIdle -> return RecheckChanged
+                    | Ok(ReplacementSessionPlan.WaitingForIdle _) ->
+                        return RecheckChanged
                     | Ok(
                         ReplacementSessionPlan.Ready(
                             activityEpoch,
@@ -935,8 +938,8 @@ let internal tryReplaceHostIgnoring
                             match queryReplacementPolicy query terminals with
                             | Error error ->
                                 return ReplacementOutcome.Failed(stagedVersion, error)
-                            | Ok ReplacementSessionPlan.WaitingForIdle ->
-                                return ReplacementOutcome.WaitingForIdle
+                            | Ok(ReplacementSessionPlan.WaitingForIdle blockers) ->
+                                return ReplacementOutcome.WaitingForIdle blockers
                             | Ok(
                                 ReplacementSessionPlan.Ready(
                                     activityEpoch,
@@ -992,8 +995,7 @@ let internal tryReplaceHostIgnoring
             return ReplacementOutcome.NoCandidate
     }
 
-let private activeCooldown now =
-    Option.filter (fun failed -> now < failed.RetryAfter)
+let private activeCooldown now = Option.filter (fun failed -> now < failed.RetryAfter)
 
 let private nextCooldown now outcome current =
     match outcome with
@@ -1001,18 +1003,22 @@ let private nextCooldown now outcome current =
     | ReplacementOutcome.Failed(stagedVersion, _) ->
         Some { StagedVersion = stagedVersion; RetryAfter = now + TimeSpan.FromMinutes 1.0 }
     | ReplacementOutcome.NoCandidate
-    | ReplacementOutcome.WaitingForIdle
+    | ReplacementOutcome.WaitingForIdle _
     | ReplacementOutcome.RaceLost ->
         current |> activeCooldown now
 
-let private logOutcome = function
-    | ReplacementOutcome.Replaced stagedVersion ->
-        Log.log "TerminalHost" $"Replaced the host with staged version {stagedVersion} at a natural idle window"
-    | ReplacementOutcome.Failed(stagedVersion, error) ->
-        Log.log "TerminalHost" $"Replacement of staged version {stagedVersion} failed: {error}"
-    | ReplacementOutcome.NoCandidate
-    | ReplacementOutcome.WaitingForIdle
-    | ReplacementOutcome.RaceLost -> ()
+let private logOutcomeTransition previous outcome =
+    if previous <> Some outcome then
+        match outcome with
+        | ReplacementOutcome.Replaced stagedVersion ->
+            Log.log "TerminalHost" $"Replaced the host with staged version {stagedVersion} at a natural idle window"
+        | ReplacementOutcome.Failed(stagedVersion, error) ->
+            Log.log "TerminalHost" $"Replacement of staged version {stagedVersion} failed: {error}"
+        | ReplacementOutcome.WaitingForIdle blockers ->
+            Log.log "TerminalHost" $"Replacement blocked: pending_reconciliation_count={blockers.PendingReconciliationCount} non_idle_session_count={blockers.NonIdleSessionCount}"
+        | ReplacementOutcome.RaceLost ->
+            Log.log "TerminalHost" "Replacement lost a registry or activity recheck race; retrying"
+        | ReplacementOutcome.NoCandidate -> ()
 
 let internal runCoordinatorWith
     utcNow
@@ -1020,7 +1026,7 @@ let internal runCoordinatorWith
     tryReplace
     (cancellationToken: System.Threading.CancellationToken)
     =
-    let rec loop cooldown =
+    let rec loop cooldown previousObservation =
         async {
             if cancellationToken.IsCancellationRequested then
                 return ()
@@ -1028,16 +1034,32 @@ let internal runCoordinatorWith
                 let ignoredStagedVersion =
                     cooldown |> activeCooldown (utcNow ()) |> Option.map _.StagedVersion
 
-                let! outcome = tryReplace ignoredStagedVersion
-                logOutcome outcome
+                let! attempted =
+                    async {
+                        try
+                            let! outcome = tryReplace ignoredStagedVersion
+                            return Some outcome
+                        with error ->
+                            Log.logException "TerminalHost" "Replacement coordinator failed" error
+                            return None
+                    }
 
-                let next = cooldown |> nextCooldown (utcNow ()) outcome
-                let! keepGoing = waitForNextPoll cancellationToken
+                match attempted with
+                | None ->
+                    let! keepGoing = waitForNextPoll cancellationToken
 
-                if keepGoing then return! loop next
+                    if keepGoing then
+                        return! loop cooldown previousObservation
+                | Some outcome ->
+                    logOutcomeTransition previousObservation outcome
+                    let next = cooldown |> nextCooldown (utcNow ()) outcome
+                    let! keepGoing = waitForNextPoll cancellationToken
+
+                    if keepGoing then
+                        return! loop next (Some outcome)
         }
 
-    loop None
+    loop None None
 
 let private waitForNextPoll
     (cancellationToken: System.Threading.CancellationToken)
