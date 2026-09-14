@@ -46,6 +46,8 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Repo header | Enter | Toggle collapse/expand |
 | Repo header | + | Create new worktree |
 | Global | Ctrl+P | Open fuzzy worktree search |
+| Embedded terminal | Ctrl+Enter | Insert an input newline |
+| Embedded terminal | Ctrl+V | Paste through the browser and xterm paste path |
 | Embedded terminal | Ctrl+Tab | Select the next terminal for the current worktree |
 | Embedded terminal | Ctrl+Shift+Tab | Select the previous terminal for the current worktree |
 | Global | Escape | Reclaim keyboard focus to the worktree navigation (also closes an open modal) |
@@ -101,12 +103,14 @@ canvas iframe before routing it into the same Elmish messages as top-level short
 
 Embedded terminals also run in cross-origin iframes. `TerminalProxy` injects a capture-phase listener
 into ttyd's root page so Ctrl+P, Ctrl+Tab, and Ctrl+Shift+Tab are intercepted before xterm handles
-them. The iframe posts either `open-worktree-search` or `cycle-terminal`; `TerminalPane.messageListener`
-accepts the message only when its loopback origin and source window match the active terminal iframe.
-Cycling wraps within the terminals for the currently selected worktree and preserves each other
-worktree's independent terminal selection. After a cycle, and after Escape closes worktree search
-opened from a terminal, the dashboard sends an origin-scoped focus request to the active iframe and
-the injected bridge restores xterm's helper textarea.
+them. On the focused xterm input, it also sends a literal line feed for exact Ctrl+Enter and stops
+xterm from converting exact Ctrl+V to control byte `0x16` without cancelling the browser's trusted
+paste action. The iframe posts either `open-worktree-search` or `cycle-terminal`;
+`TerminalPane.messageListener` accepts the message only when its loopback origin and source window
+match the active terminal iframe. Cycling wraps within the terminals for the currently selected
+worktree and preserves each other worktree's independent terminal selection. After a cycle, and
+after Escape closes worktree search opened from a terminal, the dashboard sends an origin-scoped
+focus request to the active iframe and the injected bridge restores xterm's helper textarea.
 
 ## Technical Approach
 
