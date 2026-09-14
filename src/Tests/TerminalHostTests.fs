@@ -2161,7 +2161,7 @@ type TerminalHostProxyTests() =
                     ))))
 
     [<Test>]
-    member _.``terminal page adds shortcuts and gates reconnect reload``() =
+    member _.``terminal page adds keyboard and reconnect integration``() =
         let html =
             "<html><head><style>.xterm-viewport{overflow-y:scroll}</style></head><body></body></html>"
         let allowedOrigins =
@@ -2194,6 +2194,9 @@ type TerminalHostProxyTests() =
             Assert.That(customized, Does.Contain("focus-terminal"))
             Assert.That(customized, Does.Contain(".xterm-helper-textarea"))
             Assert.That(customized, Does.Contain("e.source!==parent"))
+            Assert.That(customized, Does.Contain("window.term.input('\\n',true)"))
+            Assert.That(customized, Does.Contain("exactCtrl&&key==='v'"))
+            Assert.That(customized, Does.Not.Contain("hasTerminalMethod('paste')"))
             Assert.That(customized, Does.Contain("e.stopImmediatePropagation()"))
             Assert.That(customized, Does.Contain("},true)"))
             Assert.That(customized, Does.Contain($"action={serializedAction}"))

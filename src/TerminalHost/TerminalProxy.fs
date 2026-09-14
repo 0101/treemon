@@ -22,7 +22,33 @@ module internal TerminalProxy =
     let [<Literal>] private CommandSubprotocol = "treemon-command"
 
     let private terminalPageHeadInjection =
-        $"<style>.xterm-viewport{{scrollbar-width:none}}.xterm-viewport::-webkit-scrollbar{{display:none}}</style><script>(function(){{function focusTerminal(){{var input=document.querySelector('.xterm-helper-textarea');if(input)input.focus()}}window.addEventListener('message',function(e){{if(e.source!==parent||!e.data||e.data.action!=='{Shared.TerminalPageMessage.FocusTerminal}')return;focusTerminal()}});document.addEventListener('keydown',function(e){{if(!(e.ctrlKey||e.metaKey)||e.altKey)return;var key=e.key.toLowerCase();var action=key==='p'?'{Shared.TerminalPageMessage.OpenWorktreeSearch}':key==='tab'?'{Shared.TerminalPageMessage.CycleTerminal}':key==='w'&&!e.shiftKey?'{Shared.TerminalPageMessage.CloseTerminal}':key==='n'&&!e.shiftKey?'{Shared.TerminalPageMessage.StartTerminal}':'';if(!action)return;e.preventDefault();e.stopImmediatePropagation();if(action==='{Shared.TerminalPageMessage.CycleTerminal}')parent.postMessage({{action:action,direction:e.shiftKey?'{Shared.TerminalPageMessage.PreviousDirection}':'{Shared.TerminalPageMessage.NextDirection}'}},'*');else parent.postMessage({{action:action}},'*')}},true)}})()</script>"
+        String.concat "" [
+            "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>"
+            "<script>(function(){"
+            "function focusTerminal(){var input=document.querySelector('.xterm-helper-textarea');if(input)input.focus()}"
+            "function isTerminalInput(e){return e.target&&e.target.classList&&e.target.classList.contains('xterm-helper-textarea')}"
+            "function hasTerminalMethod(name){return window.term&&typeof window.term[name]==='function'}"
+            "window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.action!=='"
+            Shared.TerminalPageMessage.FocusTerminal
+            "')return;focusTerminal()});"
+            "document.addEventListener('keydown',function(e){"
+            "var key=(e.key||'').toLowerCase();"
+            "var exactCtrl=e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey;"
+            "if(isTerminalInput(e)&&exactCtrl&&key==='enter'&&hasTerminalMethod('input')){"
+            "e.preventDefault();e.stopImmediatePropagation();window.term.input('\\n',true);return}"
+            "if(isTerminalInput(e)&&exactCtrl&&key==='v'){e.stopImmediatePropagation();return}"
+            "if(!(e.ctrlKey||e.metaKey)||e.altKey)return;"
+            $"var action=key==='p'?'{Shared.TerminalPageMessage.OpenWorktreeSearch}':key==='tab'?'{Shared.TerminalPageMessage.CycleTerminal}':key==='w'&&!e.shiftKey?'{Shared.TerminalPageMessage.CloseTerminal}':key==='n'&&!e.shiftKey?'{Shared.TerminalPageMessage.StartTerminal}':'';"
+            "if(!action)return;e.preventDefault();e.stopImmediatePropagation();"
+            "if(action==='" + Shared.TerminalPageMessage.CycleTerminal + "')"
+            "parent.postMessage({action:action,direction:e.shiftKey?'"
+            Shared.TerminalPageMessage.PreviousDirection
+            "':'"
+            Shared.TerminalPageMessage.NextDirection
+            "'},'*');"
+            "else parent.postMessage({action:action},'*')"
+            "},true)})()</script>"
+        ]
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 

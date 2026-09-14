@@ -188,6 +188,127 @@ function terminalText() {
   ).join("\n");
 }
 
+async function verifyTerminalInputShortcuts(page) {
+  const terminalInput = page.locator(".xterm-helper-textarea");
+  const clipboardText = "# terminal-paste-first\n# terminal-paste-second\n";
+  const normalizedPaste = clipboardText.replace(/\r?\n/g, "\r");
+  const bracketedPaste = `\x1b[200~${normalizedPaste}\x1b[201~`;
+
+  await page.context().grantPermissions(
+    ["clipboard-read", "clipboard-write"],
+    { origin: new URL(page.url()).origin },
+  );
+  await page.evaluate(async () => {
+    window.__treemonPreviousClipboard = await navigator.clipboard.readText();
+  });
+
+  try {
+    const clipboardSeeded = await page.evaluate(async (expectedText) => {
+      await navigator.clipboard.writeText(expectedText);
+      const clipboardText = await navigator.clipboard.readText();
+      return clipboardText.replace(/\r\n/g, "\n") === expectedText;
+    }, clipboardText);
+    assert(clipboardSeeded, "Could not seed the isolated browser clipboard");
+
+    await page.evaluate((expectedText) => {
+      window.__treemonTerminalInput = [];
+      window.__treemonTerminalInputSubscription = window.term.onData((data) => {
+        window.__treemonTerminalInput.push(data);
+      });
+      window.__treemonClipboardMatched = null;
+      window.__treemonPasteGuard = (event) => {
+        const pastedText = event.clipboardData?.getData("text/plain") ?? "";
+        window.__treemonClipboardMatched =
+          pastedText.replace(/\r\n/g, "\n") === expectedText;
+
+        if (!window.__treemonClipboardMatched) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      };
+      document.addEventListener("paste", window.__treemonPasteGuard, true);
+    }, clipboardText);
+
+    await terminalInput.focus();
+    await terminalInput.press("Control+Enter");
+    await page.waitForFunction(() => window.__treemonTerminalInput.length > 0);
+
+    const ctrlEnterInput = await page.evaluate(() =>
+      window.__treemonTerminalInput.splice(0),
+    );
+    assert(
+      ctrlEnterInput.length === 1 && ctrlEnterInput[0] === "\n",
+      `Ctrl+Enter emitted ${JSON.stringify(ctrlEnterInput)} instead of one line feed`,
+    );
+
+    const pasteWithMode = async (bracketedPasteMode, expectedInput) => {
+      await page.evaluate(
+        (enabled) =>
+          new Promise((resolveWrite) => {
+            window.term.write(
+              enabled ? "\x1b[?2004h" : "\x1b[?2004l",
+              resolveWrite,
+            );
+          }),
+        bracketedPasteMode,
+      );
+      await page.evaluate(() => {
+        window.__treemonTerminalInput = [];
+        window.__treemonClipboardMatched = null;
+      });
+
+      await terminalInput.focus();
+      await terminalInput.press("Control+V");
+      await page.waitForFunction(
+        () => window.__treemonClipboardMatched !== null,
+      );
+
+      const clipboardMatched = await page.evaluate(
+        () => window.__treemonClipboardMatched,
+      );
+      assert(
+        clipboardMatched,
+        "Ctrl+V did not receive the seeded clipboard text",
+      );
+      await page.waitForFunction(() => window.__treemonTerminalInput.length > 0);
+
+      const terminalInputData = await page.evaluate(() =>
+        window.__treemonTerminalInput.splice(0),
+      );
+      assert(
+        !terminalInputData.some((chunk) => chunk.includes("\x16")),
+        "Ctrl+V reached xterm key handling as control byte 0x16",
+      );
+      assert(
+        terminalInputData.length === 1 && terminalInputData[0] === expectedInput,
+        bracketedPasteMode
+          ? "Ctrl+V did not preserve bracketed-paste mode"
+          : "Ctrl+V did not emit one normalized paste payload",
+      );
+    };
+
+    await pasteWithMode(false, normalizedPaste);
+    await pasteWithMode(true, bracketedPaste);
+  } finally {
+    await page.evaluate(async () => {
+      if (window.__treemonPasteGuard) {
+        document.removeEventListener("paste", window.__treemonPasteGuard, true);
+      }
+      window.__treemonTerminalInputSubscription?.dispose();
+      const previousClipboard = window.__treemonPreviousClipboard;
+      delete window.__treemonPreviousClipboard;
+      delete window.__treemonTerminalInput;
+      delete window.__treemonTerminalInputSubscription;
+      delete window.__treemonClipboardMatched;
+      delete window.__treemonPasteGuard;
+
+      if (typeof previousClipboard === "string") {
+        await navigator.clipboard.writeText(previousClipboard);
+      }
+    });
+  }
+}
+
 export async function runTtydRuntimeVerification() {
   const fixture = join(
     repo,
@@ -285,8 +406,9 @@ export async function runTtydRuntimeVerification() {
     );
     await page.evaluate(
       ({ encodedMarker }) => {
-        window.term.paste(
+        window.term.input(
           `1..120 | ForEach-Object { Write-Output ('scroll-line-' + $_) }; $pwd.Path; Write-Output ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedMarker}')))`,
+          true,
         );
         window.term.input("\r", true);
       },
@@ -345,8 +467,10 @@ export async function runTtydRuntimeVerification() {
     await page.waitForFunction(
       () => document.querySelector(".xterm-viewport").scrollTop > 0,
     );
+    await verifyTerminalInputShortcuts(page);
+
     console.log(
-      `PASS: stock ttyd accepted input with hidden scrollbar and working scrollback through TerminalHost session ${terminal.sessionId} in ${fixture}`,
+      `PASS: stock ttyd accepted Ctrl+Enter, Ctrl+V, input, and scrollback through TerminalHost session ${terminal.sessionId} in ${fixture}`,
     );
   } catch (error) {
     const bearerToken = host?.manifest?.bearerToken;
