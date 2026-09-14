@@ -1021,8 +1021,6 @@ let private logOutcomeTransition previous outcome =
             Log.log "TerminalHost" "Replacement lost a registry or activity recheck race; retrying"
         | ReplacementOutcome.NoCandidate -> ()
 
-    outcome
-
 let internal runCoordinatorWith
     utcNow
     waitForNextPoll
@@ -1037,21 +1035,25 @@ let internal runCoordinatorWith
                 let ignoredStagedVersion =
                     cooldown |> activeCooldown (utcNow ()) |> Option.map _.StagedVersion
 
-                let! outcome =
+                let! attempted =
                     async {
-                        try return! tryReplace ignoredStagedVersion
+                        try
+                            let! outcome = tryReplace ignoredStagedVersion
+                            return Some outcome
                         with error ->
-                            if not cancellationToken.IsCancellationRequested then
-                                Log.logException "TerminalHost" "Replacement coordinator failed" error
-                            return raise error
+                            Log.logException "TerminalHost" "Replacement coordinator failed" error
+                            return None
                     }
 
-                let current = logOutcomeTransition previousObservation outcome
-                let next = cooldown |> nextCooldown (utcNow ()) outcome
-                let! keepGoing = waitForNextPoll cancellationToken
+                match attempted with
+                | None -> return ()
+                | Some outcome ->
+                    logOutcomeTransition previousObservation outcome
+                    let next = cooldown |> nextCooldown (utcNow ()) outcome
+                    let! keepGoing = waitForNextPoll cancellationToken
 
-                if keepGoing then
-                    return! loop next (Some current)
+                    if keepGoing then
+                        return! loop next (Some outcome)
         }
 
     loop None None

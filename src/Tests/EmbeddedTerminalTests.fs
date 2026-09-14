@@ -3337,28 +3337,21 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
-    member _.``coordinator propagates an unexpected attempt failure after logging it``() =
-        task {
-            let tryReplace _ =
+    member _.``coordinator stops after an unexpected attempt failure``() =
+        let attempts = ConcurrentQueue<unit>()
+
+        TerminalHostReplacement.runCoordinatorWith
+            (fun () -> DateTimeOffset.UtcNow)
+            (fun _ -> async.Return true)
+            (fun _ ->
                 async {
-                    return
-                        invalidOp
-                            "simulated coordinator attempt failure"
-                }
+                    attempts.Enqueue()
+                    return invalidOp "simulated coordinator attempt failure"
+                })
+            System.Threading.CancellationToken.None
+        |> Async.RunSynchronously
 
-            let run () =
-                TerminalHostReplacement.runCoordinatorWith
-                    (fun () -> DateTimeOffset.UtcNow)
-                    (fun _ -> async.Return false)
-                    tryReplace
-                    System.Threading.CancellationToken.None
-                |> Async.RunSynchronously
-
-            Assert.That(
-                (fun () -> run ()),
-                Throws.TypeOf<InvalidOperationException>()
-            )
-        }
+        Assert.That(attempts.Count, Is.EqualTo 1)
 
     [<Test>]
     member _.``registry race between snapshot and recheck aborts without side effects``() =

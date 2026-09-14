@@ -822,17 +822,7 @@ type SessionActivityService internal
                         $"Exact terminal activity query completed in {timer.ElapsedMilliseconds}ms"
 
                 result
-            with
-            | :? TimeoutException as error ->
-                timer.Stop()
-
-                Log.logException
-                    "Activity"
-                    $"Exact terminal activity query timed out after {timer.ElapsedMilliseconds}ms"
-                    error
-
-                Error "exact terminal activity query failed"
-            | error ->
+            with error ->
                 timer.Stop()
 
                 Log.logException

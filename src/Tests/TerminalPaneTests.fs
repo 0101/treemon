@@ -328,11 +328,10 @@ type TerminalPaneStateTests() =
                   FocusAfterLoad = false }
             ]
 
-        let updated, generation =
+        let updated =
             states |> reconnectView firstOne
 
         Assert.Multiple(fun () ->
-            Assert.That(generation, Is.EqualTo(3))
             Assert.That(viewGeneration firstOne updated, Is.EqualTo(3))
             Assert.That(viewGeneration secondOne updated, Is.EqualTo(7))
             Assert.That(updated[firstOne].FocusAfterLoad, Is.True)
@@ -340,8 +339,9 @@ type TerminalPaneStateTests() =
 
     [<Test>]
     member _.``Only the current reconnect generation completes its focus request``() =
-        let pending, generation =
+        let pending =
             Map.empty |> reconnectView firstOne
+        let generation = viewGeneration firstOne pending
 
         let stale, staleFocus =
             pending
@@ -1308,7 +1308,7 @@ type TerminalFocusTests() =
 
     [<Test>]
     member _.``Automatic canvas focus preserves an explicit terminal target``() =
-        let viewStates, _ =
+        let viewStates =
             Map.empty |> reconnectView firstTwo
 
         let updated, _ =

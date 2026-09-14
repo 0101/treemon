@@ -247,17 +247,21 @@ let private focusEmbeddedTerminalViewCmd terminalId generation =
     Cmd.ofEffect (fun _ ->
         TerminalPane.focusTerminalView terminalId generation)
 
-let private reconnectableEmbeddedTerminal model =
+let private activeEmbeddedTerminal model =
     let selectedWorktree =
         TerminalPane.selectedWorktree
             model.TerminalPaneTarget
             model.FocusedElement
 
-    let activeTerminal =
-        TerminalPane.activeTerminalId
-            selectedWorktree
-            model.ActiveEmbeddedTerminals
-            model.EmbeddedTerminals
+    selectedWorktree,
+    TerminalPane.activeTerminalId
+        selectedWorktree
+        model.ActiveEmbeddedTerminals
+        model.EmbeddedTerminals
+
+let private reconnectableEmbeddedTerminal model =
+    let _, activeTerminal =
+        activeEmbeddedTerminal model
 
     model.EmbeddedTerminals
     |> TerminalPane.tryReconnectableTab activeTerminal
@@ -662,7 +666,7 @@ let update msg model =
                 tab.Id = terminalId)
 
         if model.TerminalPaneOpen && isReconnectable then
-            let viewStates, _ =
+            let viewStates =
                 model.EmbeddedTerminalViewStates
                 |> TerminalPane.reconnectView terminalId
 
@@ -683,14 +687,14 @@ let update msg model =
                 EmbeddedTerminalViewStates = viewStates }
 
         let isStillReconnectable =
-            reconnectableEmbeddedTerminal model
+            reconnectableEmbeddedTerminal updated
             |> Option.exists (fun tab ->
                 tab.Id = terminalId)
 
         updated,
         if
             focusAfterLoad
-            && model.TerminalPaneOpen
+            && updated.TerminalPaneOpen
             && isStillReconnectable
         then
             focusEmbeddedTerminalViewCmd
@@ -1345,16 +1349,8 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
 
     let visibleTerminal =
-        let selectedWorktree =
-            TerminalPane.selectedWorktree
-                model.TerminalPaneTarget
-                model.FocusedElement
-
-        let activeTerminal =
-            TerminalPane.activeTerminalId
-                selectedWorktree
-                model.ActiveEmbeddedTerminals
-                model.EmbeddedTerminals
+        let _, activeTerminal =
+            activeEmbeddedTerminal model
 
         TerminalPane.visibleRunningTerminal
             model.TerminalPaneOpen
@@ -1683,16 +1679,8 @@ let view model dispatch =
         CanvasView.view model dispatch
 
     let terminalEl =
-        let selectedWorktree =
-            TerminalPane.selectedWorktree
-                model.TerminalPaneTarget
-                model.FocusedElement
-
-        let activeTerminal =
-            TerminalPane.activeTerminalId
-                selectedWorktree
-                model.ActiveEmbeddedTerminals
-                model.EmbeddedTerminals
+        let selectedWorktree, activeTerminal =
+            activeEmbeddedTerminal model
 
         let startState =
             selectedWorktree

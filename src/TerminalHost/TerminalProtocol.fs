@@ -137,9 +137,7 @@ module internal TerminalModeReplay =
         |> Array.fold (fun updated mode ->
             updated |> updateMode enabled mode) modes
 
-    let private pendingStart value =
-        if value = 0x1Buy then "\u001b"
-        else ""
+    let private pendingStart value = if value = 0x1Buy then "\u001b" else ""
 
     let private softReset state =
         { Modes =
@@ -152,8 +150,8 @@ module internal TerminalModeReplay =
         let character = char value
 
         match state.Pending with
-        | "" ->
-            { state with Pending = pendingStart value }
+        | "" when value <> 0x1Buy -> state
+        | "" -> { state with Pending = "\u001b" }
         | "\u001b" when character = 'c' -> empty
         | "\u001b" when character = '[' ->
             { state with Pending = "\u001b[" }
@@ -174,11 +172,12 @@ module internal TerminalModeReplay =
             { state with Pending = pendingStart value }
 
     let observeOutputFrame (data: byte array) state =
-        if data.Length <= 1 then
-            state
-        else
-            data[1..]
-            |> Array.fold observeByte state
+        let rec observe index current =
+            if index < data.Length then
+                observe (index + 1) (observeByte current data[index])
+            else current
+
+        observe 1 state
 
     let private replayPlacement mode =
         if alternateScreenModes.Contains mode then

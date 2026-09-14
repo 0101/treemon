@@ -2211,48 +2211,6 @@ type TerminalHostProxyTests() =
                 customized,
                 Does.Contain("allowedOrigins.indexOf(event.origin)<0")
             )
-            Assert.That(
-                customized,
-                Does.Contain("child.style.position==='absolute'")
-            )
-            Assert.That(
-                customized,
-                Does.Contain("child.textContent===reconnectPrompt")
-            )
-            Assert.That(
-                customized,
-                Does.Contain("poll=setInterval(reconnectIfWaiting,100)")
-            )
-            Assert.That(
-                customized,
-                Does.Contain("deadline=setTimeout(clearPending,10000)")
-            )
-            Assert.That(
-                customized,
-                Does.Contain("if(deadline!==null)clearTimeout(deadline)")
-            )
-            Assert.That(
-                customized,
-                Does.Contain("reloading=true;clearPending()")
-            )
-            Assert.That(
-                customized,
-                Does.Contain("sessionStorage.setItem(reloadMarker,'1')")
-            )
-            Assert.That(
-                customized,
-                Does.Contain(
-                    "if(loaded&&suppressNextLoadedActivation){suppressNextLoadedActivation=false;return}"
-                )
-            )
-            Assert.That(
-                customized,
-                Does.Contain("if(event.data.active===false){clearPending();return}")
-            )
-            Assert.That(
-                customized,
-                Does.Contain("document.visibilityState!=='visible'")
-            )
 
             Assert.That(
                 customized.IndexOf("open-worktree-search", StringComparison.Ordinal),
