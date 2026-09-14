@@ -189,25 +189,19 @@ let targetEmbeddedTerminal path model =
         TerminalPaneOpen = true
         TerminalPaneTarget = Some path }
 
-let private targetEmbeddedTerminalStart startState path model =
+let private targetEmbeddedTerminalStart focusOnCompletion path model =
     { targetEmbeddedTerminal path model with
         EmbeddedTerminalStarts =
             model.EmbeddedTerminalStarts
-            |> TerminalPane.setStartState
+            |> TerminalPane.setStarting
                 path
-                startState }
+                focusOnCompletion }
 
 let targetEmbeddedTerminalLaunch path model =
-    targetEmbeddedTerminalStart
-        TerminalPane.TerminalStartState.Starting
-        path
-        model
+    targetEmbeddedTerminalStart false path model
 
 let private targetFocusedEmbeddedTerminalLaunch path model =
-    targetEmbeddedTerminalStart
-        TerminalPane.TerminalStartState.StartingAndFocus
-        path
-        model
+    targetEmbeddedTerminalStart true path model
 
 let beginEmbeddedTerminalStart path model =
     let alreadyStarting =
@@ -261,7 +255,39 @@ let private launchEmbeddedTerminalCmd path start =
         saveTerminalPaneOpenCmd true
     ]
 
-let private startFocusedEmbeddedTerminal path model =
+let private launchAgentCmd path =
+    Cmd.batch [
+        Cmd.OfAsync.either
+            (fun () -> worktreeApi.Value.startAgent path)
+            ()
+            (fun result -> AgentStarted(path, result))
+            (fun ex -> AgentStarted(path, Error ex.Message))
+        saveTerminalPaneOpenCmd true
+    ]
+
+let private tryLaunchQueuedAgent path starts =
+    TerminalPane.tryStartQueuedAgent path starts
+    |> Option.map (fun next -> next, launchAgentCmd path)
+
+let private failEmbeddedTerminalStart path error model =
+    match
+        tryLaunchQueuedAgent
+            path
+            model.EmbeddedTerminalStarts
+    with
+    | Some(starts, command) ->
+        { model with EmbeddedTerminalStarts = starts },
+        command
+    | None ->
+        { model with
+            EmbeddedTerminalStarts =
+                model.EmbeddedTerminalStarts
+                |> TerminalPane.setStartState
+                    path
+                    (TerminalPane.TerminalStartState.Failed error) },
+        Cmd.none
+
+let private startFocusedEmbeddedTerminal path start model =
     let updated, alreadyStarting =
         beginFocusedEmbeddedTerminalStart path model
 
@@ -269,10 +295,7 @@ let private startFocusedEmbeddedTerminal path model =
     if alreadyStarting then
         saveTerminalPaneOpenCmd true
     else
-        launchEmbeddedTerminalCmd
-            path
-            (fun () ->
-                worktreeApi.Value.startEmbeddedTerminal path)
+        launchEmbeddedTerminalCmd path start
 
 /// Adopts an incoming registry snapshot, keeping terminals the user dismissed hidden while their
 /// teardown is unresolved and carrying each worktree's selection across the change.
@@ -289,12 +312,53 @@ let private applyEmbeddedSnapshot snapshot (model: Model) =
                 visible
                 model.ActiveEmbeddedTerminals }
 
+let private finishEmbeddedTerminalStart forceFocus path result model =
+    match result with
+    | Ok started ->
+        let applied = applyEmbeddedSnapshot started.Snapshot model
+
+        let shouldFocus =
+            forceFocus
+            || TerminalPane.shouldFocusStartedTerminal
+                path
+                model.EmbeddedTerminalStarts
+
+        let starts, queuedAgentCmd =
+            match
+                tryLaunchQueuedAgent
+                    path
+                    model.EmbeddedTerminalStarts
+            with
+            | Some next -> next
+            | None ->
+                model.EmbeddedTerminalStarts
+                |> TerminalPane.clearStartState path,
+                Cmd.none
+
+        let updated =
+            { applied with
+                ActiveEmbeddedTerminals =
+                    applied.ActiveEmbeddedTerminals
+                    |> TerminalPane.selectTerminal
+                        started.TerminalId
+                        applied.EmbeddedTerminals
+                EmbeddedTerminalStarts = starts }
+
+        updated,
+        Cmd.batch [
+            if shouldFocus then
+                focusEmbeddedTerminalWhenReadyCmd started.TerminalId
+            queuedAgentCmd
+        ]
+    | Error error ->
+        failEmbeddedTerminalStart path error model
+
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
     | Card scopedKey, "t" -> findWorktree scopedKey model |> Option.map (_.Path >> OpenEmbeddedTerminal)
+    | Card scopedKey, ("a" | "A") -> findWorktree scopedKey model |> Option.map (_.Path >> StartAgent)
     | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (_.Path >> ToggleAutoSync)
-    | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "r" -> findWorktree scopedKey model |> Option.bind (fun wt -> if canResumeSession wt then Some (ResumeSession wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
     | Card scopedKey, "c" -> Some ToggleCanvasPane
@@ -553,6 +617,11 @@ let update msg model =
                 |> TerminalPane.setStartState
                     path
                     TerminalPane.TerminalStartState.Starting
+            | Some (TerminalPane.TerminalStartState.StartingWithQueuedAgents(_, count)) ->
+                model.EmbeddedTerminalStarts
+                |> TerminalPane.setStartState
+                    path
+                    (TerminalPane.TerminalStartState.StartingWithQueuedAgents(false, count))
             | Some (TerminalPane.TerminalStartState.Failed _) ->
                 model.EmbeddedTerminalStarts
                 |> TerminalPane.clearStartState path
@@ -574,12 +643,33 @@ let update msg model =
         Cmd.batch [ saveTerminalPaneOpenCmd true; focusCmd ]
     | OpenEmbeddedTerminal path
     | StartEmbeddedTerminal path ->
-        startFocusedEmbeddedTerminal path model
+        startFocusedEmbeddedTerminal
+            path
+            (fun () ->
+                worktreeApi.Value.startEmbeddedTerminal path)
+            model
+    | StartAgent path ->
+        match
+            TerminalPane.tryQueueAgentStart
+                path
+                model.EmbeddedTerminalStarts
+        with
+        | Some starts ->
+            { targetEmbeddedTerminal path model with
+                EmbeddedTerminalStarts = starts },
+            saveTerminalPaneOpenCmd true
+        | None ->
+            targetFocusedEmbeddedTerminalLaunch path model,
+            launchAgentCmd path
     | StartEmbeddedTerminalFromTab terminalId ->
         model.EmbeddedTerminals
         |> TerminalPane.tryFindTab terminalId
         |> Option.map (fun tab ->
-            startFocusedEmbeddedTerminal tab.Worktree model)
+            startFocusedEmbeddedTerminal
+                tab.Worktree
+                (fun () ->
+                    worktreeApi.Value.startEmbeddedTerminal tab.Worktree)
+                model)
         |> Option.defaultValue (model, Cmd.none)
     | EmbeddedTerminalSnapshotChanged snapshot ->
         // A registry read is the only authoritative confirmation that a dismissed terminal is gone:
@@ -598,51 +688,11 @@ let update msg model =
         { model with EmbeddedTerminalPollInFlight = false },
         Cmd.none
     | EmbeddedTerminalStarted(path, result) ->
-        match result with
-        | Ok started ->
-            let applied = applyEmbeddedSnapshot started.Snapshot model
-
-            let shouldFocus =
-                match
-                    TerminalPane.tryStartState
-                        path
-                        model.EmbeddedTerminalStarts
-                with
-                | Some TerminalPane.TerminalStartState.StartingAndFocus -> true
-                | _ -> false
-
-            let updated =
-                { applied with
-                    ActiveEmbeddedTerminals =
-                        applied.ActiveEmbeddedTerminals
-                        |> TerminalPane.selectTerminal
-                            started.TerminalId
-                            applied.EmbeddedTerminals
-                    EmbeddedTerminalStarts =
-                        model.EmbeddedTerminalStarts
-                        |> TerminalPane.clearStartState path }
-
-            updated,
-            if shouldFocus then
-                focusEmbeddedTerminalWhenReadyCmd started.TerminalId
-            else
-                Cmd.none
-        | Error error ->
-            { model with
-                EmbeddedTerminalStarts =
-                    model.EmbeddedTerminalStarts
-                    |> TerminalPane.setStartState
-                        path
-                        (TerminalPane.TerminalStartState.Failed error) },
-            Cmd.none
+        finishEmbeddedTerminalStart false path result model
+    | AgentStarted(path, result) ->
+        finishEmbeddedTerminalStart true path result model
     | EmbeddedTerminalRequestFailed (path, error) ->
-        { model with
-            EmbeddedTerminalStarts =
-                model.EmbeddedTerminalStarts
-                |> TerminalPane.setStartState
-                    path
-                    (TerminalPane.TerminalStartState.Failed error) },
-        Cmd.none
+        failEmbeddedTerminalStart path error model
     | SelectEmbeddedTerminal terminalId ->
         { model with
             ActiveEmbeddedTerminals =
@@ -882,9 +932,6 @@ let update msg model =
 
     | FocusSession path ->
         model, Cmd.OfAsync.perform worktreeApi.Value.focusSession path SessionResult
-
-    | OpenNewTab path ->
-        model, Cmd.OfAsync.perform worktreeApi.Value.openNewTab path SessionResult
 
     | ResumeSession path ->
         let updated, alreadyStarting =
@@ -1523,8 +1570,8 @@ let view model dispatch =
           CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
           OpenTerminal = fun wt -> dispatch (if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path)
           OpenEmbeddedTerminal = fun wt -> dispatch (OpenEmbeddedTerminal wt.Path)
+          StartAgent = fun wt -> dispatch (StartAgent wt.Path)
           OpenEditor = fun wt -> dispatch (OpenEditor wt.Path)
-          OpenNewTab = fun wt -> dispatch (OpenNewTab wt.Path)
           ResumeSession = fun wt -> dispatch (ResumeSession wt.Path)
           DeleteWorktree = fun key -> dispatch (ConfirmDeleteWorktree key)
           ArchiveWorktree = fun key -> dispatch (ConfirmArchiveWorktree key)

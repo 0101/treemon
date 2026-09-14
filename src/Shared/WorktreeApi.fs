@@ -10,6 +10,7 @@ type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: WorktreePath -> Async<unit>
       startEmbeddedTerminal: WorktreePath -> Async<Result<EmbeddedTerminalStartResult, string>>
+      startAgent: WorktreePath -> Async<Result<EmbeddedTerminalStartResult, string>>
       getEmbeddedTerminals: unit -> Async<EmbeddedTerminalSnapshot>
       closeEmbeddedTerminal: EmbeddedTerminalId -> Async<Result<EmbeddedTerminalSnapshot, string>>
       openEditor: WorktreePath -> Async<unit>
@@ -23,7 +24,6 @@ type IWorktreeApi =
       unarchiveWorktree: WorktreePath -> Async<Result<unit, string>>
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<CreateWorktreeWarnings, string>>
-      openNewTab: WorktreePath -> Async<Result<unit, string>>
       launchAction: ActionRequest -> Async<Result<EmbeddedTerminalStartResult, string>>
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>

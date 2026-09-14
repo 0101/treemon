@@ -5,6 +5,7 @@ open System.Text
 open Shared
 
 type InvocationMode =
+    | Start
     | Interactive of prompt: string
     | Resume of sessionId: string option
     | NonInteractive of prompt: string
@@ -35,6 +36,9 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
     let p = provider |> Option.defaultValue CodingToolProvider.Default
 
     match p, mode with
+    | CodingToolProvider.CopilotCli, Start ->
+        { Executable = "copilot"
+          Args = "--yolo" }
     | CodingToolProvider.CopilotCli, Interactive prompt ->
         { Executable = "copilot"
           Args = withExtensionDiscovery $"--yolo -i {promptArgument prompt}" }

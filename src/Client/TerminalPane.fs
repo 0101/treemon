@@ -12,6 +12,7 @@ open Navigation
 type TerminalStartState =
     | Starting
     | StartingAndFocus
+    | StartingWithQueuedAgents of focusOnCompletion: bool * queuedCount: int
     | Failed of error: string
 
 type TerminalPaneState =
@@ -180,10 +181,58 @@ let setStartState path state states =
 let clearStartState path states =
     removePath path states
 
+let setStarting path focusOnCompletion states =
+    let state =
+        match tryStartState path states with
+        | Some (TerminalStartState.StartingWithQueuedAgents(_, count)) ->
+            TerminalStartState.StartingWithQueuedAgents(focusOnCompletion, count)
+        | _ when focusOnCompletion ->
+            TerminalStartState.StartingAndFocus
+        | _ ->
+            TerminalStartState.Starting
+
+    setStartState path state states
+
+let tryQueueAgentStart path states =
+    let queued =
+        match tryStartState path states with
+        | Some TerminalStartState.Starting ->
+            Some(TerminalStartState.StartingWithQueuedAgents(false, 1))
+        | Some TerminalStartState.StartingAndFocus ->
+            Some(TerminalStartState.StartingWithQueuedAgents(true, 1))
+        | Some (TerminalStartState.StartingWithQueuedAgents(focus, count)) ->
+            Some(TerminalStartState.StartingWithQueuedAgents(focus, count + 1))
+        | Some (TerminalStartState.Failed _)
+        | None -> None
+
+    queued
+    |> Option.map (fun state -> setStartState path state states)
+
+let shouldFocusStartedTerminal path states =
+    match tryStartState path states with
+    | Some TerminalStartState.StartingAndFocus
+    | Some (TerminalStartState.StartingWithQueuedAgents(true, _)) -> true
+    | _ -> false
+
+let tryStartQueuedAgent path states =
+    match tryStartState path states with
+    | Some (TerminalStartState.StartingWithQueuedAgents(_, count)) ->
+        let next =
+            if count > 1 then
+                TerminalStartState.StartingWithQueuedAgents(true, count - 1)
+            else
+                TerminalStartState.StartingAndFocus
+
+        states
+        |> setStartState path next
+        |> Some
+    | _ -> None
+
 let private startInFlight state =
     match state with
     | TerminalStartState.Starting
-    | TerminalStartState.StartingAndFocus -> true
+    | TerminalStartState.StartingAndFocus
+    | TerminalStartState.StartingWithQueuedAgents _ -> true
     | TerminalStartState.Failed _ -> false
 
 let isStarting path states =
