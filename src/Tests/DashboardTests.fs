@@ -2280,8 +2280,9 @@ type DashboardTests() =
     [<TestCase(false)>]
     [<TestCase(true)>]
     [<Category("Fast")>]
-    member this.``Embedded terminal forwards search tab switching start and close shortcuts in both layouts``(onePane: bool) =
+    member this.``Embedded terminal translates input and forwards supported shortcuts in both layouts``(onePane: bool) =
         task {
+            do! this.Context.GrantPermissionsAsync([| "clipboard-read"; "clipboard-write" |])
             let! page = this.Context.NewPageAsync()
             let converter = Fable.Remoting.Json.FableJsonConverter()
             let worktreePath = WorktreePath "Q:/code/TestProject/feature-recent"
@@ -2297,10 +2298,20 @@ type DashboardTests() =
                     + label
                     + "</title></head><body><textarea class=\"xterm-helper-textarea\" id=\"terminal-target\">"
                     + label
-                    + "</textarea><script>window.__terminalKeydowns=0;"
-                    + "document.addEventListener('keydown',function(e){"
-                    + "var key=e.key.toLowerCase();"
-                    + "if(key==='p'||key==='tab'||key==='n'||key==='w')window.__terminalKeydowns++})"
+                    + "</textarea><script>"
+                    + "window.__terminalInputs=[];window.__terminalPasteMatched=null;"
+                    + "window.__terminalInputKeydowns=0;window.__terminalShortcutKeydowns=0;"
+                    + "window.term={input:function(data,wasUserInput){window.__terminalInputs.push([data,wasUserInput])}};"
+                    + "var terminalTarget=document.getElementById('terminal-target');"
+                    + "terminalTarget.addEventListener('keydown',function(e){"
+                    + "var key=(e.key||'').toLowerCase();"
+                    + "if(key==='p'||key==='tab'||key==='n'||key==='w')window.__terminalShortcutKeydowns++;"
+                    + "if(key==='enter'||key==='v')window.__terminalInputKeydowns++;"
+                    + "if(e.ctrlKey&&key==='v')e.preventDefault()},true);"
+                    + "terminalTarget.addEventListener('paste',function(e){"
+                    + "var pastedText=e.clipboardData?e.clipboardData.getData('text/plain'):'';"
+                    + "window.__terminalPasteMatched=pastedText.replace(/\\r\\n/g,'\\n')===window.__expectedTerminalPaste;"
+                    + "e.preventDefault()})"
                     + "</script></body></html>"
                 )
 
@@ -2511,6 +2522,87 @@ type DashboardTests() =
             )
 
             do! firstTarget.FocusAsync()
+            do! firstTarget.PressAsync("Control+Enter")
+
+            let! ctrlEnterState =
+                firstTarget.EvaluateAsync<string array>(
+                    """element => [
+                        String(window.__terminalInputs.length),
+                        window.__terminalInputs[0]?.[0] ?? '',
+                        String(window.__terminalInputs[0]?.[1]),
+                        String(window.__terminalInputKeydowns)
+                    ]"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(ctrlEnterState[0], Is.EqualTo("1"))
+                Assert.That(ctrlEnterState[1], Is.EqualTo("\n"))
+                Assert.That(ctrlEnterState[2], Is.EqualTo("true"))
+                Assert.That(
+                    ctrlEnterState[3],
+                    Is.EqualTo("0"),
+                    "Ctrl+Enter must be stopped before xterm handles it as ordinary Enter"
+                ))
+
+            let! _ =
+                firstTarget.EvaluateAsync(
+                    "element => { window.__terminalInputs=[]; window.__terminalInputKeydowns=0; }"
+                )
+
+            do! firstTarget.PressAsync("Enter")
+
+            let! ordinaryEnterState =
+                firstTarget.EvaluateAsync<string array>(
+                    """element => [
+                        String(window.__terminalInputs.length),
+                        String(window.__terminalInputKeydowns)
+                    ]"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    ordinaryEnterState[0],
+                    Is.EqualTo("0"),
+                    "Ordinary Enter must not use Treemon's modified-input bridge"
+                )
+                Assert.That(ordinaryEnterState[1], Is.EqualTo("1")))
+
+            let pasteText = "terminal-paste-first\nterminal-paste-second"
+            let pasteTextJson = JsonConvert.SerializeObject(pasteText)
+
+            let! _ =
+                page.EvaluateAsync(
+                    $"() => navigator.clipboard.writeText({pasteTextJson})"
+                )
+
+            let! _ =
+                firstTarget.EvaluateAsync(
+                    "element => { window.__expectedTerminalPaste="
+                    + pasteTextJson
+                    + "; window.__terminalInputs=[]; window.__terminalPasteMatched=null; window.__terminalInputKeydowns=0; }"
+                )
+
+            do! firstTarget.FocusAsync()
+            do! firstTarget.PressAsync("Control+V")
+
+            let! ctrlVState =
+                firstTarget.EvaluateAsync<string array>(
+                    """element => [
+                        String(window.__terminalPasteMatched),
+                        String(window.__terminalInputKeydowns),
+                        String(window.__terminalInputs.length)
+                    ]"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(ctrlVState[0], Is.EqualTo("true"))
+                Assert.That(
+                    ctrlVState[1],
+                    Is.EqualTo("0"),
+                    "Ctrl+V must be stopped before xterm converts it to control byte 0x16"
+                )
+                Assert.That(ctrlVState[2], Is.EqualTo("0")))
+
             do! firstTarget.PressAsync("Control+P")
 
             let searchInput = page.Locator("#worktree-search-input")
@@ -2522,7 +2614,7 @@ type DashboardTests() =
                 )
             let! terminalKeydownsAfterSearch =
                 firstTarget.EvaluateAsync<int>(
-                    "element => window.__terminalKeydowns"
+                    "element => window.__terminalShortcutKeydowns"
                 )
 
             Assert.Multiple(fun () ->
@@ -2563,11 +2655,11 @@ type DashboardTests() =
 
             let! firstTerminalKeydowns =
                 firstTarget.EvaluateAsync<int>(
-                    "element => window.__terminalKeydowns"
+                    "element => window.__terminalShortcutKeydowns"
                 )
             let! secondTerminalKeydowns =
                 secondTarget.EvaluateAsync<int>(
-                    "element => window.__terminalKeydowns"
+                    "element => window.__terminalShortcutKeydowns"
                 )
 
             Assert.Multiple(fun () ->
