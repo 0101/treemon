@@ -816,12 +816,17 @@ type SessionActivityService internal
 
                 timer.Stop()
 
-                if Log.isSlowOperation timer.Elapsed then
-                    Log.log
-                        "Activity"
-                        $"Exact terminal activity query completed in {timer.ElapsedMilliseconds}ms"
+                match result with
+                | Ok _ ->
+                    if Log.isSlowOperation timer.Elapsed then
+                        Log.log
+                            "Activity"
+                            $"Exact terminal activity query completed in {timer.ElapsedMilliseconds}ms"
 
-                result
+                    result
+                | Error error ->
+                    Error
+                        $"{error} (activity query failed after {timer.ElapsedMilliseconds}ms)"
             with error ->
                 timer.Stop()
 

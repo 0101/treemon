@@ -266,10 +266,11 @@ Surviving reporters retry their acknowledged presence bootstrap. Every recently 
 instance with a current terminal origin remains pending until that exact PID and process-start
 identity re-presents or sends a validated heartbeat, is proven dead, loses its origin from the
 authoritative registry, or reaches `openWindow`. Presence creates unknown bindings; a heartbeat can
-only reconcile an already-known open binding with matching metadata, so it proves a surviving
-reporter without widening the set of processes that may gate replacement. Pending instances gate
-replacement, so a truly empty terminal remains distinguishable from one whose reporter has not
-reconnected without a global startup delay.
+only reconcile an already-known, non-closed binding with matching metadata and a currently resolved
+exact process identity. Its current receipt re-establishes liveness even when the prior observation
+has just crossed `openWindow`, without widening the set of processes that may gate replacement.
+Pending instances gate replacement, so a truly empty terminal remains distinguishable from one
+whose reporter has not reconnected without a global startup delay.
 
 Whenever all currently owned Copilot sessions are naturally idle, Treemon captures the authoritative
 host registry revision and the owned-session activity epoch, then immediately rechecks both. It
@@ -735,8 +736,9 @@ isolated server and fails on incomplete exact process cleanup.
 - **Transition-based replacement diagnostics:** the coordinator logs only when its observable
   blocker changes, distinguishing pending startup reconciliation from genuinely non-idle sessions
   and reporting recheck races without writing one line per one-second poll. Activity-query failures
-  carry their elapsed time, and an unexpected coordinator exception is logged before the background
-  task stops rather than retrying across an unknown replacement boundary.
+  carry their elapsed time. An unexpected pre-commit coordinator exception is logged and retried on
+  the next poll; the replacement commit boundary already converts its own failures to explicit
+  outcomes, so the outer retry cannot repeat an uncertain mutation.
 - **Opportunistic replacement, not draining:** normal work is never rejected in anticipation of an
   update. A race cancels the attempt rather than delaying the work.
 - **Non-idle sessions are never shut down for replacement:** every open `Working` or

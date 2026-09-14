@@ -427,8 +427,8 @@ type TerminalPaneStateTests() =
     [<TestCase("http://127.0.0.1:not-a-port/", false)>]
     member _.``Only loopback non-production ttyd endpoints are rendered``(endpoint: string, expectedSafe: bool) =
         Assert.That(
-            safeEndpoint endpoint |> Option.isSome,
-            Is.EqualTo(expectedSafe)
+            isSafeEndpoint endpoint,
+            Is.EqualTo expectedSafe
         )
 
 let private focusModel : Model =

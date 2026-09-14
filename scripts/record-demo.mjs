@@ -15,6 +15,7 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 const tmpDir = resolve(ROOT, ".agents", "recording-tmp");
+const serverLogDirectory = resolve(ROOT, "logs", "demo");
 
 const SERVER_PORT = 5051;
 const VITE_PORT = 5176;
@@ -58,7 +59,11 @@ mkdirSync(tmpDir, { recursive: true });
 
 const server = startProcess(
   "server", "dotnet",
-  ["run", "--project", "src/Server", "--", "--demo", "--port", String(SERVER_PORT)]
+  [
+    "run", "--project", "src/Server", "--",
+    "--demo", "--port", String(SERVER_PORT),
+    "--log-dir", serverLogDirectory,
+  ]
 );
 const vite = startProcess("vite", "npx", ["vite", "--port", String(VITE_PORT)]);
 

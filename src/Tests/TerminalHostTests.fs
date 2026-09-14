@@ -2211,6 +2211,22 @@ type TerminalHostProxyTests() =
                 customized,
                 Does.Contain("allowedOrigins.indexOf(event.origin)<0")
             )
+            Assert.That(
+                customized,
+                Does.Contain("if(event.data.active===false){clearPending();return}")
+            )
+            Assert.That(
+                customized,
+                Does.Contain(
+                    "if(event.data.active===true)activate(event.data.loaded===true)"
+                )
+            )
+            Assert.That(
+                customized,
+                Does.Contain(
+                    "if(loaded&&suppressNextLoadedActivation){suppressNextLoadedActivation=false;return}"
+                )
+            )
 
             Assert.That(
                 customized.IndexOf("open-worktree-search", StringComparison.Ordinal),

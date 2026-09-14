@@ -33,6 +33,27 @@ type LogDestinationTests() =
         |> Result.defaultWith invalidOp
 
     [<Test>]
+    [<NonParallelizable>]
+    member _.``Reading the fallback path does not prevent configured initialization``() =
+        withTempDir "treemon-log-init-after-read" (fun root ->
+            let key = "Treemon.Server.LogPath"
+            let previous = AppContext.GetData key
+            let configured = Path.Combine(root, "configured.log")
+
+            try
+                AppContext.SetData(key, null)
+                Log.currentPath() |> ignore
+
+                match Log.init configured with
+                | Ok() -> ()
+                | Error error ->
+                    Assert.Fail($"Configured log initialization failed: {error}")
+
+                Assert.That(Log.currentPath(), Is.EqualTo(configured))
+            finally
+                AppContext.SetData(key, previous))
+
+    [<Test>]
     member _.``Production and fixture logs have different destinations``() =
         let instanceId =
             Guid.Parse("a8e720d9-bdf4-49b3-85ab-70eef805342f")
@@ -161,7 +182,15 @@ type FixtureServerLogTests() =
         Assert.That(logFiles, Has.Length.EqualTo(1))
 
         let logPath = logFiles[0]
-        let content = File.ReadAllText logPath
+        use stream =
+            new FileStream(
+                logPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite
+            )
+        use reader = new StreamReader(stream)
+        let content = reader.ReadToEnd()
 
         Assert.Multiple(fun () ->
             Assert.That(

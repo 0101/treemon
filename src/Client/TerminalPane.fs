@@ -273,16 +273,17 @@ let private trySafeEndpointOrigin (endpoint: string) =
             Some(prefix + portText)
         | _ -> None
 
-let safeEndpoint endpoint =
-    trySafeEndpointOrigin endpoint
-    |> Option.map (fun _ -> endpoint)
+let isSafeEndpoint endpoint =
+    trySafeEndpointOrigin endpoint |> Option.isSome
 
 let private trySafeRunningEndpoint tab =
     match tab.Lifecycle with
     | EmbeddedTerminalLifecycle.Running endpoint ->
         endpoint
         |> trySafeEndpointOrigin
-        |> Option.map (fun origin -> endpoint, origin)
+        |> Option.map (fun origin ->
+            {| Endpoint = endpoint
+               Origin = origin |})
     | EmbeddedTerminalLifecycle.Interrupted _ -> None
 
 let visibleRunningTerminal isOpen activeTerminal snapshot =
@@ -296,8 +297,8 @@ let visibleRunningTerminal isOpen activeTerminal snapshot =
             |> Option.bind (fun tab ->
                 tab
                 |> trySafeRunningEndpoint
-                |> Option.map (fun (_, origin) ->
-                    terminalId, origin)))
+                |> Option.map (fun endpoint ->
+                    terminalId, endpoint.Origin)))
 
 let tryReconnectableTab activeTerminal snapshot =
     activeTerminal
@@ -327,12 +328,14 @@ let private frameMatchesGeneration generation (frame: HTMLElement) =
     |> Option.contains (string generation)
 
 let private frameIsActiveAndVisible (frame: HTMLElement) =
-    emitJsExpr<bool> () "document.visibilityState==='visible'&&document.hasFocus()"
-    && frame.classList.contains("terminal-iframe-active")
+    frame.classList.contains("terminal-iframe-active")
     && not (frame.hasAttribute("hidden"))
     && (frame.closest(".terminal-pane")
         |> Option.exists (fun pane ->
             not (pane.hasAttribute("hidden"))))
+
+let private documentIsForeground () =
+    emitJsExpr<bool> () "document.visibilityState==='visible'&&document.hasFocus()"
 
 let private withTerminalFrame terminalId acceptsFrame action onMissing =
     let rec tryResolve remainingAttempts =
@@ -414,7 +417,11 @@ let notifyTerminalVisibility terminalId origin signal =
                 Dom.document.getElementById(terminalFrameId terminalId)
                 |> Option.ofObj
                 |> Option.exists (fun frame ->
-                    if active && not (frameIsActiveAndVisible frame) then
+                    if
+                        active
+                        && (not (documentIsForeground ())
+                            || not (frameIsActiveAndVisible frame))
+                    then
                         false
                     else
                         Fable.Core.JsInterop.emitJsExpr<bool>
@@ -748,7 +755,7 @@ let private activeStatus state callbacks =
     with
     | Some
         { Lifecycle = EmbeddedTerminalLifecycle.Running endpoint }, _
-        when safeEndpoint endpoint |> Option.isNone ->
+        when not (isSafeEndpoint endpoint) ->
         Html.div [
             prop.className "terminal-pane-error"
             prop.text "The terminal server returned an unsafe endpoint. Close the tab and try again."
@@ -789,7 +796,7 @@ let private runningIframes state callbacks =
     |> List.choose (fun tab ->
         tab
         |> trySafeRunningEndpoint
-        |> Option.map (fun (src, _) ->
+        |> Option.map (fun endpoint ->
                 let terminalId = tab.Id
                 let isActive =
                     state.ActiveTerminal = Some terminalId
@@ -820,7 +827,7 @@ let private runningIframes state callbacks =
                             "terminal-iframe")
                     prop.hidden (not isActive)
                     prop.title $"{label} for {WorktreePath.displayName tab.Worktree}"
-                    prop.src src
+                    prop.src endpoint.Endpoint
                     prop.custom ("data-terminal-id", EmbeddedTerminalId.value terminalId)
                     prop.custom ("data-terminal-worktree", WorktreePath.value tab.Worktree)
                     prop.custom ("data-terminal-view-generation", string generation)

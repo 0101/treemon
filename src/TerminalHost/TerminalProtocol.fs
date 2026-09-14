@@ -140,10 +140,7 @@ module internal TerminalModeReplay =
     let private pendingStart value = if value = 0x1Buy then "\u001b" else ""
 
     let private softReset state =
-        { Modes =
-            state.Modes
-            |> Map.filter (fun mode _ ->
-                not (softResetModes.Contains mode))
+        { Modes = Map.filter (fun mode _ -> not (softResetModes.Contains mode)) state.Modes
           Pending = "" }
 
     let private observeByte state value =

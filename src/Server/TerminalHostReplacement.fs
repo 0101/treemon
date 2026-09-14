@@ -995,8 +995,7 @@ let internal tryReplaceHostIgnoring
             return ReplacementOutcome.NoCandidate
     }
 
-let private activeCooldown now =
-    Option.filter (fun failed -> now < failed.RetryAfter)
+let private activeCooldown now = Option.filter (fun failed -> now < failed.RetryAfter)
 
 let private nextCooldown now outcome current =
     match outcome with
@@ -1046,7 +1045,11 @@ let internal runCoordinatorWith
                     }
 
                 match attempted with
-                | None -> return ()
+                | None ->
+                    let! keepGoing = waitForNextPoll cancellationToken
+
+                    if keepGoing then
+                        return! loop cooldown previousObservation
                 | Some outcome ->
                     logOutcomeTransition previousObservation outcome
                     let next = cooldown |> nextCooldown (utcNow ()) outcome

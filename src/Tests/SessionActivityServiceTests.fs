@@ -2168,6 +2168,54 @@ type TerminalOwnershipQueryTests() =
             ))
 
     [<Test>]
+    member _.``terminal activity resolver failures include elapsed query time``() =
+        let terminalSessionId = terminalC
+        let now = DateTimeOffset.UtcNow
+        let identity =
+            syntheticProcessIdentityForProcessId
+                (syntheticProcessIdForSessionId "failing-query")
+
+        let resolver =
+            ProcessIdentityResolver.create (fun _ ->
+                Error "simulated process query failure")
+
+        let seed (store: SessionActivityStore) =
+            { instanceOf
+                "failing-query"
+                "C:/wt/a"
+                emptyStatus
+                now
+                now with
+                ProcessIdentity = identity
+                TerminalSessionId = Some terminalSessionId }
+            |> store.UpsertStatus
+            |> ignore
+
+        withServiceSeededAndPathUsingResolver
+            "C:/wt/a"
+            seed
+            resolver
+            (fun (service, _, _, _) ->
+                service.StartAt now
+
+                match
+                    service.QueryTerminalActivityAt(
+                        now,
+                        Set.singleton terminalSessionId
+                    )
+                with
+                | Ok _ -> Assert.Fail "Resolver failure unexpectedly succeeded"
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("simulated process query failure")
+                    )
+                    Assert.That(
+                        error,
+                        Does.Match("activity query failed after [0-9]+ms")
+                    ))
+
+    [<Test>]
     member _.``fresh waiting session gates until input completes``() =
         let terminalSessionId = terminalA
         let worktreePath = "C:/wt/a"
