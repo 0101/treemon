@@ -22,9 +22,12 @@ let private withDbPath =
 
 let private serverConfig arguments =
     match parseArgs arguments with
-    | RunMode.Server config -> config
-    | RunMode.TerminalHostDeploymentPreflight ->
+    | Ok(RunMode.Server config) -> config
+    | Ok RunMode.TerminalHostDeploymentPreflight ->
         Assert.Fail("Expected server run mode")
+        Unchecked.defaultof<_>
+    | Error error ->
+        Assert.Fail($"Expected valid server arguments, got {error}")
         Unchecked.defaultof<_>
 
 [<TestFixture>]
