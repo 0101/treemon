@@ -115,11 +115,12 @@ Beside **New**, a selected running terminal with a validated attachment endpoint
 preserving its terminal ID, endpoint, selected tab, shell, agent, and every sibling iframe. It is
 hidden for an empty selection, an interrupted terminal, or a rejected endpoint. The replacement
 restores iframe focus only when that view generation is still current, the terminal remains
-selected, and the pane is visible; ordinary worktree focus, tab selection, closure, pane hiding, and
-newer reconnects cancel the pending focus request so a late load cannot reclaim focus after the user
-moves elsewhere. Reconnect does not call start, close, resume, command-input, host-replacement, or
-process APIs, and an iframe load does not create a connected-success state. The new attachment
-receives the host's current alternate-screen mode, bounded raw replay, and remaining
+selected, the pane is visible, and no modal overlay is active when the deferred focus effect runs;
+ordinary worktree focus, tab selection, closure, pane hiding, and newer reconnects cancel the
+pending focus request so a late load cannot reclaim focus after the user moves elsewhere. Reconnect
+does not call start, close, resume, command-input, host-replacement, or process APIs, and an iframe
+load does not create a connected-success state. The new attachment receives the host's current
+alternate-screen mode, bounded raw replay, and remaining
 interaction-mode projection, so the full-screen background, mouse input, cursor visibility, focus
 reporting, and bracketed paste survive even when their enabling sequences are older than the
 retained screen output.
@@ -533,9 +534,9 @@ and preserve the selected sibling ordinal across replacement.
 It also stores a client-only view generation for terminals whose iframe is manually reconnected.
 The generation participates only in the React iframe key; advancing one generation remounts that
 iframe without changing the authoritative registry. Iframe load completion returns through Elmish,
-and the focus effect re-resolves the current DOM node and checks its generation and visibility
-before focusing it. The shared ordinary-focus transition clears pending terminal-view focus while
-the no-retarget Canvas focus path preserves it.
+and the focus effect re-resolves the current DOM node and checks its generation, visibility, and
+absence of an active modal overlay before focusing it. The shared ordinary-focus transition clears
+pending terminal-view focus while the no-retarget Canvas focus path preserves it.
 A subscription keyed by the active terminal ID and safe endpoint origin reports visibility triggers
 through Elmish. The resulting command retries for a small bounded number of animation frames until
 React has committed the active unhidden iframe, then posts only while that terminal and pane remain

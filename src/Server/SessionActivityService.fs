@@ -835,7 +835,8 @@ type SessionActivityService internal
                     $"Exact terminal activity query failed after {timer.ElapsedMilliseconds}ms"
                     error
 
-                Error "exact terminal activity query failed"
+                Error
+                    $"exact terminal activity query failed after {timer.ElapsedMilliseconds}ms"
 
     member internal this.QueryTerminalActivityAt
         (

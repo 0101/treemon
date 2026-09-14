@@ -2216,6 +2216,58 @@ type TerminalOwnershipQueryTests() =
                     ))
 
     [<Test>]
+    member _.``terminal activity mailbox timeouts include elapsed query time``() =
+        let terminalSessionId = terminalC
+        let now = DateTimeOffset.UtcNow
+        let identity =
+            syntheticProcessIdentityForProcessId
+                (syntheticProcessIdForSessionId "timed-out-query")
+        use releaseResolver = new System.Threading.ManualResetEventSlim(false)
+
+        let resolver =
+            ProcessIdentityResolver.create (fun _ ->
+                releaseResolver.Wait()
+                Ok(Some identity))
+
+        let seed (store: SessionActivityStore) =
+            { instanceOf
+                "timed-out-query"
+                "C:/wt/a"
+                emptyStatus
+                now
+                now with
+                ProcessIdentity = identity
+                TerminalSessionId = Some terminalSessionId }
+            |> store.UpsertStatus
+            |> ignore
+
+        withServiceSeededAndPathUsingResolver
+            "C:/wt/a"
+            seed
+            resolver
+            (fun (service, _, _, _) ->
+                service.StartAt now
+
+                try
+                    match
+                        service.QueryTerminalActivityAt(
+                            now,
+                            Set.singleton terminalSessionId
+                        )
+                    with
+                    | Ok _ ->
+                        Assert.Fail "Timed-out activity query unexpectedly succeeded"
+                    | Error error ->
+                        Assert.That(
+                            error,
+                            Does.Match(
+                                "^exact terminal activity query failed after [0-9]+ms$"
+                            )
+                        )
+                finally
+                    releaseResolver.Set())
+
+    [<Test>]
     member _.``fresh waiting session gates until input completes``() =
         let terminalSessionId = terminalA
         let worktreePath = "C:/wt/a"

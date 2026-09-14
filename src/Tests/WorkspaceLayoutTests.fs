@@ -876,6 +876,87 @@ type TerminalPaneDomTests() =
         }
 
     [<Test>]
+    member this.``Reconnect load does not move focus outside an active modal``() =
+        task {
+            let selectedId = EmbeddedTerminalId.value firstTerminalId
+            let reconnectRequested =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+            let releaseReconnect =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            do!
+                this.Page.RouteAsync(
+                    "http://127.0.0.1:61234/**",
+                    Func<IRoute, Task>(fun route ->
+                        task {
+                            reconnectRequested.TrySetResult() |> ignore
+                            do! releaseReconnect.Task
+
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "text/html; charset=utf-8",
+                                        Body = terminalDocument "first"
+                                    )
+                                )
+                        })
+                )
+
+            try
+                do! this.Page.Locator(".terminal-reconnect-btn").ClickAsync()
+
+                do!
+                    reconnectRequested.Task.WaitAsync(
+                        TimeSpan.FromSeconds 5.0
+                    )
+
+                do! this.Page.Keyboard.PressAsync("Control+p")
+
+                let! _ =
+                    this.Page.WaitForFunctionAsync(
+                        "() => document.activeElement?.id === 'worktree-search-input'",
+                        null,
+                        PageWaitForFunctionOptions(Timeout = 5000.0f)
+                    )
+
+                releaseReconnect.SetResult()
+
+                do!
+                    this.Page
+                        .FrameLocator(
+                            $"iframe[data-terminal-id='{selectedId}']"
+                        )
+                        .Locator("[data-terminal-marker='first']")
+                        .WaitForAsync(
+                            LocatorWaitForOptions(Timeout = 5000.0f)
+                        )
+
+                let! _ =
+                    this.Page.EvaluateAsync(
+                        """() => new Promise(resolve =>
+                            requestAnimationFrame(() =>
+                                requestAnimationFrame(() =>
+                                    requestAnimationFrame(resolve))))"""
+                    )
+
+                let! focusedElementId =
+                    this.Page.EvaluateAsync<string>(
+                        "() => document.activeElement?.id || ''"
+                    )
+
+                Assert.That(
+                    focusedElementId,
+                    Is.EqualTo("worktree-search-input")
+                )
+            finally
+                releaseReconnect.TrySetResult() |> ignore
+        }
+
+    [<Test>]
     member this.``Visible ttyd reconnect prompt reloads the active iframe``() =
         task {
             let terminalFrame =

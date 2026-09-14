@@ -386,6 +386,9 @@ let private frameMatchesGeneration generation (frame: HTMLElement) =
 let private frameIsActiveAndVisible (frame: HTMLElement) =
     frame.classList.contains("terminal-iframe-active")
     && not (frame.hasAttribute("hidden"))
+    && (Dom.document.querySelector ".modal-overlay"
+        |> Option.ofObj
+        |> Option.isNone)
     && (frame.closest(".terminal-pane")
         |> Option.exists (fun pane ->
             not (pane.hasAttribute("hidden"))))
