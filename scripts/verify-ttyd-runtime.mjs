@@ -279,6 +279,10 @@ export async function runTtydRuntimeVerification() {
 
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
+    await page.context().grantPermissions(
+      ["clipboard-read", "clipboard-write"],
+      { origin: new URL(terminal.attachmentEndpoint).origin },
+    );
     await page.goto(terminal.attachmentEndpoint);
     await page.waitForFunction(
       () => Boolean(window.term && document.querySelector(".xterm-helper-textarea")),
@@ -345,8 +349,59 @@ export async function runTtydRuntimeVerification() {
     await page.waitForFunction(
       () => document.querySelector(".xterm-viewport").scrollTop > 0,
     );
+
+    const terminalInput = page.locator(".xterm-helper-textarea");
+    await page.evaluate(() => {
+      window.__treemonTerminalInput = [];
+      window.__treemonTerminalInputSubscription = window.term.onData((data) => {
+        window.__treemonTerminalInput.push(data);
+      });
+    });
+
+    await terminalInput.focus();
+    await terminalInput.press("Control+Enter");
+    await page.waitForFunction(() => window.__treemonTerminalInput.length > 0);
+
+    const ctrlEnterInput = await page.evaluate(() =>
+      window.__treemonTerminalInput.splice(0),
+    );
+    assert(
+      ctrlEnterInput.length === 1 && ctrlEnterInput[0] === "\n",
+      `Ctrl+Enter emitted ${JSON.stringify(ctrlEnterInput)} instead of one line feed`,
+    );
+
+    const clipboardText = "terminal-paste-first\nterminal-paste-second";
+    await page.evaluate(
+      (text) => navigator.clipboard.writeText(text),
+      clipboardText,
+    );
+    await terminalInput.focus();
+    await terminalInput.press("Control+V");
+    await page.waitForFunction(() => window.__treemonTerminalInput.length > 0);
+
+    const ctrlVInput = await page.evaluate(() =>
+      window.__treemonTerminalInput.splice(0),
+    );
+    const normalizedPaste = clipboardText.replace(/\r?\n/g, "\r");
+    const bracketedPaste = `\x1b[200~${normalizedPaste}\x1b[201~`;
+    assert(
+      ctrlVInput.length === 1 &&
+        (ctrlVInput[0] === normalizedPaste || ctrlVInput[0] === bracketedPaste),
+      `Ctrl+V emitted ${JSON.stringify(ctrlVInput)} instead of one xterm paste payload`,
+    );
+    assert(
+      !ctrlVInput[0].includes("\x16"),
+      "Ctrl+V reached xterm key handling as control byte 0x16",
+    );
+
+    await page.evaluate(() => {
+      window.__treemonTerminalInputSubscription.dispose();
+      delete window.__treemonTerminalInputSubscription;
+      delete window.__treemonTerminalInput;
+    });
+
     console.log(
-      `PASS: stock ttyd accepted input with hidden scrollbar and working scrollback through TerminalHost session ${terminal.sessionId} in ${fixture}`,
+      `PASS: stock ttyd accepted Ctrl+Enter, Ctrl+V, input, and scrollback through TerminalHost session ${terminal.sessionId} in ${fixture}`,
     );
   } catch (error) {
     const bearerToken = host?.manifest?.bearerToken;

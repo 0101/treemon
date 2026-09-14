@@ -2029,7 +2029,7 @@ type TerminalHostProxyTests() =
                     ))))
 
     [<Test>]
-    member _.``terminal page adds chrome and global shortcut interception``() =
+    member _.``terminal page adds chrome and keyboard integration``() =
         let html =
             "<html><head><style>.xterm-viewport{overflow-y:scroll}</style></head><body></body></html>"
 
@@ -2052,6 +2052,8 @@ type TerminalHostProxyTests() =
             Assert.That(customized, Does.Contain("focus-terminal"))
             Assert.That(customized, Does.Contain(".xterm-helper-textarea"))
             Assert.That(customized, Does.Contain("e.source!==parent"))
+            Assert.That(customized, Does.Contain("window.term.input('\\n',true)"))
+            Assert.That(customized, Does.Contain("key==='v'&&hasTerminalMethod('paste')"))
             Assert.That(customized, Does.Contain("e.stopImmediatePropagation()"))
             Assert.That(customized, Does.Contain("},true)"))
 

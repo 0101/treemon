@@ -712,9 +712,12 @@ isolated server and fails on incomplete exact process cleanup.
   capture-phase global-shortcut bridge to ttyd's root page instead of carrying a forked custom
   index. It hides the rendered xterm scrollbar while preserving scrollback, forwards Ctrl+P to
   worktree search, and forwards Ctrl+Tab / Ctrl+Shift+Tab to next/previous terminal selection before
-  xterm consumes those keys. The dashboard accepts a forwarded shortcut only from the active
-  loopback terminal iframe, then sends an exact-origin focus request back after terminal selection
-  or worktree-search dismissal so the active xterm input keeps keyboard ownership.
+  xterm consumes those keys. On the focused xterm input, exact Ctrl+Enter sends a literal line feed,
+  while exact Ctrl+V bypasses xterm's `0x16` key encoding without cancelling the browser's trusted
+  paste action, preserving xterm's normal multiline and bracketed-paste handling. The dashboard
+  accepts a forwarded shortcut only from the active loopback terminal iframe, then sends an
+  exact-origin focus request back after terminal selection or worktree-search dismissal so the
+  active xterm input keeps keyboard ownership.
 - **Graceful shutdown before automatic Resume:** replacement requests exact SDK session shutdown
   for every exact target before terminal teardown and aborts while the old host is healthy if any
   shutdown is unavailable, rejected, or times out. Endpoint acceptance is not completion; exact
