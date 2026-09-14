@@ -242,11 +242,14 @@ async function verifyTerminalInputShortcuts(page) {
     );
 
     const pasteWithMode = async (bracketedPasteMode, expectedInput) => {
-      await page.evaluate((enabled) => {
-        window.term.write(enabled ? "\x1b[?2004h" : "\x1b[?2004l");
-      }, bracketedPasteMode);
-      await page.waitForFunction(
-        (enabled) => window.term.modes.bracketedPasteMode === enabled,
+      await page.evaluate(
+        (enabled) =>
+          new Promise((resolveWrite) => {
+            window.term.write(
+              enabled ? "\x1b[?2004h" : "\x1b[?2004l",
+              resolveWrite,
+            );
+          }),
         bracketedPasteMode,
       );
       await page.evaluate(() => {
