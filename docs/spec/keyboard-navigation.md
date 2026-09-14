@@ -38,9 +38,9 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 |---------|-----|--------|
 | Card | Enter | Open terminal / focus active session |
 | Card | t | Open or focus embedded terminal input |
+| Card | a / A | Start a fresh embedded agent terminal running exactly `copilot --yolo` |
 | Card | s | Toggle auto-sync |
 | Card | r | Resume last session (when resumable) |
-| Card | + | Open new tab (when session active) |
 | Card | e | Open editor |
 | Card | Delete | Delete worktree (non-main only) |
 | Repo header | Enter | Toggle collapse/expand |
@@ -49,6 +49,9 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Embedded terminal | Ctrl+Tab | Select the next terminal for the current worktree |
 | Embedded terminal | Ctrl+Shift+Tab | Select the previous terminal for the current worktree |
 | Global | Escape | Reclaim keyboard focus to the worktree navigation (also closes an open modal) |
+
+The Agent shortcut binds both `a` and `A`: focused-card letter bindings match the browser key value
+directly, while Ctrl/Alt/Cmd combinations remain suppressed.
 
 Archive is intentionally mouse-only so an accidental letter key cannot archive a worktree.
 
