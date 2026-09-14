@@ -2254,8 +2254,10 @@ type DashboardTests() =
 
             let nativeTerminalBtns = this.Page.Locator(".wt-card .terminal-btn")
             let embeddedTerminalBtns = this.Page.Locator(".wt-card .embedded-terminal-btn")
+            let agentBtns = this.Page.Locator(".wt-card .agent-btn")
             let! nativeCount = nativeTerminalBtns.CountAsync()
             let! embeddedCount = embeddedTerminalBtns.CountAsync()
+            let! agentCount = agentBtns.CountAsync()
 
             Assert.Multiple(fun () ->
                 Assert.That(
@@ -2267,6 +2269,11 @@ type DashboardTests() =
                     embeddedCount,
                     Is.EqualTo(cardCount),
                     "Every card should retain its separate embedded terminal control"
+                )
+                Assert.That(
+                    agentCount,
+                    Is.EqualTo(cardCount),
+                    "Every card should expose the fresh Copilot agent action"
                 ))
         }
 
@@ -2731,7 +2738,7 @@ type DashboardTests() =
             do! Assertions.Expect(terminalPane).ToBeHiddenAsync()
             do! Assertions.Expect(nativeTerminal).ToHaveAttributeAsync("title", "Open terminal (Enter)")
             do! Assertions.Expect(embeddedTerminal).ToHaveCountAsync(1)
-            do! Assertions.Expect(targetCard.Locator(".new-tab-btn")).ToHaveCountAsync(0)
+            do! Assertions.Expect(targetCard.Locator(".agent-btn")).ToHaveCountAsync(1)
 
             do! page.Clock.FastForwardAsync(1_000L)
 
@@ -2772,7 +2779,7 @@ type DashboardTests() =
                 ))
 
             do! Assertions.Expect(nativeTerminal).ToHaveAttributeAsync("title", "Open terminal (Enter)")
-            do! Assertions.Expect(targetCard.Locator(".new-tab-btn")).ToHaveCountAsync(0)
+            do! Assertions.Expect(targetCard.Locator(".agent-btn")).ToHaveCountAsync(1)
             do! page.CloseAsync()
         }
 
@@ -4098,18 +4105,15 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Plus button visible on cards with HasActiveSession``() =
+    member this.``Agent button is visible on every worktree card``() =
         task {
-            let sessionCards = this.Page.Locator(".wt-card.has-session")
-            do! sessionCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! sessionCount = sessionCards.CountAsync()
-            Assert.That(sessionCount, Is.GreaterThanOrEqualTo(1),
-                "Fixture has worktrees with HasActiveSession=true; cards should have .has-session class")
+            let cards = this.Page.Locator(".wt-card")
+            let! cardCount = cards.CountAsync()
+            let! buttonCount = cards.Locator(".agent-btn").CountAsync()
 
-            let newTabBtns = sessionCards.Locator(".new-tab-btn")
-            let! btnCount = newTabBtns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(sessionCount),
-                "Every card with HasActiveSession should have a .new-tab-btn")
+            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1))
+            Assert.That(buttonCount, Is.EqualTo(cardCount),
+                "Every worktree card should have one .agent-btn")
         }
 
     [<Test>]
@@ -4142,62 +4146,93 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Plus button has correct text and title``() =
+    member this.``Agent button has a robot icon and accessible label``() =
         task {
-            let newTabBtn = this.Page.Locator(".wt-card.has-session .new-tab-btn").First
-            do! Assertions.Expect(newTabBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
-
-            let! text = newTabBtn.TextContentAsync()
-            Assert.That(text, Is.EqualTo("+"), "New tab button text should be '+'")
-
-            let! title = newTabBtn.GetAttributeAsync("title")
-            Assert.That(title, Is.EqualTo("Open new tab in tracked window (+)"), "New tab button title")
+            let agentBtn = this.Page.Locator(".wt-card .agent-btn").First
+            do! Assertions.Expect(agentBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(agentBtn.Locator("svg.btn-icon")).ToHaveCountAsync(1)
+            do! Assertions.Expect(agentBtn).ToHaveAttributeAsync("title", "Start Copilot agent (A)")
+            do! Assertions.Expect(agentBtn).ToHaveAttributeAsync("aria-label", "Start Copilot agent")
+            do! Assertions.Expect(this.Page.Locator(".wt-card .new-tab-btn")).ToHaveCountAsync(0)
         }
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Plus button not visible on cards without active session``() =
+    member this.``Agent button requests a fresh Copilot terminal``() =
+        task {
+            let requests =
+                System.Threading.Channels.Channel.CreateUnbounded<IRoute>()
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/startAgent",
+                    fun route ->
+                        requests.Writer.TryWrite(route) |> ignore
+                        System.Threading.Tasks.Task.CompletedTask
+                )
+
+            do! this.Page.Locator(".wt-card .agent-btn").First.ClickAsync()
+
+            let! request =
+                requests.Reader
+                    .ReadAsync()
+                    .AsTask()
+                    .WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            do! Assertions.Expect(this.Page.Locator(".terminal-pane")).ToBeVisibleAsync()
+
+            do!
+                request.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = """{"Error":"test stop"}"""
+                    )
+                )
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Agent button remains visible without an active native session``() =
         task {
             let nonSessionCards = this.Page.Locator(".wt-card:not(.has-session)")
             do! nonSessionCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! cardCount = nonSessionCards.CountAsync()
             Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have cards without active session")
 
-            let newTabBtns = nonSessionCards.Locator(".new-tab-btn")
-            let! btnCount = newTabBtns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(0),
-                "Cards without HasActiveSession should not have .new-tab-btn")
+            let agentBtns = nonSessionCards.Locator(".agent-btn")
+            let! btnCount = agentBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(cardCount),
+                "Cards without HasActiveSession should retain their .agent-btn")
         }
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Plus button is inside card header``() =
+    member this.``Agent button is inside card header``() =
         task {
-            let headerBtns = this.Page.Locator(".wt-card .card-header .new-tab-btn")
+            let headerBtns = this.Page.Locator(".wt-card .card-header .agent-btn")
             let! count = headerBtns.CountAsync()
 
-            let allBtns = this.Page.Locator(".wt-card .new-tab-btn")
+            let allBtns = this.Page.Locator(".wt-card .agent-btn")
             let! allCount = allBtns.CountAsync()
 
-            Assert.That(count, Is.EqualTo(allCount), "All .new-tab-btn should be inside card headers")
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Should have at least one new-tab-btn in a card header")
+            Assert.That(count, Is.EqualTo(allCount), "All .agent-btn controls should be inside card headers")
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Should have at least one agent button in a card header")
         }
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Plus button also appears in compact mode for session cards``() =
+    member this.``Agent button appears on every compact card``() =
         task {
             do! (compactBtn this.Page).ClickAsync()
 
-            let compactSessionCards = this.Page.Locator(".wt-card.compact.has-session")
-            let! cardCount = compactSessionCards.CountAsync()
-            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1),
-                "Compact mode should have cards with has-session class")
+            let compactCards = this.Page.Locator(".wt-card.compact")
+            let! cardCount = compactCards.CountAsync()
+            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1))
 
-            let newTabBtns = compactSessionCards.Locator(".new-tab-btn")
-            let! btnCount = newTabBtns.CountAsync()
+            let agentBtns = compactCards.Locator(".agent-btn")
+            let! btnCount = agentBtns.CountAsync()
             Assert.That(btnCount, Is.EqualTo(cardCount),
-                "Every compact card with has-session should have a .new-tab-btn")
+                "Every compact card should have an .agent-btn")
         }
 
     [<Test>]

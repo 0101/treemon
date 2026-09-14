@@ -93,6 +93,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
 - Event log (up to the last 2 events), diff/auto-sync/terminal/delete actions
+- Always-visible robot-head Agent action starts a fresh embedded terminal for the worktree, submits exactly `copilot --yolo`, and selects the returned terminal in the terminal pane
 - Green left border on cards with active terminal sessions
 - Contextual action buttons: fix PR comments, fix failed builds, and create PRs
 - Archived worktrees render below the card grid as one-line cards on the same responsive grid columns, so they align with the full cards above. Each shows the branch name (never dropped), then the commit grid and diff stats only while they fit the remaining width, the compact commit age (`123d`, no "ago" suffix), and the unarchive button.
@@ -196,9 +197,10 @@ A "+" button on each repo header opens a modal to create new worktrees without l
 
 ### Native Session Management
 
-Windows Terminal integration is retained for the card's explicit `>` / Enter terminal action and
-tracked-window `+` action. Prompted and automatic agent sessions use the embedded host. See
-`docs/spec/native-session-management.md` and `docs/spec/embedded-terminal.md`.
+Windows Terminal integration is retained only for the card's explicit `>` / Enter terminal action.
+The always-visible robot-head Agent action starts a fresh embedded Copilot terminal instead of a
+native Windows Terminal tab. See `docs/spec/native-session-management.md` and
+`docs/spec/embedded-terminal.md`.
 
 ### GitHub PRs
 
@@ -337,7 +339,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/HttpSecurity.fs` | Shared loopback Origin/Referer guard for state-changing HTTP routes |
 | `src/Server/Log.fs` | Stable production log selection and unique per-process non-production log paths |
 | `src/Server/PathUtils.fs` | Canonical path normalization and `RepoId` / `WorktreePath` construction |
-| `src/Server/SessionManager.fs` | Explicit native card-terminal spawn/focus/new-tab/kill and persistence |
+| `src/Server/SessionManager.fs` | Explicit native card-terminal spawn/focus/kill and persistence |
 | `src/Server/TerminalLaunch.fs` | Shared native-versus-embedded terminal launch policy |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
 | `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, `appSubscriptions`, top-level `view` wiring |
@@ -405,7 +407,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 
 - `docs/spec/user-idle-detection.md` — adaptive refresh cadence based on user activity level
 - `docs/spec/keyboard-navigation.md` — spatial navigation, global shortcuts, and fuzzy worktree search
-- `docs/spec/native-session-management.md` — explicit native card-terminal spawn/focus/new-tab/kill
+- `docs/spec/native-session-management.md` — explicit native card-terminal spawn/focus/kill
   via HWND tracking
 - `docs/spec/embedded-terminal.md` — embedded agent launches, command delivery, and terminal
   discovery
