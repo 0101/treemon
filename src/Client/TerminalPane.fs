@@ -15,17 +15,30 @@ type TerminalStartState =
     | StartingWithQueuedAgents of focusOnCompletion: bool * queuedCount: int
     | Failed of error: string
 
+type TerminalViewState =
+    { Generation: int
+      FocusAfterLoad: bool }
+
+[<RequireQualifiedAccess>]
+type TerminalVisibilitySignal =
+    | Activate
+    | Loaded
+    | Deactivate
+
 type TerminalPaneState =
     { IsOpen: bool
       Snapshot: EmbeddedTerminalSnapshot
       ActiveTerminal: EmbeddedTerminalId option
       SelectedWorktree: WorktreePath option
-      StartState: TerminalStartState option }
+      StartState: TerminalStartState option
+      ViewStates: Map<EmbeddedTerminalId, TerminalViewState> }
 
 type TerminalPaneCallbacks =
     { SelectTab: EmbeddedTerminalId -> unit
       CloseTab: EmbeddedTerminalId -> unit
-      StartTerminal: WorktreePath -> unit }
+      StartTerminal: WorktreePath -> unit
+      ReconnectView: EmbeddedTerminalId -> unit
+      ViewLoaded: EmbeddedTerminalId -> int -> unit }
 
 [<RequireQualifiedAccess>]
 type CycleDirection =
@@ -228,6 +241,59 @@ let tryStartQueuedAgent path states =
         |> Some
     | _ -> None
 
+let viewGeneration terminalId states =
+    states
+    |> Map.tryFind terminalId
+    |> Option.map _.Generation
+    |> Option.defaultValue 0
+
+let reconnectView terminalId states =
+    let generation = viewGeneration terminalId states + 1
+
+    states
+    |> Map.add
+        terminalId
+        { Generation = generation
+          FocusAfterLoad = true }
+
+let completeViewLoad terminalId generation states =
+    match states |> Map.tryFind terminalId with
+    | Some state
+        when state.Generation = generation
+             && state.FocusAfterLoad ->
+        let updated =
+            states
+            |> Map.add
+                terminalId
+                { state with FocusAfterLoad = false }
+
+        updated, true
+    | Some _
+    | None -> states, false
+
+let cancelViewFocus terminalId states =
+    match states |> Map.tryFind terminalId with
+    | Some state when state.FocusAfterLoad ->
+        states
+        |> Map.add
+            terminalId
+            { state with FocusAfterLoad = false }
+    | Some _
+    | None -> states
+
+let cancelAllViewFocus states =
+    states
+    |> Map.map (fun _ state ->
+        { state with FocusAfterLoad = false })
+
+let cancelOtherViewFocus selectedTerminal states =
+    states
+    |> Map.map (fun terminalId state ->
+        if terminalId = selectedTerminal then
+            state
+        else
+            { state with FocusAfterLoad = false })
+
 let private startInFlight state =
     match state with
     | TerminalStartState.Starting
@@ -246,7 +312,7 @@ let selectedWorktree targetWorktree focusedElement =
         | Some (Card scopedKey) -> Some (WorktreePath scopedKey)
         | _ -> None)
 
-let safeEndpoint (endpoint: string) =
+let private trySafeEndpointOrigin (endpoint: string) =
     let prefix = "http://127.0.0.1:"
 
     if not (endpoint.StartsWith(prefix, StringComparison.Ordinal)) then
@@ -260,25 +326,85 @@ let safeEndpoint (endpoint: string) =
 
         match Int32.TryParse portText with
         | true, port when port > 0 && port <= 65535 && port <> 5000 ->
-            Some endpoint
+            Some(prefix + portText)
         | _ -> None
+
+let isSafeEndpoint endpoint =
+    trySafeEndpointOrigin endpoint |> Option.isSome
+
+let private trySafeRunningEndpoint tab =
+    match tab.Lifecycle with
+    | EmbeddedTerminalLifecycle.Running endpoint ->
+        endpoint
+        |> trySafeEndpointOrigin
+        |> Option.map (fun origin ->
+            {| Endpoint = endpoint
+               Origin = origin |})
+    | EmbeddedTerminalLifecycle.Interrupted _ -> None
+
+let visibleRunningTerminal isOpen activeTerminal snapshot =
+    if not isOpen then
+        None
+    else
+        activeTerminal
+        |> Option.bind (fun terminalId ->
+            snapshot
+            |> tryFindTab terminalId
+            |> Option.bind (fun tab ->
+                tab
+                |> trySafeRunningEndpoint
+                |> Option.map (fun endpoint ->
+                    terminalId, endpoint.Origin)))
+
+let tryReconnectableTab activeTerminal snapshot =
+    activeTerminal
+    |> Option.bind (fun terminalId ->
+        tryFindTab terminalId snapshot)
+    |> Option.filter (trySafeRunningEndpoint >> Option.isSome)
+
+let reconcileViewStates snapshot states =
+    let reconnectableIds =
+        snapshot.Tabs
+        |> List.choose (fun tab ->
+            tab
+            |> trySafeRunningEndpoint
+            |> Option.map (fun _ -> tab.Id))
+        |> Set.ofList
+
+    states
+    |> Map.filter (fun terminalId _ ->
+        reconnectableIds.Contains terminalId)
 
 let private terminalFrameId terminalId =
     $"terminal-iframe-{EmbeddedTerminalId.value terminalId}"
 
-let private withTerminalFrame terminalId action onMissing =
+let private frameMatchesGeneration generation (frame: HTMLElement) =
+    frame.getAttribute("data-terminal-view-generation")
+    |> Option.ofObj
+    |> Option.contains (string generation)
+
+let private frameIsActiveAndVisible (frame: HTMLElement) =
+    frame.classList.contains("terminal-iframe-active")
+    && not (frame.hasAttribute("hidden"))
+    && (Dom.document.querySelector ".modal-overlay"
+        |> Option.ofObj
+        |> Option.isNone)
+    && (frame.closest(".terminal-pane")
+        |> Option.exists (fun pane ->
+            not (pane.hasAttribute("hidden"))))
+
+let private documentIsForeground () =
+    emitJsExpr<bool> () "document.visibilityState==='visible'&&document.hasFocus()"
+
+let private withTerminalFrame terminalId acceptsFrame action onMissing =
     let rec tryResolve remainingAttempts =
         Dom.window?requestAnimationFrame(fun (_: float) ->
             match
                 Dom.document.getElementById(terminalFrameId terminalId)
                 |> Option.ofObj
             with
-            | Some frame
-                when frame.classList.contains("terminal-iframe-active") ->
-                action frame
-            | Some _ when remainingAttempts > 1 ->
-                tryResolve (remainingAttempts - 1)
-            | None when remainingAttempts > 1 ->
+            | Some frame when acceptsFrame frame -> action frame
+            | _ when remainingAttempts > 1 ->
                 tryResolve (remainingAttempts - 1)
             | _ -> onMissing ())
         |> ignore
@@ -291,28 +417,121 @@ let private focusTerminalFrame frame =
         "(function(f,a){f.focus();f.contentWindow.postMessage({action:a},new URL(f.src,document.baseURI).origin)})($0,$1)"
 
 let focusTerminal terminalId =
-    withTerminalFrame terminalId focusTerminalFrame ignore
+    withTerminalFrame
+        terminalId
+        frameIsActiveAndVisible
+        focusTerminalFrame
+        ignore
 
 let focusTerminalOrElse terminalId onMissing =
-    withTerminalFrame terminalId focusTerminalFrame onMissing
+    withTerminalFrame
+        terminalId
+        frameIsActiveAndVisible
+        focusTerminalFrame
+        onMissing
 
-let focusTerminalWhenReady terminalId =
-    withTerminalFrame terminalId (fun frame ->
-        let focusOnLoad (_: Event) = focusTerminalFrame frame
+let focusTerminalView terminalId generation =
+    withTerminalFrame
+        terminalId
+        (fun frame ->
+            frameIsActiveAndVisible frame
+            && frameMatchesGeneration generation frame)
+        focusTerminalFrame
+        ignore
 
-        frame?addEventListener(
-            "load",
-            focusOnLoad,
-            createObj [ "once" ==> true ])
+let focusTerminalWhenReady terminalId generation =
+    withTerminalFrame
+        terminalId
+        (fun frame ->
+            frameIsActiveAndVisible frame
+            && frameMatchesGeneration generation frame)
+        (fun frame ->
+            let focusOnLoad (_: Event) =
+                focusTerminalView terminalId generation
 
-        Fable.Core.JS.setTimeout
-            (fun () ->
-                frame?removeEventListener("load", focusOnLoad))
-            10_000
+            frame?addEventListener(
+                "load",
+                focusOnLoad,
+                createObj [ "once" ==> true ])
+
+            Fable.Core.JS.setTimeout
+                (fun () ->
+                    frame?removeEventListener("load", focusOnLoad))
+                10_000
+            |> ignore
+
+            focusTerminalView terminalId generation)
+        ignore
+
+let notifyTerminalVisibility terminalId origin signal =
+    let active, loaded =
+        match signal with
+        | TerminalVisibilitySignal.Activate -> true, false
+        | TerminalVisibilitySignal.Loaded -> true, true
+        | TerminalVisibilitySignal.Deactivate -> false, false
+
+    let rec tryNotify remainingAttempts =
+        Dom.window?requestAnimationFrame(fun (_: float) ->
+            let notified =
+                Dom.document.getElementById(terminalFrameId terminalId)
+                |> Option.ofObj
+                |> Option.exists (fun frame ->
+                    if
+                        active
+                        && (not (documentIsForeground ())
+                            || not (frameIsActiveAndVisible frame))
+                    then
+                        false
+                    else
+                        Fable.Core.JsInterop.emitJsExpr<bool>
+                            (frame, origin, TerminalPageMessage.TerminalVisible, active, loaded)
+                            "(function(f,origin,action,active,loaded){if(!f.contentWindow)return false;f.contentWindow.postMessage({action:action,active:active,loaded:loaded},origin);return true})($0,$1,$2,$3,$4)")
+
+            if not notified && remainingAttempts > 1 then
+                tryNotify (remainingAttempts - 1))
         |> ignore
 
-        focusTerminalFrame frame)
-        ignore
+    tryNotify (if active then 3 else 2)
+
+let observeVisibleTerminal terminalId notify =
+    let loadHandler =
+        fun (event: Event) ->
+            let loadedFrameId =
+                Fable.Core.JsInterop.emitJsExpr<string> event
+                    "($0.target&&$0.target.id)||''"
+
+            if loadedFrameId = terminalFrameId terminalId then
+                notify TerminalVisibilitySignal.Loaded
+
+    let visibilityHandler =
+        fun (_: Event) ->
+            if Fable.Core.JsInterop.emitJsExpr<bool> () "document.visibilityState==='visible'" then
+                notify TerminalVisibilitySignal.Activate
+            else
+                notify TerminalVisibilitySignal.Deactivate
+
+    let focusHandler =
+        fun (_: Event) ->
+            notify TerminalVisibilitySignal.Activate
+
+    let blurHandler =
+        fun (_: Event) ->
+            notify TerminalVisibilitySignal.Deactivate
+
+    notify TerminalVisibilitySignal.Activate
+
+    Dom.document.addEventListener("load", loadHandler, true)
+    Dom.document.addEventListener("visibilitychange", visibilityHandler)
+    Dom.window.addEventListener("focus", focusHandler)
+    Dom.window.addEventListener("blur", blurHandler)
+
+    { new IDisposable with
+        member _.Dispose() =
+            Dom.document.removeEventListener("load", loadHandler, true)
+            Dom.document.removeEventListener("visibilitychange", visibilityHandler)
+            Dom.window.removeEventListener("focus", focusHandler)
+            Dom.window.removeEventListener("blur", blurHandler)
+            notify TerminalVisibilitySignal.Deactivate }
 
 let messageListener (dispatch: TerminalShortcut -> unit) =
     let tryActiveTerminalId (message: MessageEvent) =
@@ -494,6 +713,32 @@ let private header state callbacks =
             |> List.mapi (terminalTab callbacks state.ActiveTerminal))
         |> Option.defaultValue []
 
+    let reconnectViewButton =
+        match
+            state.Snapshot
+            |> tryReconnectableTab state.ActiveTerminal
+        with
+        | None -> Html.none
+        | Some tab ->
+            let terminalIndex =
+                state.Snapshot
+                |> tabsForWorktree tab.Worktree
+                |> List.tryFindIndex (fun candidate ->
+                    candidate.Id = tab.Id)
+                |> Option.defaultValue 0
+
+            let label = tabLabel terminalIndex tab
+            let worktreeName = WorktreePath.displayName tab.Worktree
+
+            Html.button [
+                prop.className "ctrl-btn terminal-reconnect-btn"
+                prop.ariaLabel $"Reconnect view for {label} in {worktreeName}"
+                prop.title "Reload this terminal view without restarting its shell or agent."
+                prop.onClick (fun _ ->
+                    callbacks.ReconnectView tab.Id)
+                prop.text "Reconnect view"
+            ]
+
     let newTerminalButton =
         match state.SelectedWorktree with
         | None -> Html.none
@@ -526,7 +771,10 @@ let private header state callbacks =
             ]
             Html.div [
                 prop.className "terminal-pane-actions"
-                prop.children [ newTerminalButton ]
+                prop.children [
+                    reconnectViewButton
+                    newTerminalButton
+                ]
             ]
         ]
     ]
@@ -570,7 +818,7 @@ let private activeStatus state callbacks =
     with
     | Some
         { Lifecycle = EmbeddedTerminalLifecycle.Running endpoint }, _
-        when safeEndpoint endpoint |> Option.isNone ->
+        when not (isSafeEndpoint endpoint) ->
         Html.div [
             prop.className "terminal-pane-error"
             prop.text "The terminal server returned an unsafe endpoint. Close the tab and try again."
@@ -609,13 +857,19 @@ let private activeStatus state callbacks =
 let private runningIframes state callbacks =
     state.Snapshot.Tabs
     |> List.choose (fun tab ->
-        match tab.Lifecycle with
-        | EmbeddedTerminalLifecycle.Running endpoint ->
-            safeEndpoint endpoint
-            |> Option.map (fun src ->
+        tab
+        |> trySafeRunningEndpoint
+        |> Option.map (fun endpoint ->
                 let terminalId = tab.Id
                 let isActive =
                     state.ActiveTerminal = Some terminalId
+                let viewState =
+                    state.ViewStates
+                    |> Map.tryFind terminalId
+                let generation =
+                    viewState
+                    |> Option.map _.Generation
+                    |> Option.defaultValue 0
 
                 let terminalIndex =
                     state.Snapshot
@@ -627,7 +881,7 @@ let private runningIframes state callbacks =
                 let label = tabLabel terminalIndex tab
 
                 Html.iframe [
-                    prop.key (EmbeddedTerminalId.value terminalId)
+                    prop.key $"{EmbeddedTerminalId.value terminalId}:{generation}"
                     prop.id (terminalFrameId terminalId)
                     prop.className (
                         if isActive then
@@ -636,15 +890,17 @@ let private runningIframes state callbacks =
                             "terminal-iframe")
                     prop.hidden (not isActive)
                     prop.title $"{label} for {WorktreePath.displayName tab.Worktree}"
-                    prop.src src
+                    prop.src endpoint.Endpoint
                     prop.custom ("data-terminal-id", EmbeddedTerminalId.value terminalId)
                     prop.custom ("data-terminal-worktree", WorktreePath.value tab.Worktree)
+                    prop.custom ("data-terminal-view-generation", string generation)
                     prop.custom ("sandbox", "allow-scripts allow-same-origin")
                     prop.custom ("referrerpolicy", "no-referrer")
                     prop.custom ("scrolling", "no")
-                ])
-        | EmbeddedTerminalLifecycle.Interrupted _ ->
-            None)
+                    if viewState |> Option.exists _.FocusAfterLoad then
+                        prop.onLoad (fun _ ->
+                            callbacks.ViewLoaded terminalId generation)
+                ]))
 
 let view state callbacks =
     let paneClass =

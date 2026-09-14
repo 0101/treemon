@@ -2292,7 +2292,9 @@ type DashboardTests() =
             let mutable closeCalls = 0
 
             let terminalPage label =
-                TerminalHost.TerminalProxy.customizeTerminalPage (
+                TerminalHost.TerminalProxy.customizeTerminalPage
+                    [ Uri(ServerFixture.viteUrl).GetLeftPart(UriPartial.Authority) ]
+                    (
                     "<!doctype html><html><head><title>"
                     + label
                     + "</title></head><body><textarea class=\"xterm-helper-textarea\" id=\"terminal-target\">"
@@ -2312,7 +2314,7 @@ type DashboardTests() =
                     + "window.__terminalPasteMatched=pastedText.replace(/\\r\\n/g,'\\n')===window.__expectedTerminalPaste;"
                     + "e.preventDefault()})"
                     + "</script></body></html>"
-                )
+                    )
 
             let thirdTab =
                 { Id = thirdTerminal

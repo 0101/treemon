@@ -5,6 +5,7 @@ open System.Net
 open System.Net.Http
 open System.Net.WebSockets
 open System.Text
+open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
@@ -20,49 +21,8 @@ module internal TerminalProxy =
     let [<Literal>] private TtySubprotocol = "tty"
     let [<Literal>] private CommandSubprotocol = "treemon-command"
 
-    /// Ctrl/Cmd keys the terminal page forwards to the dashboard before xterm consumes them.
-    /// Ctrl+Tab keeps firing with Shift held because Shift picks its cycle direction.
-    let private forwardedShortcuts =
-        [ {| Key = "p"; Action = Shared.TerminalPageMessage.OpenWorktreeSearch; FiresWithShift = true |}
-          {| Key = "tab"; Action = Shared.TerminalPageMessage.CycleTerminal; FiresWithShift = true |}
-          {| Key = "w"; Action = Shared.TerminalPageMessage.CloseTerminal; FiresWithShift = false |}
-          {| Key = "n"; Action = Shared.TerminalPageMessage.StartTerminal; FiresWithShift = false |} ]
-
-    let private shortcutSelection =
-        forwardedShortcuts
-        |> List.map (fun shortcut ->
-            let shiftGuard = if shortcut.FiresWithShift then "" else "&&!e.shiftKey"
-            $"key==='{shortcut.Key}'{shiftGuard}?'{shortcut.Action}':")
-        |> String.concat ""
-
     let private terminalPageHeadInjection =
-        String.concat "" [
-            "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>"
-            "<script>(function(){"
-            "function focusTerminal(){var input=document.querySelector('.xterm-helper-textarea');if(input)input.focus()}"
-            "function isTerminalInput(e){return e.target&&e.target.classList&&e.target.classList.contains('xterm-helper-textarea')}"
-            "function hasTerminalMethod(name){return window.term&&typeof window.term[name]==='function'}"
-            "window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.action!=='"
-            Shared.TerminalPageMessage.FocusTerminal
-            "')return;focusTerminal()});"
-            "document.addEventListener('keydown',function(e){"
-            "var key=(e.key||'').toLowerCase();"
-            "var exactCtrl=e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey;"
-            "if(isTerminalInput(e)&&exactCtrl&&key==='enter'&&hasTerminalMethod('input')){"
-            "e.preventDefault();e.stopImmediatePropagation();window.term.input('\\n',true);return}"
-            "if(isTerminalInput(e)&&exactCtrl&&key==='v'){e.stopImmediatePropagation();return}"
-            "if(!(e.ctrlKey||e.metaKey)||e.altKey)return;"
-            "var action=" + shortcutSelection + "'';"
-            "if(!action)return;e.preventDefault();e.stopImmediatePropagation();"
-            "if(action==='" + Shared.TerminalPageMessage.CycleTerminal + "')"
-            "parent.postMessage({action:action,direction:e.shiftKey?'"
-            Shared.TerminalPageMessage.PreviousDirection
-            "':'"
-            Shared.TerminalPageMessage.NextDirection
-            "'},'*');"
-            "else parent.postMessage({action:action},'*')"
-            "},true)})()</script>"
-        ]
+        $"<style>.xterm-viewport{{scrollbar-width:none}}.xterm-viewport::-webkit-scrollbar{{display:none}}</style><script>(function(){{function focusTerminal(){{var input=document.querySelector('.xterm-helper-textarea');if(input)input.focus()}}function isTerminalInput(e){{return e.target&&e.target.classList&&e.target.classList.contains('xterm-helper-textarea')}}function hasTerminalMethod(name){{return window.term&&typeof window.term[name]==='function'}}window.addEventListener('message',function(e){{if(e.source!==parent||!e.data||e.data.action!=='{Shared.TerminalPageMessage.FocusTerminal}')return;focusTerminal()}});document.addEventListener('keydown',function(e){{var key=(e.key||'').toLowerCase();var exactCtrl=e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey;if(isTerminalInput(e)&&exactCtrl&&key==='enter'&&hasTerminalMethod('input')){{e.preventDefault();e.stopImmediatePropagation();window.term.input('\\n',true);return}}if(isTerminalInput(e)&&exactCtrl&&key==='v'){{e.stopImmediatePropagation();return}}if(!(e.ctrlKey||e.metaKey)||e.altKey)return;var action=key==='p'?'{Shared.TerminalPageMessage.OpenWorktreeSearch}':key==='tab'?'{Shared.TerminalPageMessage.CycleTerminal}':key==='w'&&!e.shiftKey?'{Shared.TerminalPageMessage.CloseTerminal}':key==='n'&&!e.shiftKey?'{Shared.TerminalPageMessage.StartTerminal}':'';if(!action)return;e.preventDefault();e.stopImmediatePropagation();if(action==='{Shared.TerminalPageMessage.CycleTerminal}')parent.postMessage({{action:action,direction:e.shiftKey?'{Shared.TerminalPageMessage.PreviousDirection}':'{Shared.TerminalPageMessage.NextDirection}'}},'*');else parent.postMessage({{action:action}},'*')}},true)}})()</script>"
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
@@ -72,8 +32,11 @@ module internal TerminalProxy =
           DisposeApplication: unit -> Task
           DisposeClient: unit -> unit }
 
-    let internal customizeTerminalPage (html: string) =
-        html.Replace("</head>", terminalPageHeadInjection + "</head>", StringComparison.OrdinalIgnoreCase)
+    let internal customizeTerminalPage (allowedOrigins: string list) (html: string) =
+        let reconnectScript =
+            $"<script>(function(){{var allowedOrigins={JsonSerializer.Serialize allowedOrigins},action={JsonSerializer.Serialize Shared.TerminalPageMessage.TerminalVisible},reconnectPrompt=\"Press \\u23CE to Reconnect\",poll=null,deadline=null,reloading=false,reloadMarker='treemon-terminal-reconnect-load',suppressNextLoadedActivation=(function(){{try{{var marked=sessionStorage.getItem(reloadMarker)==='1';sessionStorage.removeItem(reloadMarker);return marked}}catch(_){{return true}}}})();function clearPending(){{if(poll!==null){{clearInterval(poll);poll=null}}if(deadline!==null){{clearTimeout(deadline);deadline=null}}}}function isWaitingForReconnect(){{var terminal=document.querySelector('.xterm');return !!terminal&&Array.prototype.some.call(terminal.children,function(child){{return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt}})}}function reconnectIfWaiting(){{if(reloading||document.visibilityState!=='visible'||!isWaitingForReconnect())return false;reloading=true;clearPending();try{{sessionStorage.setItem(reloadMarker,'1')}}catch(_){{}}window.location.reload();return true}}function activate(loaded){{if(document.visibilityState!=='visible'){{clearPending();return}}if(loaded&&suppressNextLoadedActivation){{suppressNextLoadedActivation=false;return}}if(reconnectIfWaiting())return;if(poll===null)poll=setInterval(reconnectIfWaiting,100);if(deadline!==null)clearTimeout(deadline);deadline=setTimeout(clearPending,10000)}}window.addEventListener('message',function(event){{if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;if(event.data.active===false){{clearPending();return}}if(event.data.active===true)activate(event.data.loaded===true)}});document.addEventListener('visibilitychange',function(){{if(document.visibilityState!=='visible')clearPending()}})}})();</script>"
+
+        html.Replace("</head>", terminalPageHeadInjection + reconnectScript + "</head>", StringComparison.OrdinalIgnoreCase)
 
     let private receiveMessage mode (socket: WebSocket) =
         let buffer = Array.zeroCreate<byte> 8_192
@@ -242,6 +205,7 @@ module internal TerminalProxy =
         context.Response.Headers.Pragma <- "no-cache"
 
     let private proxyHttp
+        allowedOrigins
         ttydPort
         targetPath
         (client: HttpClient)
@@ -270,7 +234,10 @@ module internal TerminalProxy =
 
                         let! html = response.Content.ReadAsStringAsync(context.RequestAborted)
 
-                        let bytes = html |> customizeTerminalPage |> Encoding.UTF8.GetBytes
+                        let bytes =
+                            html
+                            |> customizeTerminalPage allowedOrigins
+                            |> Encoding.UTF8.GetBytes
 
                         context.Response.ContentLength <- int64 bytes.Length
                         do! context.Response.Body.WriteAsync(bytes, context.RequestAborted)
@@ -328,7 +295,13 @@ module internal TerminalProxy =
                         | Some attachmentId ->
                             do! runBrowser plane attachmentId socket |> Async.StartAsTask
                 else
-                    return! proxyHttp ttydPort targetPath client context
+                    return!
+                        proxyHttp
+                            allowedOrigins
+                            ttydPort
+                            targetPath
+                            client
+                            context
         }
 
     let private ignoreTaskFailure (operation: unit -> Task) =

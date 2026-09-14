@@ -259,6 +259,9 @@ module TerminalPageMessage =
     let FocusTerminal = "focus-terminal"
 
     [<Literal>]
+    let TerminalVisible = "treemon-terminal-visible"
+
+    [<Literal>]
     let NextDirection = "next"
 
     [<Literal>]

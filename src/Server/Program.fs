@@ -179,8 +179,7 @@ let private serverConfig parsed mode =
                 { WorktreeRoots =
                     parsed.Roots
                     |> List.rev
-                    |> List.map (fun root ->
-                        root.TrimEnd([| '\\'; '/' |]))
+                    |> List.map _.TrimEnd([| '\\'; '/' |])
                   Port = parsed.Port
                   CanvasPort = parsed.CanvasPort
                   Mode = mode }
