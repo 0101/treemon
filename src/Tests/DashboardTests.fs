@@ -2288,9 +2288,9 @@ type DashboardTests() =
                     + "</title></head><body><textarea class=\"xterm-helper-textarea\" id=\"terminal-target\">"
                     + label
                     + "</textarea><script>"
-                    + "window.__terminalInputs=[];window.__terminalPastes=[];"
+                    + "window.__terminalInputs=[];window.__terminalPasteMatched=null;"
                     + "window.__terminalInputKeydowns=0;window.__terminalShortcutKeydowns=0;"
-                    + "window.term={input:function(data,wasUserInput){window.__terminalInputs.push([data,wasUserInput])},paste:function(){}};"
+                    + "window.term={input:function(data,wasUserInput){window.__terminalInputs.push([data,wasUserInput])}};"
                     + "var terminalTarget=document.getElementById('terminal-target');"
                     + "terminalTarget.addEventListener('keydown',function(e){"
                     + "var key=(e.key||'').toLowerCase();"
@@ -2298,7 +2298,8 @@ type DashboardTests() =
                     + "if(key==='enter'||key==='v')window.__terminalInputKeydowns++;"
                     + "if(e.ctrlKey&&key==='v')e.preventDefault()},true);"
                     + "terminalTarget.addEventListener('paste',function(e){"
-                    + "window.__terminalPastes.push(e.clipboardData?e.clipboardData.getData('text/plain'):'');"
+                    + "var pastedText=e.clipboardData?e.clipboardData.getData('text/plain'):'';"
+                    + "window.__terminalPasteMatched=pastedText.replace(/\\r\\n/g,'\\n')===window.__expectedTerminalPaste;"
                     + "e.preventDefault()})"
                     + "</script></body></html>"
                 )
@@ -2481,7 +2482,9 @@ type DashboardTests() =
 
             let! _ =
                 firstTarget.EvaluateAsync(
-                    "element => { window.__terminalInputs=[]; window.__terminalPastes=[]; window.__terminalInputKeydowns=0; }"
+                    "element => { window.__expectedTerminalPaste="
+                    + pasteTextJson
+                    + "; window.__terminalInputs=[]; window.__terminalPasteMatched=null; window.__terminalInputKeydowns=0; }"
                 )
 
             do! firstTarget.FocusAsync()
@@ -2490,22 +2493,20 @@ type DashboardTests() =
             let! ctrlVState =
                 firstTarget.EvaluateAsync<string array>(
                     """element => [
-                        String(window.__terminalPastes.length),
-                        window.__terminalPastes[0] ?? '',
+                        String(window.__terminalPasteMatched),
                         String(window.__terminalInputKeydowns),
                         String(window.__terminalInputs.length)
                     ]"""
                 )
 
             Assert.Multiple(fun () ->
-                Assert.That(ctrlVState[0], Is.EqualTo("1"))
-                Assert.That(ctrlVState[1].Replace("\r\n", "\n"), Is.EqualTo(pasteText))
+                Assert.That(ctrlVState[0], Is.EqualTo("true"))
                 Assert.That(
-                    ctrlVState[2],
+                    ctrlVState[1],
                     Is.EqualTo("0"),
                     "Ctrl+V must be stopped before xterm converts it to control byte 0x16"
                 )
-                Assert.That(ctrlVState[3], Is.EqualTo("0")))
+                Assert.That(ctrlVState[2], Is.EqualTo("0")))
 
             do! firstTarget.PressAsync("Control+P")
 

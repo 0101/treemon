@@ -2053,7 +2053,8 @@ type TerminalHostProxyTests() =
             Assert.That(customized, Does.Contain(".xterm-helper-textarea"))
             Assert.That(customized, Does.Contain("e.source!==parent"))
             Assert.That(customized, Does.Contain("window.term.input('\\n',true)"))
-            Assert.That(customized, Does.Contain("key==='v'&&hasTerminalMethod('paste')"))
+            Assert.That(customized, Does.Contain("exactCtrl&&key==='v'"))
+            Assert.That(customized, Does.Not.Contain("hasTerminalMethod('paste')"))
             Assert.That(customized, Does.Contain("e.stopImmediatePropagation()"))
             Assert.That(customized, Does.Contain("},true)"))
 
