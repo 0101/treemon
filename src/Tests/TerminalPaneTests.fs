@@ -564,6 +564,119 @@ type TerminalFocusTests() =
             Assert.That(List.length cmd, Is.EqualTo(2)))
 
     [<Test>]
+    member _.``Agent actions queue behind an in-flight start without coalescing``() =
+        let current = terminalId "current-start"
+        let firstAgent = terminalId "first-agent"
+        let secondAgent = terminalId "second-agent"
+        let startState model =
+            tryStartState first model.EmbeddedTerminalStarts
+        let queued focus count =
+            Some(TerminalStartState.StartingWithQueuedAgents(focus, count))
+        let complete message terminal snapshot model =
+            let result =
+                Ok
+                    { Snapshot = snapshot
+                      TerminalId = terminal }
+
+            App.update
+                (message (first, result))
+                model
+        let starting =
+            { focusModel with
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        first, TerminalStartState.Starting
+                    ] }
+
+        let queuedOnce, firstQueueCmd =
+            App.update (StartAgent first) starting
+
+        let queuedTwice, secondQueueCmd =
+            App.update (StartAgent first) queuedOnce
+
+        let currentSnapshot =
+            { Tabs =
+                focusModel.EmbeddedTerminals.Tabs
+                @ [ running current first 61241 ] }
+
+        let afterCurrent, currentCmd =
+            complete EmbeddedTerminalStarted current currentSnapshot queuedTwice
+
+        let firstAgentSnapshot =
+            { Tabs =
+                currentSnapshot.Tabs
+                @ [ running firstAgent first 61242 ] }
+
+        let afterFirstAgent, firstAgentCmd =
+            complete AgentStarted firstAgent firstAgentSnapshot afterCurrent
+
+        let secondAgentSnapshot =
+            { Tabs =
+                firstAgentSnapshot.Tabs
+                @ [ running secondAgent first 61243 ] }
+
+        let afterSecondAgent, secondAgentCmd =
+            complete AgentStarted secondAgent secondAgentSnapshot afterFirstAgent
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                startState queuedOnce,
+                Is.EqualTo(queued false 1)
+            )
+            Assert.That(
+                startState queuedTwice,
+                Is.EqualTo(queued false 2)
+            )
+            Assert.That(
+                startState afterCurrent,
+                Is.EqualTo(queued true 1)
+            )
+            Assert.That(
+                startState afterFirstAgent,
+                Is.EqualTo(Some TerminalStartState.StartingAndFocus)
+            )
+            Assert.That(
+                startState afterSecondAgent,
+                Is.EqualTo(None)
+            )
+            Assert.That(
+                activeTerminalId
+                    (Some first)
+                    afterSecondAgent.ActiveEmbeddedTerminals
+                    afterSecondAgent.EmbeddedTerminals,
+                Is.EqualTo(Some secondAgent)
+            )
+            Assert.That(List.length firstQueueCmd, Is.EqualTo(1))
+            Assert.That(List.length secondQueueCmd, Is.EqualTo(1))
+            Assert.That(List.length currentCmd, Is.EqualTo(2))
+            Assert.That(List.length firstAgentCmd, Is.EqualTo(3))
+            Assert.That(List.length secondAgentCmd, Is.EqualTo(1)))
+
+    [<Test>]
+    member _.``Queued Agent starts after the current launch fails``() =
+        let starting =
+            { focusModel with
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        first, TerminalStartState.Starting
+                    ] }
+
+        let queued, _ =
+            App.update (StartAgent first) starting
+
+        let updated, cmd =
+            App.update
+                (EmbeddedTerminalStarted(first, Error "current failed"))
+                queued
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                tryStartState first updated.EmbeddedTerminalStarts,
+                Is.EqualTo(Some TerminalStartState.StartingAndFocus)
+            )
+            Assert.That(List.length cmd, Is.EqualTo(2)))
+
+    [<Test>]
     member _.``Polled terminal before start response still schedules exact focus``() =
         let exact = terminalId "focused-start"
         let snapshot =

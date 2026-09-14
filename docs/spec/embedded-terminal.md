@@ -92,7 +92,7 @@ next authoritative registry read restores the tab.
 The card's `>` / Enter action remains the explicit native Windows Terminal choice. The always-visible
 robot-head Agent action and focused-card `a` / `A` shortcut always start a fresh embedded terminal,
 submit exactly `copilot --yolo`, open the terminal pane, and select the exact returned terminal. The
-dedicated embedded-terminal action and `T` shortcut reuse that worktree's remembered embedded
+dedicated embedded-terminal action and `t` shortcut reuse that worktree's remembered embedded
 terminal when one exists and otherwise start a plain embedded PowerShell terminal. The terminal
 pane's **New** action and Ctrl+N from its active terminal always start and focus another plain
 embedded terminal for that worktree.
@@ -109,7 +109,8 @@ existing terminal and starts no second Copilot process. An embedded terminal wit
 session does not suppress Resume; any open coding session does. Repeating the terminal-open or
 Resume action while that worktree already has a start in flight re-targets the pane without issuing
 a second launch; the in-flight state clears on both success and failure, so a rejected launch never
-wedges the action.
+wedges the action. Agent actions do not coalesce with an in-flight start: each one queues a fresh
+Copilot launch and selects and focuses its exact returned terminal in order.
 Background and CLI launches never steal dashboard focus. The browser polls the
 authoritative terminal registry on its normal activity cadence even when its current snapshot is
 empty, so the first background-created terminal becomes visible without a reload. That poll is

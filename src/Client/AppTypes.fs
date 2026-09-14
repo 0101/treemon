@@ -84,6 +84,9 @@ type Msg =
     | EmbeddedTerminalStarted of
         WorktreePath *
         Result<EmbeddedTerminalStartResult, string>
+    | AgentStarted of
+        WorktreePath *
+        Result<EmbeddedTerminalStartResult, string>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
     | SelectEmbeddedTerminal of EmbeddedTerminalId
     | CycleEmbeddedTerminal of EmbeddedTerminalId * TerminalPane.CycleDirection
