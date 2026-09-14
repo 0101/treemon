@@ -21,6 +21,9 @@ let private worktreeRoots = [ repoRoot ]
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
 let private terminalHostStateDirectory = TestUtils.terminalHostStateDirectory ()
+let internal serverLogDirectory =
+    TestUtils.serverLogDirectory terminalHostStateDirectory
+let private testProcessLogPath = Log.currentPath ()
 
 // Pick three distinct free loopback ports up front (TestUtils.getFreeTcpPorts binds :0, reads the
 // assigned ports, then releases them) for the API server, the canvas-doc server, and Vite — so the
@@ -139,9 +142,17 @@ let stopAll () =
     killProc viteProcess.Value
     serverProcess.Value <- None
     viteProcess.Value <- None
-    TestUtils.stopTerminalHostState terminalHostStateDirectory
+    let terminalHostCleanup =
+        TestUtils.stopTerminalHostState terminalHostStateDirectory
+    let testLogCleanup = TestUtils.removeOwnedFile testProcessLogPath
+
+    terminalHostCleanup
     |> fun result ->
         TestUtils.assertOk result "Dashboard TerminalHost cleanup failed"
+
+    testLogCleanup
+    |> fun result ->
+        TestUtils.assertOk result "Test process log cleanup failed"
 
 [<SetUpFixture>]
 type GlobalSetup() =

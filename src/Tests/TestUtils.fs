@@ -106,6 +106,21 @@ let msg (text: string) (t: string) : Message = { Text = text; At = ts t }
 let uniquePath prefix =
     Path.Combine(Path.GetTempPath(), $"treemon-{prefix}-{Guid.NewGuid():N}")
 
+let serverLogDirectory runtimeDirectory =
+    Path.Combine(runtimeDirectory, "server-logs")
+
+let removeOwnedFile path =
+    try
+        if File.Exists path then
+            File.Delete path
+
+        if File.Exists path then
+            Error $"Owned file survived cleanup: {path}"
+        else
+            Ok()
+    with error ->
+        Error $"Could not remove owned file '{path}': {error.Message}"
+
 let resolveCmdShim (fileName: string) =
     if Path.GetExtension(fileName) = "" then
         let cmdPath = $"{fileName}.cmd"
@@ -402,17 +417,19 @@ let stopTerminalHostState (stateDirectory: string) =
 /// Launch the Treemon API server process for an E2E fixture. `rootArgs` is the already-quoted,
 /// space-joined worktree-root list; each fixture keeps its own port / orphan-kill / fixture policy
 /// but shares this launch command. `terminalHostStateDirectory` isolates the fixture's TerminalHost
-/// discovery/state from production and from every other fixture.
+/// discovery/state from production and from every other fixture. The server log is placed under
+/// that same fixture-owned directory, so teardown removes only state owned by this fixture.
 let startServerProcess (serverProjectPath: string) (repoRoot: string) (rootArgs: string) (port: int) (canvasPort: int) (fixturePath: string) (terminalHostStateDirectory: string) : Process =
 #if DEBUG
     let configuration = "Debug"
 #else
     let configuration = "Release"
 #endif
+    let logDirectory = serverLogDirectory terminalHostStateDirectory
 
     startProcess
         "dotnet"
-        $"""run --no-build --configuration {configuration} --project "{serverProjectPath}" -- {rootArgs} --port {port} --canvas-port {canvasPort} --test-fixtures "{fixturePath}" """
+        $"""run --no-build --configuration {configuration} --project "{serverProjectPath}" -- {rootArgs} --port {port} --canvas-port {canvasPort} --test-fixtures "{fixturePath}" --log-dir "{logDirectory}" """
         repoRoot
         [ "TREEMON_TERMINAL_HOST_STATE_DIR", terminalHostStateDirectory ]
         false
