@@ -12,9 +12,12 @@ open Tests.TestUtils
 
 let private serverConfig arguments =
     match parseArgs arguments with
-    | RunMode.Server config -> config
-    | RunMode.TerminalHostDeploymentPreflight ->
+    | Ok(RunMode.Server config) -> config
+    | Ok RunMode.TerminalHostDeploymentPreflight ->
         Assert.Fail("Expected server run mode")
+        Unchecked.defaultof<_>
+    | Error error ->
+        Assert.Fail($"Expected valid server arguments, got {error}")
         Unchecked.defaultof<_>
 
 /// Writes an orphan `roots.json` (`{ "WorktreeRoots": [...] }`) into the isolated config dir using
@@ -45,9 +48,11 @@ type ServerStartupResolutionTests() =
     member _.``parseArgs with no args yields empty roots in normal mode``() =
         let config = serverConfig [||]
         Assert.That(config.WorktreeRoots, Is.Empty)
-        Assert.That(config.Demo, Is.False)
         Assert.That(config.Port, Is.EqualTo(5000))
-        Assert.That(config.DashboardPort, Is.EqualTo None)
+        Assert.That(
+            config.Mode,
+            Is.EqualTo(ServerMode.Standard(None, None))
+        )
         Assert.That(dashboardOrigins config, Is.Empty)
 
         Assert.That(
@@ -62,15 +67,14 @@ type ServerStartupResolutionTests() =
     member _.``parseArgs with only --port yields empty roots and the chosen port``() =
         let config = serverConfig [| "--port"; "5050" |]
         Assert.That(config.WorktreeRoots, Is.Empty)
-        Assert.That(config.Demo, Is.False)
         Assert.That(config.Port, Is.EqualTo(5050))
 
     [<Test>]
     member _.``deployment preflight is an explicit parsed run mode``() =
-        Assert.That(
-            parseArgs [| "--terminal-host-deployment-preflight" |],
-            Is.EqualTo RunMode.TerminalHostDeploymentPreflight
-        )
+        match parseArgs [| "--terminal-host-deployment-preflight" |] with
+        | Ok RunMode.TerminalHostDeploymentPreflight -> ()
+        | actual ->
+            Assert.Fail($"Expected deployment preflight mode, got {actual}")
 
     [<Test>]
     member _.``default dual-process ports produce the configured dashboard origins``() =
@@ -121,13 +125,74 @@ type ServerStartupResolutionTests() =
     member _.``parseArgs with a single root keeps that root``() =
         let config = serverConfig [| @"C:\code\alpha" |]
         Assert.That(config.WorktreeRoots, Is.EqualTo([ @"C:\code\alpha" ]))
-        Assert.That(config.Demo, Is.False)
+        Assert.That(
+            config.Mode,
+            Is.EqualTo(ServerMode.Standard(None, None))
+        )
 
     [<Test>]
     member _.``parseArgs --demo stays demo with empty roots``() =
         let config = serverConfig [| "--demo" |]
-        Assert.That(config.Demo, Is.True)
         Assert.That(config.WorktreeRoots, Is.Empty)
+        Assert.That(
+            config.Mode,
+            Is.EqualTo(ServerMode.Demo(None, None))
+        )
+
+    [<Test>]
+    member _.``parseArgs selects production logging only when explicitly requested``() =
+        let config = serverConfig [| "--production-log" |]
+        Assert.That(
+            config.Mode,
+            Is.EqualTo ServerMode.Production
+        )
+
+    [<Test>]
+    member _.``parseArgs preserves an explicit isolated log directory``() =
+        let config =
+            serverConfig [| "--log-dir"; @"C:\temp\treemon-fixture" |]
+
+        Assert.That(
+            config.Mode,
+            Is.EqualTo(
+                ServerMode.Standard(
+                    None,
+                    Some @"C:\temp\treemon-fixture"
+                )
+            )
+        )
+
+    [<Test>]
+    member _.``parseArgs rejects multiple log destinations``() =
+        match
+            parseArgs
+                [| "--production-log"
+                   "--log-dir"
+                   @"C:\temp\treemon-fixture" |]
+        with
+        | Error ArgumentError.MultipleLogDestinations -> ()
+        | actual ->
+            Assert.Fail($"Expected duplicate log destination error, got {actual}")
+
+    [<Test>]
+    member _.``parseArgs rejects production logging outside standalone mode``() =
+        let invalidArguments =
+            [ [| "--production-log"; "--demo" |]
+              [| "--production-log"
+                 "--test-fixtures"
+                 "fixtures.json" |]
+              [| "--production-log"
+                 "--dashboard-port"
+                 "5174" |] ]
+
+        invalidArguments
+        |> List.iter (fun arguments ->
+            match parseArgs arguments with
+            | Error ArgumentError.ProductionLogRequiresStandaloneMode -> ()
+            | actual ->
+                Assert.Fail(
+                    $"Expected standalone production log error, got {actual}"
+                ))
 
     // ----- resolveWorktreeRoots: priority + first-time persistence + orphan migration -----
 

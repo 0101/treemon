@@ -550,9 +550,14 @@ function Remove-OldRunLogs([int]$Keep) {
     }
 }
 
+function Install-TtydRuntime {
+    & (Join-Path $ScriptDir "scripts\setup-ttyd.ps1")
+}
+
 function Publish-ServerCandidate {
     $candidate = "$PublishDir.candidate-$([Guid]::NewGuid().ToString('N'))"
     try {
+        Install-TtydRuntime
         Write-Host "Publishing server candidate..." -ForegroundColor Cyan
         dotnet publish -c Release -o $candidate (Join-Path $ScriptDir "src\Server\Server.fsproj") |
             Out-Host
@@ -732,7 +737,7 @@ function Start-ProductionProcess(
 
     $serverExe = Join-Path $PublishDir "Treemon.exe"
     $rootArgs = ($effectiveRoots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
-    $serverArgs = if ($rootArgs) { "$rootArgs --port $DefaultPort" } else { "--port $DefaultPort" }
+    $serverArgs = if ($rootArgs) { "$rootArgs --port $DefaultPort --production-log" } else { "--port $DefaultPort --production-log" }
 
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
     $hadHostOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_EXECUTABLE
@@ -962,11 +967,14 @@ function Start-DualProcess(
     $devApiPort = 5001
     $devVitePort = 5174
     $devTerminalHostStateDirectory = Resolve-DevelopmentTerminalHostStateDirectory
+    $devLogDirectory = Join-Path $LogDir ($ModeName.ToLowerInvariant())
     New-Item -ItemType Directory -Force -Path $devTerminalHostStateDirectory | Out-Null
+    New-Item -ItemType Directory -Force -Path $devLogDirectory | Out-Null
 
     Write-Host "Starting $ModeName mode..." -ForegroundColor Cyan
     Write-Host "  Server:  http://localhost:$devApiPort ($ServerLabel)" -ForegroundColor Gray
     Write-Host "  Vite:    http://localhost:$devVitePort" -ForegroundColor Gray
+    Write-Host "  Logs:    $devLogDirectory" -ForegroundColor Gray
     Write-Host "  Press Ctrl+C to stop both processes" -ForegroundColor Gray
     if ($MonitorPaths) {
         $MonitorPaths | ForEach-Object { Write-Host "  Monitoring: $_" -ForegroundColor Gray }
@@ -997,7 +1005,7 @@ function Start-DualProcess(
 
     try {
         $serverProcess = Start-Process -FilePath "dotnet" `
-            -ArgumentList "watch run --project `"$(Join-Path $ScriptDir "src/Server")`" -- $ServerArgs --port $devApiPort --dashboard-port $devVitePort" `
+            -ArgumentList "watch run --project `"$(Join-Path $ScriptDir "src/Server")`" -- $ServerArgs --port $devApiPort --dashboard-port $devVitePort --log-dir `"$devLogDirectory`"" `
             -WorkingDirectory $ScriptDir `
             -PassThru `
             -NoNewWindow
@@ -1359,6 +1367,6 @@ switch ($Command) {
         Install-Skill
     }
     "setup-ttyd" {
-        & (Join-Path $ScriptDir "scripts\setup-ttyd.ps1")
+        Install-TtydRuntime
     }
 }

@@ -797,7 +797,9 @@ let private startServer fixture port =
             [ fixture.Repository
               "--port"
               string port
-              "--no-canvas" ]
+              "--no-canvas"
+              "--log-dir"
+              Path.Combine(fixture.RuntimeDirectory, "server-logs") ]
             fixture.RuntimeDirectory
             [ TerminalHostLayout.StateDirectoryEnvironmentVariable,
               fixture.HostStateDirectory
