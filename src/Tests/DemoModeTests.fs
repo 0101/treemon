@@ -62,10 +62,12 @@ let private waitForUrl (url: string) (timeoutMs: int) =
 let private startDemoServer () =
     task {
         TestUtils.killOrphansOnPort demoServerPort
+        let logDirectory =
+            TestUtils.serverLogDirectory terminalHostStateDirectory
         let proc =
             TestUtils.startProcess
                 "dotnet"
-                $"""run --project "{serverProjectPath}" -- --demo --port {demoServerPort}"""
+                $"""run --project "{serverProjectPath}" -- --demo --port {demoServerPort} --log-dir "{logDirectory}" """
                 repoRoot
                 [ "TREEMON_TERMINAL_HOST_STATE_DIR", terminalHostStateDirectory ]
                 false
