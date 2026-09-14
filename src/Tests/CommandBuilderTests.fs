@@ -10,6 +10,17 @@ open Server.CodingToolCli
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type StartCommandTests() =
+
+    [<Test>]
+    member _.``Start produces the exact Copilot agent command``() =
+        let result = (build (Some CodingToolProvider.CopilotCli) Start).AsShellString
+
+        Assert.That(result, Is.EqualTo("copilot --yolo"))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type BuildInteractiveCommandTests() =
 
     [<Test>]
@@ -74,6 +85,7 @@ type PermissionFlagInvariantTests() =
     // non-interactive uses --allow-all --no-ask-user -s --autopilot instead of --yolo.
     static member InvariantCases : obj array seq =
         seq {
+            yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box Start |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Interactive "hello") |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Resume (Some "abc")) |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Resume None) |]

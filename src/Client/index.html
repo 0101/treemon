@@ -103,7 +103,7 @@
         .fit-or-hide > span { flex-shrink: 0; display: flex; align-items: center; gap: 2px; }
         .branch-name { font-weight: 600; font-size: var(--fs-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
 
-        .terminal-btn, .embedded-terminal-btn, .new-tab-btn, .editor-btn, .delete-btn, .resume-btn, .auto-sync-btn {
+        .terminal-btn, .embedded-terminal-btn, .agent-btn, .editor-btn, .delete-btn, .resume-btn, .auto-sync-btn {
             flex-shrink: 0;
             background: none; border: 1px solid #45475a; border-radius: 4px;
             color: #7f849c; cursor: pointer; font-family: monospace;
@@ -111,12 +111,12 @@
         }
         .terminal-btn { margin-left: auto; font-size: var(--fs-base); padding-top: 2px; padding-bottom: 2px; }
         .embedded-terminal-btn { padding: 3px 4px; }
-        .new-tab-btn { font-size: var(--fs-lg); }
+        .agent-btn { padding: 2px 3px; }
         .editor-btn { padding: 3px 4px; }
         .delete-btn { padding: 3px 4px; }
         .resume-btn { padding: 3px 4px; }
         .auto-sync-btn { padding: 3px 4px; }
-        .terminal-btn:hover, .embedded-terminal-btn:hover, .new-tab-btn:hover, .auto-sync-btn:not(:disabled):hover { color: #a6e3a1; border-color: #a6e3a1; }
+        .terminal-btn:hover, .embedded-terminal-btn:hover, .agent-btn:hover, .auto-sync-btn:not(:disabled):hover { color: #a6e3a1; border-color: #a6e3a1; }
         .editor-btn:hover { color: #89b4fa; border-color: #89b4fa; }
         .resume-btn:hover { color: #fab387; border-color: #fab387; }
         .has-session .terminal-btn, .auto-sync-btn.active { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
@@ -136,6 +136,7 @@
         @keyframes sync-spin { to { transform: rotate(360deg); } }
         .delete-btn:hover { color: #f38ba8; border-color: #f38ba8; }
         .btn-icon { width: 13px; height: 13px; display: block; }
+        .agent-btn .btn-icon { width: 15px; height: 15px; }
 
         .ct-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
         .ct-dot.working  { --ct-color: #ff0000; background: var(--ct-color); animation: pulse 2s ease-in-out infinite; }

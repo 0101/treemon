@@ -19,7 +19,6 @@ let private terminalId value =
 [<RequireQualifiedAccess>]
 type private LaunchCall =
     | OpenNativeTerminal of WorktreePath
-    | OpenNativeTab of WorktreePath
     | StartEmbeddedTerminal of WorktreePath
     | StartEmbeddedCommand of WorktreePath * string
 
@@ -278,6 +277,8 @@ type WorktreeApiLaunchTests() =
                     "review.html"
             let launchCommand =
                 (build None (Interactive launchPrompt)).AsShellString
+            let agentCommand =
+                (build (Some CodingToolProvider.CopilotCli) Start).AsShellString
             let actionCommand =
                 action
                 |> CodingToolStatus.actionPrompt None
@@ -290,10 +291,11 @@ type WorktreeApiLaunchTests() =
                 (build None (Resume None)).AsShellString
 
             let plainId = terminalId "11111111111111111111111111111111"
-            let launchId = terminalId "22222222222222222222222222222222"
-            let actionId = terminalId "33333333333333333333333333333333"
-            let canvasId = terminalId "44444444444444444444444444444444"
-            let resumeId = terminalId "55555555555555555555555555555555"
+            let agentId = terminalId "22222222222222222222222222222222"
+            let launchId = terminalId "33333333333333333333333333333333"
+            let actionId = terminalId "44444444444444444444444444444444"
+            let canvasId = terminalId "55555555555555555555555555555555"
+            let resumeId = terminalId "66666666666666666666666666666666"
             let calls = ConcurrentQueue<LaunchCall>()
 
             let terminalLaunch: TerminalLaunch.Operations =
@@ -301,12 +303,6 @@ type WorktreeApiLaunchTests() =
                     fun requestedPath ->
                         async {
                             calls.Enqueue(LaunchCall.OpenNativeTerminal requestedPath)
-                            return Ok()
-                        }
-                  OpenNativeTab =
-                    fun requestedPath ->
-                        async {
-                            calls.Enqueue(LaunchCall.OpenNativeTab requestedPath)
                             return Ok()
                         }
                   StartEmbeddedTerminal =
@@ -330,6 +326,12 @@ type WorktreeApiLaunchTests() =
 
                             return
                                 match command with
+                                | value when value = agentCommand ->
+                                    Ok(
+                                        startResult
+                                            requestedPath
+                                            (EmbeddedTerminalId.value agentId)
+                                    )
                                 | value when value = launchCommand ->
                                     Ok(
                                         startResult
@@ -360,8 +362,8 @@ type WorktreeApiLaunchTests() =
             let api = createApi root path None terminalLaunch
 
             api.openTerminal path |> runAsync
-            let nativeTab = api.openNewTab path |> runAsync
             let plain = api.startEmbeddedTerminal path |> runAsync
+            let agent = api.startAgent path |> runAsync
             let launched =
                 api.launchSession
                     { Path = path
@@ -379,11 +381,8 @@ type WorktreeApiLaunchTests() =
                 |> runAsync
             let resumed = api.resumeSession path |> runAsync
 
-            Assert.That(
-                nativeTab,
-                Is.EqualTo(Ok() : Result<unit, string>)
-            )
             assertStart plainId plain
+            assertStart agentId agent
             assertStart launchId launched
             assertStart actionId actionLaunched
             assertStart canvasId canvasLaunched
@@ -392,8 +391,8 @@ type WorktreeApiLaunchTests() =
                 calls.ToArray(),
                 Is.EqualTo(
                     [| LaunchCall.OpenNativeTerminal path
-                       LaunchCall.OpenNativeTab path
                        LaunchCall.StartEmbeddedTerminal path
+                       LaunchCall.StartEmbeddedCommand(path, agentCommand)
                        LaunchCall.StartEmbeddedCommand(path, launchCommand)
                        LaunchCall.StartEmbeddedCommand(path, actionCommand)
                        LaunchCall.StartEmbeddedCommand(path, canvasCommand)
@@ -430,8 +429,6 @@ type WorktreeApiLaunchTests() =
             let terminalLaunch: TerminalLaunch.Operations =
                 { OpenNativeTerminal =
                     fun _ -> async { return Error "Unexpected native terminal launch" }
-                  OpenNativeTab =
-                    fun _ -> async { return Error "Unexpected native tab launch" }
                   StartEmbeddedTerminal =
                     fun _ -> async { return Error "Unexpected plain embedded launch" }
                   StartEmbeddedCommand =
@@ -526,8 +523,6 @@ type WorktreeApiLaunchTests() =
             let terminalLaunch: TerminalLaunch.Operations =
                 { OpenNativeTerminal =
                     fun _ -> async { return Error "Unexpected native terminal launch" }
-                  OpenNativeTab =
-                    fun _ -> async { return Error "Unexpected native tab launch" }
                   StartEmbeddedTerminal =
                     fun _ -> async { return Error "Unexpected plain embedded launch" }
                   StartEmbeddedCommand =
