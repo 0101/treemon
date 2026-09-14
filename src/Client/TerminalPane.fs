@@ -35,6 +35,8 @@ type CycleDirection =
 type TerminalShortcut =
     | OpenWorktreeSearch of EmbeddedTerminalId
     | CycleTerminal of EmbeddedTerminalId * CycleDirection
+    | CloseTerminal of EmbeddedTerminalId
+    | StartTerminal of EmbeddedTerminalId
 
 let private samePath left right =
     Shared.PathUtils.pathEquals
@@ -64,6 +66,13 @@ let tabsForWorktree path snapshot =
 let tryFindTab terminalId snapshot =
     snapshot.Tabs
     |> List.tryFind (fun tab -> tab.Id = terminalId)
+
+let withoutTerminals (terminalIds: Set<EmbeddedTerminalId>) snapshot =
+    { snapshot with
+        Tabs =
+            snapshot.Tabs
+            |> List.filter (fun tab ->
+                not (terminalIds.Contains tab.Id)) }
 
 let activeTerminalId selectedWorktree selections snapshot =
     selectedWorktree
@@ -234,8 +243,8 @@ let private focusTerminalFrame (frame: HTMLElement) =
             "$0.classList.contains('terminal-iframe-active') && $0.getClientRects().length > 0 && !document.querySelector('.modal-overlay')"
     if canFocus then
         emitJsExpr<unit>
-            frame
-            "(function(f){f.focus();f.contentWindow.postMessage({action:'focus-terminal'},new URL(f.src,document.baseURI).origin)})($0)"
+            (frame, TerminalPageMessage.FocusTerminal)
+            "(function(f,a){f.focus();f.contentWindow.postMessage({action:a},new URL(f.src,document.baseURI).origin)})($0,$1)"
 
 let focusTerminal terminalId =
     withTerminalFrame terminalId focusTerminalFrame ignore
@@ -295,22 +304,26 @@ let messageListener (dispatch: TerminalShortcut -> unit) =
                         "typeof $0.action === 'string' ? $0.action : ''"
 
                 match action with
-                | "open-worktree-search" ->
+                | TerminalPageMessage.OpenWorktreeSearch ->
                     dispatch (TerminalShortcut.OpenWorktreeSearch terminalId)
-                | "cycle-terminal" ->
+                | TerminalPageMessage.CloseTerminal ->
+                    dispatch (TerminalShortcut.CloseTerminal terminalId)
+                | TerminalPageMessage.StartTerminal ->
+                    dispatch (TerminalShortcut.StartTerminal terminalId)
+                | TerminalPageMessage.CycleTerminal ->
                     match
                         emitJsExpr<string>
                             message.data
                             "typeof $0.direction === 'string' ? $0.direction : ''"
                     with
-                    | "next" ->
+                    | TerminalPageMessage.NextDirection ->
                         dispatch (
                             TerminalShortcut.CycleTerminal(
                                 terminalId,
                                 CycleDirection.Next
                             )
                         )
-                    | "previous" ->
+                    | TerminalPageMessage.PreviousDirection ->
                         dispatch (
                             TerminalShortcut.CycleTerminal(
                                 terminalId,

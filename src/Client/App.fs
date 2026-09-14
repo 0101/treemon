@@ -110,6 +110,7 @@ let init () =
       TerminalPaneOpen = false
       TerminalPaneTarget = None
       EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+      DismissedEmbeddedTerminals = Set.empty
       ActiveEmbeddedTerminals = Map.empty
       EmbeddedTerminalStarts = Map.empty
       Canvas = CanvasState.empty
@@ -245,6 +246,17 @@ let private saveTerminalPaneOpenCmd isOpen model =
 let private focusEmbeddedTerminalCmd terminalId =
     Cmd.ofEffect (fun _ -> TerminalPane.focusTerminal terminalId)
 
+/// The remoting proxy is built lazily and only works under Fable, so every request stays behind a
+/// thunk that `update` hands to Elmish rather than forcing while it computes the model.
+let private closeEmbeddedTerminalCmd terminalId =
+    Cmd.OfAsync.either
+        (fun () -> worktreeApi.Value.closeEmbeddedTerminal terminalId)
+        ()
+        (function
+        | Ok snapshot -> EmbeddedTerminalClosed snapshot
+        | Error _ -> EmbeddedTerminalCloseFailed terminalId)
+        (fun _ -> EmbeddedTerminalCloseFailed terminalId)
+
 let private focusEmbeddedTerminalWhenReadyCmd terminalId =
     Cmd.ofEffect (fun _ ->
         TerminalPane.focusTerminalWhenReady terminalId)
@@ -258,6 +270,35 @@ let private launchEmbeddedTerminalCmd model path start =
             (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
         saveTerminalPaneOpenCmd true model
     ]
+
+let private startFocusedEmbeddedTerminal path model =
+    let updated, alreadyStarting =
+        beginFocusedEmbeddedTerminalStart path model
+
+    updated,
+    if alreadyStarting then
+        saveTerminalPaneOpenCmd true model
+    else
+        launchEmbeddedTerminalCmd
+            model
+            path
+            (fun () ->
+                worktreeApi.Value.startEmbeddedTerminal path)
+
+/// Adopts an incoming registry snapshot, keeping terminals the user dismissed hidden while their
+/// teardown is unresolved and carrying each worktree's selection across the change.
+let private applyEmbeddedSnapshot snapshot (model: Model) =
+    let visible =
+        snapshot
+        |> TerminalPane.withoutTerminals model.DismissedEmbeddedTerminals
+
+    { model with
+        EmbeddedTerminals = visible
+        ActiveEmbeddedTerminals =
+            TerminalPane.reconcileSelections
+                model.EmbeddedTerminals
+                visible
+                model.ActiveEmbeddedTerminals }
 
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
@@ -273,15 +314,21 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
     | _ -> None
 
-let private focusDashboardElement () =
-    Dom.document.querySelector ".dashboard"
-    |> Option.ofObj
-    |> Option.iter (fun element -> element?focus())
+let private tryFocusDashboard () =
+    match
+        Dom.document.querySelector ".modal-overlay" |> Option.ofObj,
+        Dom.document.querySelector ".dashboard" |> Option.ofObj
+    with
+    | None, Some element ->
+        element?focus()
+        obj.ReferenceEquals(Dom.document.activeElement, element)
+    | _ -> false
 
 let private focusDashboard: Cmd<Msg> =
     Cmd.ofEffect (fun _ ->
-        Dom.window?requestAnimationFrame(fun (_: float) -> focusDashboardElement ())
-        |> ignore)
+        if not (tryFocusDashboard ()) then
+            Dom.window?requestAnimationFrame(fun (_: float) -> tryFocusDashboard () |> ignore)
+            |> ignore)
 
 let private focusCanvasOrDashboard: Cmd<Msg> =
     Cmd.ofEffect (fun dispatch ->
@@ -580,39 +627,33 @@ let update msg model =
         Cmd.batch [ saveTerminalPaneOpenCmd true model; focusCmd ]
     | OpenEmbeddedTerminal path
     | StartEmbeddedTerminal path ->
-        let updated, alreadyStarting =
-            beginFocusedEmbeddedTerminalStart path model
-
-        updated,
-        if alreadyStarting then
-            saveTerminalPaneOpenCmd true model
-        else
-            launchEmbeddedTerminalCmd
-                model
-                path
-                (fun () -> worktreeApi.Value.startEmbeddedTerminal path)
+        startFocusedEmbeddedTerminal path model
+    | StartEmbeddedTerminalFromTab terminalId ->
+        model.EmbeddedTerminals
+        |> TerminalPane.tryFindTab terminalId
+        |> Option.map (fun tab ->
+            startFocusedEmbeddedTerminal tab.Worktree model)
+        |> Option.defaultValue (model, Cmd.none)
     | EmbeddedTerminalSnapshotChanged snapshot ->
-        { model with
-            EmbeddedTerminals = snapshot
-            ActiveEmbeddedTerminals =
-                TerminalPane.reconcileSelections
-                    model.EmbeddedTerminals
-                    snapshot
-                    model.ActiveEmbeddedTerminals
-            EmbeddedTerminalPollInFlight = false },
-        Cmd.none
+        // A registry read is the only authoritative confirmation that a dismissed terminal is gone:
+        // start and close responses can be older than a concurrent close.
+        let reported =
+            snapshot.Tabs |> List.map _.Id |> Set.ofList
+
+        let released =
+            { model with
+                DismissedEmbeddedTerminals =
+                    Set.intersect model.DismissedEmbeddedTerminals reported
+                EmbeddedTerminalPollInFlight = false }
+
+        applyEmbeddedSnapshot snapshot released, Cmd.none
     | EmbeddedTerminalPollFailed ->
         { model with EmbeddedTerminalPollInFlight = false },
         Cmd.none
     | EmbeddedTerminalStarted(path, result) ->
         match result with
         | Ok started ->
-            let snapshot = started.Snapshot
-            let selections =
-                model.ActiveEmbeddedTerminals
-                |> TerminalPane.reconcileSelections
-                    model.EmbeddedTerminals
-                    snapshot
+            let applied = applyEmbeddedSnapshot started.Snapshot model
 
             let shouldFocus =
                 match
@@ -627,13 +668,12 @@ let update msg model =
                 | _ -> false
 
             let updated =
-                { model with
-                    EmbeddedTerminals = snapshot
+                { applied with
                     ActiveEmbeddedTerminals =
-                        selections
+                        applied.ActiveEmbeddedTerminals
                         |> TerminalPane.selectTerminal
                             started.TerminalId
-                            snapshot
+                            applied.EmbeddedTerminals
                     EmbeddedTerminalStarts =
                         model.EmbeddedTerminalStarts
                         |> TerminalPane.clearStartState path }
@@ -684,20 +724,49 @@ let update msg model =
             { model with ActiveEmbeddedTerminals = selections }, focusCmd
         | None ->
             model, Cmd.none
+    | CloseEmbeddedTerminal terminalId
+        when model.DismissedEmbeddedTerminals.Contains terminalId ->
+        model, Cmd.none
     | CloseEmbeddedTerminal terminalId ->
-        let before = model.EmbeddedTerminals
+        let closedWorktree =
+            model.EmbeddedTerminals
+            |> TerminalPane.tryFindTab terminalId
+            |> Option.map _.Worktree
 
-        model,
-        Cmd.OfAsync.either
-            worktreeApi.Value.closeEmbeddedTerminal
-            terminalId
-            (function
-            | Ok snapshot ->
-                EmbeddedTerminalClosed(terminalId, before, snapshot)
-            | Error _ -> EmbeddedTerminalCloseFailed)
-            (fun _ -> EmbeddedTerminalCloseFailed)
-    | EmbeddedTerminalCloseFailed ->
-        model,
+        let activeInClosedWorktree (state: Model) =
+            closedWorktree
+            |> Option.bind (fun path ->
+                TerminalPane.activeTerminalId
+                    (Some path)
+                    state.ActiveEmbeddedTerminals
+                    state.EmbeddedTerminals)
+
+        let wasActive =
+            activeInClosedWorktree model |> Option.contains terminalId
+
+        let remaining =
+            model.EmbeddedTerminals
+            |> TerminalPane.withoutTerminals (Set.singleton terminalId)
+
+        let updated =
+            { applyEmbeddedSnapshot remaining model with
+                DismissedEmbeddedTerminals =
+                    model.DismissedEmbeddedTerminals.Add terminalId }
+
+        let focusCmd =
+            if wasActive then
+                activeInClosedWorktree updated
+                |> Option.map focusEmbeddedTerminalCmd
+                |> Option.defaultValue Cmd.none
+            else
+                Cmd.none
+
+        updated,
+        Cmd.batch [ closeEmbeddedTerminalCmd terminalId; focusCmd ]
+    | EmbeddedTerminalCloseFailed terminalId ->
+        { model with
+            DismissedEmbeddedTerminals =
+                model.DismissedEmbeddedTerminals.Remove terminalId },
         Cmd.batch [
             fetchEmbeddedTerminals worktreeApi
             fetchWorktrees ()
@@ -710,15 +779,8 @@ let update msg model =
             let isOpen = not model.TerminalPaneOpen
             { model with TerminalPaneOpen = isOpen },
             saveTerminalPaneOpenCmd isOpen model
-    | EmbeddedTerminalClosed(_, before, snapshot) ->
-        { model with
-            EmbeddedTerminals = snapshot
-            ActiveEmbeddedTerminals =
-                TerminalPane.reconcileSelections
-                    before
-                    snapshot
-                    model.ActiveEmbeddedTerminals },
-        fetchWorktrees ()
+    | EmbeddedTerminalClosed snapshot ->
+        applyEmbeddedSnapshot snapshot model, fetchWorktrees ()
     | OpenEditor path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
@@ -1288,7 +1350,11 @@ let appSubscriptions (model: Model) : Sub<Msg> =
                     )
                 )
             | TerminalPane.TerminalShortcut.CycleTerminal (terminalId, direction) ->
-                dispatch (CycleEmbeddedTerminal(terminalId, direction)))
+                dispatch (CycleEmbeddedTerminal(terminalId, direction))
+            | TerminalPane.TerminalShortcut.CloseTerminal terminalId ->
+                dispatch (CloseEmbeddedTerminal terminalId)
+            | TerminalPane.TerminalShortcut.StartTerminal terminalId ->
+                dispatch (StartEmbeddedTerminalFromTab terminalId))
 
     let overviewSticky (dispatch: Dispatch<Msg>) =
         OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)

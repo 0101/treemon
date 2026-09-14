@@ -2273,13 +2273,16 @@ type DashboardTests() =
     [<TestCase(false)>]
     [<TestCase(true)>]
     [<Category("Fast")>]
-    member this.``Embedded terminal forwards global search and tab switching shortcuts``(onePane: bool) =
+    member this.``Embedded terminal forwards search tab switching start and close shortcuts in both layouts``(onePane: bool) =
         task {
             let! page = this.Context.NewPageAsync()
             let converter = Fable.Remoting.Json.FableJsonConverter()
             let worktreePath = WorktreePath "Q:/code/TestProject/feature-recent"
             let firstTerminal = EmbeddedTerminalId "shortcut-first"
             let secondTerminal = EmbeddedTerminalId "shortcut-second"
+            let thirdTerminal = EmbeddedTerminalId "shortcut-third"
+            let mutable startCalls = 0
+            let mutable closeCalls = 0
 
             let terminalPage label =
                 TerminalHost.TerminalProxy.customizeTerminalPage (
@@ -2290,11 +2293,19 @@ type DashboardTests() =
                     + "</textarea><script>window.__terminalKeydowns=0;"
                     + "document.addEventListener('keydown',function(e){"
                     + "var key=e.key.toLowerCase();"
-                    + "if(key==='p'||key==='tab')window.__terminalKeydowns++})"
+                    + "if(key==='p'||key==='tab'||key==='n'||key==='w')window.__terminalKeydowns++})"
                     + "</script></body></html>"
                 )
 
-            let snapshot =
+            let thirdTab =
+                { Id = thirdTerminal
+                  Worktree = worktreePath
+                  ReportedActivity = Some "Third terminal"
+                  Lifecycle =
+                    EmbeddedTerminalLifecycle.Running
+                        $"{ServerFixture.canvasUrl}/fixture-terminal-third" }
+
+            let mutable registry =
                 { Tabs =
                     [ { Id = firstTerminal
                         Worktree = worktreePath
@@ -2309,7 +2320,8 @@ type DashboardTests() =
                             EmbeddedTerminalLifecycle.Running
                                 $"{ServerFixture.canvasUrl}/fixture-terminal-second" } ] }
 
-            let body = JsonConvert.SerializeObject(snapshot, converter)
+            let serialize value =
+                JsonConvert.SerializeObject(value, converter)
 
             do!
                 page.RouteAsync(
@@ -2318,7 +2330,50 @@ type DashboardTests() =
                         route.FulfillAsync(
                             RouteFulfillOptions(
                                 ContentType = "application/json",
-                                Body = body
+                                Body = serialize registry
+                            )
+                        )
+                )
+
+            do!
+                page.RouteAsync(
+                    "**/IWorktreeApi/startEmbeddedTerminal",
+                    fun route ->
+                        startCalls <- startCalls + 1
+                        registry <-
+                            { Tabs = registry.Tabs @ [ thirdTab ] }
+
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body =
+                                    serialize
+                                        (Ok
+                                            { Snapshot = registry
+                                              TerminalId = thirdTerminal }:
+                                            Result<EmbeddedTerminalStartResult, string>)
+                            )
+                        )
+                )
+
+            do!
+                page.RouteAsync(
+                    "**/IWorktreeApi/closeEmbeddedTerminal",
+                    fun route ->
+                        closeCalls <- closeCalls + 1
+                        registry <-
+                            { Tabs =
+                                registry.Tabs
+                                |> List.filter (fun tab ->
+                                    tab.Id <> thirdTerminal) }
+
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body =
+                                    serialize
+                                        (Ok registry:
+                                            Result<EmbeddedTerminalSnapshot, string>)
                             )
                         )
                 )
@@ -2343,6 +2398,18 @@ type DashboardTests() =
                             RouteFulfillOptions(
                                 ContentType = "text/html; charset=utf-8",
                                 Body = terminalPage "second"
+                            )
+                        )
+                )
+
+            do!
+                page.RouteAsync(
+                    "**/fixture-terminal-third",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "text/html; charset=utf-8",
+                                Body = terminalPage "third"
                             )
                         )
                 )
@@ -2391,6 +2458,14 @@ type DashboardTests() =
                 page.Locator(
                     $"iframe.terminal-iframe-active[data-terminal-id='{EmbeddedTerminalId.value secondTerminal}']"
                 )
+            let thirdIframe =
+                page.Locator(
+                    $"iframe[data-terminal-id='{EmbeddedTerminalId.value thirdTerminal}']"
+                )
+            let thirdActiveIframe =
+                page.Locator(
+                    $"iframe.terminal-iframe-active[data-terminal-id='{EmbeddedTerminalId.value thirdTerminal}']"
+                )
             do! firstActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let firstTarget =
@@ -2404,6 +2479,13 @@ type DashboardTests() =
                 page
                     .FrameLocator(
                         $"iframe[data-terminal-id='{EmbeddedTerminalId.value secondTerminal}']"
+                    )
+                    .Locator("#terminal-target")
+
+            let thirdTarget =
+                page
+                    .FrameLocator(
+                        $"iframe[data-terminal-id='{EmbeddedTerminalId.value thirdTerminal}']"
                     )
                     .Locator("#terminal-target")
 
@@ -2467,6 +2549,11 @@ type DashboardTests() =
             do! secondActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! Assertions.Expect(secondTarget).ToBeFocusedAsync()
 
+            do! page.Keyboard.PressAsync("Control+N")
+            do! thirdActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(thirdTarget).ToBeFocusedAsync()
+            Assert.That(startCalls, Is.EqualTo(1))
+
             let! firstTerminalKeydowns =
                 firstTarget.EvaluateAsync<int>(
                     "element => window.__terminalKeydowns"
@@ -2479,6 +2566,23 @@ type DashboardTests() =
             Assert.Multiple(fun () ->
                 Assert.That(firstTerminalKeydowns, Is.Zero)
                 Assert.That(secondTerminalKeydowns, Is.Zero))
+
+            // Dismissal is optimistic, so the frame detaches before the close request reaches the
+            // route handler; wait for the response before asserting the server saw the close.
+            let! _ =
+                page.RunAndWaitForResponseAsync(
+                    (fun () -> page.Keyboard.PressAsync("Control+W")),
+                    "**/IWorktreeApi/closeEmbeddedTerminal")
+            do!
+                thirdIframe.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Detached,
+                        Timeout = 5000.0f
+                    )
+                )
+            do! secondActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(secondTarget).ToBeFocusedAsync()
+            Assert.That(closeCalls, Is.EqualTo(1))
 
             do! page.CloseAsync()
         }

@@ -37,6 +37,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Shared\Shared.fsproj" />
     <ProjectReference Include="..\TerminalHostLayout\TerminalHostLayout.fsproj" />
   </ItemGroup>
 

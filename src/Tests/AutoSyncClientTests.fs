@@ -49,6 +49,7 @@ let private model enabled : Model =
       TerminalPaneOpen = false
       TerminalPaneTarget = None
       EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+      DismissedEmbeddedTerminals = Set.empty
       ActiveEmbeddedTerminals = Map.empty
       EmbeddedTerminalStarts = Map.empty
       Canvas = CanvasState.empty
