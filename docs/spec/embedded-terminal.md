@@ -80,8 +80,12 @@ for the targeted worktree; the empty state offers **Start terminal**. Switching 
 other worktrees' tabs without closing their terminals, and running iframes stay mounted so their
 browser state survives. Closing the last visible tab leaves the pane open in its empty state; only
 the persistent top-bar **Terminal** control hides or shows the pane, using the same active treatment
-as the **Canvas** control. Middle-clicking a tab invokes the same exact-terminal close action as its
-close button.
+as the **Canvas** control. Middle-clicking a tab or pressing Ctrl+W while its terminal has focus
+invokes the same exact-terminal close action as its close button. Close removes the tab and iframe
+immediately and remembers that exact terminal ID so stale registry, start, or cleanup responses
+cannot restore it while authoritative teardown continues. A registry read that no longer lists the
+terminal confirms teardown and releases the dismissal; a failed teardown releases it at once so the
+next authoritative registry read restores the tab.
 
 ### Launch routing and command startup
 
@@ -90,7 +94,8 @@ robot-head Agent action and focused-card `a` / `A` shortcut always start a fresh
 submit exactly `copilot --yolo`, open the terminal pane, and select the exact returned terminal. The
 dedicated embedded-terminal action and `T` shortcut reuse that worktree's remembered embedded
 terminal when one exists and otherwise start a plain embedded PowerShell terminal. The terminal
-pane's **New** action always starts another one.
+pane's **New** action and Ctrl+N from its active terminal always start and focus another plain
+embedded terminal for that worktree.
 
 Every agent-bearing process launch uses an embedded terminal: the robot-head Agent card action,
 Resume, contextual card actions, explicit Canvas session launch, create-worktree prompt launch,
@@ -112,9 +117,9 @@ single-flight: a tick starts no new registry request while one is outstanding, a
 resumes polling once the request settles, whether it succeeded or failed.
 
 Embedded terminals do not change `WorktreeStatus.HasActiveSession` or add another card-level
-active-session indicator. That flag and its terminal-button glow, focus label, native `+`
-visibility, and delete/archive native-kill prompt remain tied only to a tracked Windows Terminal
-window. Existing coding-tool status continues to show whether an embedded agent is working.
+active-session indicator. That flag and its terminal-button glow, focus label, and delete/archive
+native-kill prompt remain tied only to a tracked Windows Terminal window. Existing coding-tool
+status continues to show whether an embedded agent is working.
 
 Interactive agent-launch prompts containing control characters, including newlines, are
 UTF-8/base64 encoded as inert data and decoded by a fixed PowerShell expression. The resulting
@@ -713,10 +718,14 @@ isolated server and fails on incomplete exact process cleanup.
 - **Proxy-owned terminal page integration:** the attachment proxy adds one CSS override and one
   capture-phase global-shortcut bridge to ttyd's root page instead of carrying a forked custom
   index. It hides the rendered xterm scrollbar while preserving scrollback, forwards Ctrl+P to
-  worktree search, and forwards Ctrl+Tab / Ctrl+Shift+Tab to next/previous terminal selection before
-  xterm consumes those keys. The dashboard accepts a forwarded shortcut only from the active
-  loopback terminal iframe, then sends an exact-origin focus request back after terminal selection
-  or worktree-search dismissal so the active xterm input keeps keyboard ownership.
+  worktree search, Ctrl+N to start another terminal for the current worktree, Ctrl+W to close the
+  current terminal, and Ctrl+Tab / Ctrl+Shift+Tab to next/previous terminal selection before xterm
+  consumes those keys. Host injection and dashboard listener compile one shared action vocabulary,
+  so a renamed message breaks the build instead of being silently ignored by the other end. The
+  dashboard accepts a forwarded shortcut only from the active loopback
+  terminal iframe, then sends an exact-origin focus request back after terminal selection,
+  terminal start, terminal close, or worktree-search dismissal so the active xterm input keeps
+  keyboard ownership.
 - **Graceful shutdown before automatic Resume:** replacement requests exact SDK session shutdown
   for every exact target before terminal teardown and aborts while the old host is healthy if any
   shutdown is unavailable, rejected, or times out. Endpoint acceptance is not completion; exact
