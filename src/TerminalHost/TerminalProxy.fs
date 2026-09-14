@@ -19,8 +19,44 @@ module internal TerminalProxy =
     let [<Literal>] private AttachmentPathRoot = "/_treemon/"
     let [<Literal>] private TtySubprotocol = "tty"
     let [<Literal>] private CommandSubprotocol = "treemon-command"
-    let [<Literal>] private TerminalPageHeadInjection =
-        "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style><script>(function(){function focusTerminal(){var input=document.querySelector('.xterm-helper-textarea');if(input)input.focus()}window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.action!=='focus-terminal')return;focusTerminal()});document.addEventListener('keydown',function(e){if(!(e.ctrlKey||e.metaKey)||e.altKey)return;var key=e.key.toLowerCase();var action=key==='p'?'open-worktree-search':key==='tab'?'cycle-terminal':key==='w'&&!e.shiftKey?'close-terminal':key==='n'&&!e.shiftKey?'start-terminal':'';if(!action)return;e.preventDefault();e.stopImmediatePropagation();if(action==='cycle-terminal')parent.postMessage({action:action,direction:e.shiftKey?'previous':'next'},'*');else parent.postMessage({action:action},'*')},true)})()</script>"
+
+    /// Ctrl/Cmd keys the terminal page forwards to the dashboard before xterm consumes them.
+    /// Ctrl+Tab keeps firing with Shift held because Shift picks its cycle direction.
+    let private forwardedShortcuts =
+        [ {| Key = "p"; Action = Shared.TerminalPageMessage.OpenWorktreeSearch; FiresWithShift = true |}
+          {| Key = "tab"; Action = Shared.TerminalPageMessage.CycleTerminal; FiresWithShift = true |}
+          {| Key = "w"; Action = Shared.TerminalPageMessage.CloseTerminal; FiresWithShift = false |}
+          {| Key = "n"; Action = Shared.TerminalPageMessage.StartTerminal; FiresWithShift = false |} ]
+
+    let private shortcutSelection =
+        forwardedShortcuts
+        |> List.map (fun shortcut ->
+            let shiftGuard = if shortcut.FiresWithShift then "" else "&&!e.shiftKey"
+            $"key==='{shortcut.Key}'{shiftGuard}?'{shortcut.Action}':")
+        |> String.concat ""
+
+    let private terminalPageHeadInjection =
+        String.concat "" [
+            "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>"
+            "<script>(function(){"
+            "function focusTerminal(){var input=document.querySelector('.xterm-helper-textarea');if(input)input.focus()}"
+            "window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.action!=='"
+            Shared.TerminalPageMessage.FocusTerminal
+            "')return;focusTerminal()});"
+            "document.addEventListener('keydown',function(e){"
+            "if(!(e.ctrlKey||e.metaKey)||e.altKey)return;"
+            "var key=e.key.toLowerCase();"
+            "var action=" + shortcutSelection + "'';"
+            "if(!action)return;e.preventDefault();e.stopImmediatePropagation();"
+            "if(action==='" + Shared.TerminalPageMessage.CycleTerminal + "')"
+            "parent.postMessage({action:action,direction:e.shiftKey?'"
+            Shared.TerminalPageMessage.PreviousDirection
+            "':'"
+            Shared.TerminalPageMessage.NextDirection
+            "'},'*');"
+            "else parent.postMessage({action:action},'*')"
+            "},true)})()</script>"
+        ]
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
@@ -31,7 +67,7 @@ module internal TerminalProxy =
           DisposeClient: unit -> unit }
 
     let internal customizeTerminalPage (html: string) =
-        html.Replace("</head>", TerminalPageHeadInjection + "</head>", StringComparison.OrdinalIgnoreCase)
+        html.Replace("</head>", terminalPageHeadInjection + "</head>", StringComparison.OrdinalIgnoreCase)
 
     let private receiveMessage mode (socket: WebSocket) =
         let buffer = Array.zeroCreate<byte> 8_192

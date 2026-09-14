@@ -238,8 +238,8 @@ let private withTerminalFrame terminalId action onMissing =
 
 let private focusTerminalFrame frame =
     emitJsExpr<unit>
-        frame
-        "(function(f){f.focus();f.contentWindow.postMessage({action:'focus-terminal'},new URL(f.src,document.baseURI).origin)})($0)"
+        (frame, TerminalPageMessage.FocusTerminal)
+        "(function(f,a){f.focus();f.contentWindow.postMessage({action:a},new URL(f.src,document.baseURI).origin)})($0,$1)"
 
 let focusTerminal terminalId =
     withTerminalFrame terminalId focusTerminalFrame ignore
@@ -293,26 +293,26 @@ let messageListener (dispatch: TerminalShortcut -> unit) =
                         "typeof $0.action === 'string' ? $0.action : ''"
 
                 match action with
-                | "open-worktree-search" ->
+                | TerminalPageMessage.OpenWorktreeSearch ->
                     dispatch (TerminalShortcut.OpenWorktreeSearch terminalId)
-                | "close-terminal" ->
+                | TerminalPageMessage.CloseTerminal ->
                     dispatch (TerminalShortcut.CloseTerminal terminalId)
-                | "start-terminal" ->
+                | TerminalPageMessage.StartTerminal ->
                     dispatch (TerminalShortcut.StartTerminal terminalId)
-                | "cycle-terminal" ->
+                | TerminalPageMessage.CycleTerminal ->
                     match
                         emitJsExpr<string>
                             message.data
                             "typeof $0.direction === 'string' ? $0.direction : ''"
                     with
-                    | "next" ->
+                    | TerminalPageMessage.NextDirection ->
                         dispatch (
                             TerminalShortcut.CycleTerminal(
                                 terminalId,
                                 CycleDirection.Next
                             )
                         )
-                    | "previous" ->
+                    | TerminalPageMessage.PreviousDirection ->
                         dispatch (
                             TerminalShortcut.CycleTerminal(
                                 terminalId,

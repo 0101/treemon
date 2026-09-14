@@ -83,8 +83,9 @@ the persistent top-bar **Terminal** control hides or shows the pane, using the s
 as the **Canvas** control. Middle-clicking a tab or pressing Ctrl+W while its terminal has focus
 invokes the same exact-terminal close action as its close button. Close removes the tab and iframe
 immediately and remembers that exact terminal ID so stale registry, start, or cleanup responses
-cannot restore it while authoritative teardown continues. If teardown fails, the client drops that
-dismissal and restores the tab only from a fresh authoritative registry read.
+cannot restore it while authoritative teardown continues. A registry read that no longer lists the
+terminal confirms teardown and releases the dismissal; a failed teardown releases it at once so the
+next authoritative registry read restores the tab.
 
 ### Launch routing and command startup
 
@@ -717,7 +718,9 @@ isolated server and fails on incomplete exact process cleanup.
   index. It hides the rendered xterm scrollbar while preserving scrollback, forwards Ctrl+P to
   worktree search, Ctrl+N to start another terminal for the current worktree, Ctrl+W to close the
   current terminal, and Ctrl+Tab / Ctrl+Shift+Tab to next/previous terminal selection before xterm
-  consumes those keys. The dashboard accepts a forwarded shortcut only from the active loopback
+  consumes those keys. Host injection and dashboard listener compile one shared action vocabulary,
+  so a renamed message breaks the build instead of being silently ignored by the other end. The
+  dashboard accepts a forwarded shortcut only from the active loopback
   terminal iframe, then sends an exact-origin focus request back after terminal selection,
   terminal start, terminal close, or worktree-search dismissal so the active xterm input keeps
   keyboard ownership.

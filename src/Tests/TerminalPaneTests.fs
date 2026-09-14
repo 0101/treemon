@@ -761,6 +761,29 @@ type TerminalFocusTests() =
             Assert.That(cmd, Is.Empty))
 
     [<Test>]
+    member _.``Confirmed teardown stops tracking a dismissed terminal``() =
+        let closing, _ =
+            App.update
+                (CloseEmbeddedTerminal firstTwo)
+                focusModel
+
+        let torndown =
+            { Tabs =
+                focusModel.EmbeddedTerminals.Tabs
+                |> List.filter (fun tab -> tab.Id <> firstTwo) }
+
+        let updated, _ =
+            App.update
+                (EmbeddedTerminalSnapshotChanged torndown)
+                closing
+
+        Assert.That(
+            updated.DismissedEmbeddedTerminals,
+            Is.Empty,
+            "a registry read without the terminal proves teardown, so its dismissal must not be kept for the session"
+        )
+
+    [<Test>]
     member _.``Completed terminal close immediately refreshes worktree status``() =
         let after =
             { Tabs =
