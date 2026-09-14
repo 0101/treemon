@@ -53,6 +53,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - Every other server writes a unique `server-<port>-<pid>-<instance>.log`. The default directory is
   the OS temporary `treemon/server-logs` directory; `--log-dir` selects another directory without
   changing the unique filename. Development and demo launchers use `logs/dev` and `logs/demo`.
+  Startup fails before hosting begins when the selected log file cannot be created.
 - Test and E2E launchers pass a fixture-owned temporary log directory. Teardown stops the exact
   owned processes before removing that exact temporary directory; it never removes a shared log
   root. In-process test logging also defaults to a unique process file and deletes only that file.

@@ -8,6 +8,12 @@ type Destination =
     | Production
     | Isolated of directory: string option
 
+[<RequireQualifiedAccess>]
+type InitializationError =
+    | InvalidPath
+    | AlreadyInitialized
+    | CannotOpen of path: string * error: exn
+
 let private configuredPathKey = "Treemon.Server.LogPath"
 let private lockObj = obj ()
 
@@ -85,31 +91,38 @@ let private ensureLogDirectory (path: string) =
     |> Option.filter (String.IsNullOrWhiteSpace >> not)
     |> Option.iter (Directory.CreateDirectory >> ignore)
 
-let init path =
-    if String.IsNullOrWhiteSpace path
-       || containsControlCharacter path
-       || not (Path.IsPathFullyQualified path) then
-        invalidArg (nameof path) "Log path must be an absolute control-free path"
-
-    if logPath.IsValueCreated then
-        invalidOp "The log destination was already selected"
-
-    AppContext.SetData(configuredPathKey, path)
-    let selectedPath = logPath.Value
-
+let internal tryCreateLogFile path =
     try
-        ensureLogDirectory selectedPath
+        ensureLogDirectory path
         use stream =
             new FileStream(
-                selectedPath,
+                path,
                 FileMode.Create,
                 FileAccess.Write,
                 FileShare.ReadWrite
             )
-        ()
-    with _ -> ()
+        Ok()
+    with error ->
+        Error(InitializationError.CannotOpen(path, error))
 
-let internal currentPath () = logPath.Value
+let init path =
+    lock lockObj (fun () ->
+        if String.IsNullOrWhiteSpace path
+           || containsControlCharacter path
+           || not (Path.IsPathFullyQualified path) then
+            Error InitializationError.InvalidPath
+        elif logPath.IsValueCreated then
+            Error InitializationError.AlreadyInitialized
+        else
+            match tryCreateLogFile path with
+            | Error _ as error -> error
+            | Ok() ->
+                AppContext.SetData(configuredPathKey, path)
+                logPath.Value |> ignore
+                Ok())
+
+let internal currentPath () =
+    lock lockObj (fun () -> logPath.Value)
 
 let internal isSlowOperation (elapsed: TimeSpan) =
     elapsed >= TimeSpan.FromSeconds 5.0

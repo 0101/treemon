@@ -45,19 +45,43 @@ let readAppVersion () =
 let internal configureLogging (builder: ILoggingBuilder) =
     builder.AddFilter("Microsoft.AspNetCore", LogLevel.Warning) |> ignore
 
+[<RequireQualifiedAccess>]
+type ServerMode =
+    | Production
+    | Standard of dashboardPort: int option * logDirectory: string option
+    | Fixtures of path: string * dashboardPort: int option * logDirectory: string option
+    | Demo of dashboardPort: int option * logDirectory: string option
+
 type ServerConfig =
     { WorktreeRoots: string list
+      Port: int
+      CanvasPort: int option
+      Mode: ServerMode }
+
+[<RequireQualifiedAccess>]
+type RunMode =
+    | Server of ServerConfig
+    | TerminalHostDeploymentPreflight
+
+[<RequireQualifiedAccess>]
+type ArgumentError =
+    | InvalidPort of value: string
+    | InvalidCanvasPort of value: string
+    | InvalidDashboardPort of value: string
+    | MultipleLogDestinations
+    | DemoWithTestFixtures
+    | ProductionLogRequiresStandaloneMode
+    | CanvasPortMatchesServerPort of port: int
+    | UnexpectedArgument of value: string
+
+type private ParsedServerArguments =
+    { Roots: string list
       Port: int
       CanvasPort: int option
       DashboardPort: int option
       TestFixtures: string option
       Demo: bool
       LogDestination: Log.Destination }
-
-[<RequireQualifiedAccess>]
-type RunMode =
-    | Server of ServerConfig
-    | TerminalHostDeploymentPreflight
 
 /// JSON contract consumed by Test-TerminalHostDeployment in treemon.ps1. Host fields are absent
 /// when HasLiveHost is false.
@@ -71,127 +95,156 @@ type TerminalHostDeploymentPreflightResponse =
 
 let private defaultCanvasPort = 5002
 
+let private argumentErrorMessage = function
+    | ArgumentError.InvalidPort value -> $"Invalid port number: {value}"
+    | ArgumentError.InvalidCanvasPort value ->
+        $"Invalid canvas port number: {value}"
+    | ArgumentError.InvalidDashboardPort value ->
+        $"Invalid dashboard port number: {value}"
+    | ArgumentError.MultipleLogDestinations ->
+        "Specify only one log destination"
+    | ArgumentError.DemoWithTestFixtures ->
+        "--demo and --test-fixtures are mutually exclusive"
+    | ArgumentError.ProductionLogRequiresStandaloneMode ->
+        "--production-log is not valid for development, demo, or fixture mode"
+    | ArgumentError.CanvasPortMatchesServerPort port ->
+        $"--canvas-port ({port}) must differ from the main --port ({port})"
+    | ArgumentError.UnexpectedArgument value ->
+        $"Unexpected argument: {value}"
+
+let private parseServerArguments serverArguments =
+    let rec parse (parsed: ParsedServerArguments) remaining =
+        match remaining with
+        | "--port" :: value :: rest ->
+            match System.Int32.TryParse(value) with
+            | true, port -> parse { parsed with Port = port } rest
+            | false, _ -> Error(ArgumentError.InvalidPort value)
+        | "--canvas-port" :: value :: rest ->
+            match System.Int32.TryParse(value) with
+            | true, port ->
+                parse { parsed with CanvasPort = Some port } rest
+            | false, _ -> Error(ArgumentError.InvalidCanvasPort value)
+        | "--dashboard-port" :: value :: rest ->
+            match System.Int32.TryParse(value) with
+            | true, port ->
+                parse { parsed with DashboardPort = Some port } rest
+            | false, _ ->
+                Error(ArgumentError.InvalidDashboardPort value)
+        | "--no-canvas" :: rest ->
+            parse { parsed with CanvasPort = None } rest
+        | "--test-fixtures" :: path :: rest ->
+            parse { parsed with TestFixtures = Some path } rest
+        | "--demo" :: rest ->
+            parse { parsed with Demo = true } rest
+        | "--log-dir" :: path :: rest ->
+            match parsed.LogDestination with
+            | Log.Destination.Isolated None ->
+                parse
+                    { parsed with
+                        LogDestination =
+                            Log.Destination.Isolated(Some path) }
+                    rest
+            | _ -> Error ArgumentError.MultipleLogDestinations
+        | "--production-log" :: rest ->
+            match parsed.LogDestination with
+            | Log.Destination.Isolated None ->
+                parse
+                    { parsed with
+                        LogDestination = Log.Destination.Production }
+                    rest
+            | _ -> Error ArgumentError.MultipleLogDestinations
+        | path :: rest when not (path.StartsWith("--")) ->
+            parse { parsed with Roots = path :: parsed.Roots } rest
+        | [] -> Ok parsed
+        | unexpected :: _ ->
+            Error(ArgumentError.UnexpectedArgument unexpected)
+
+    parse
+        { Roots = []
+          Port = 5000
+          CanvasPort = Some defaultCanvasPort
+          DashboardPort = None
+          TestFixtures = None
+          Demo = false
+          LogDestination = Log.Destination.Isolated None }
+        serverArguments
+
+let private serverConfig parsed mode =
+    match parsed.CanvasPort with
+    | Some canvasPort when canvasPort = parsed.Port ->
+        Error(ArgumentError.CanvasPortMatchesServerPort canvasPort)
+    | _ ->
+        Ok(
+            RunMode.Server
+                { WorktreeRoots =
+                    parsed.Roots
+                    |> List.rev
+                    |> List.map (fun root ->
+                        root.TrimEnd([| '\\'; '/' |]))
+                  Port = parsed.Port
+                  CanvasPort = parsed.CanvasPort
+                  Mode = mode }
+        )
+
+let private toRunMode parsed =
+    match
+        parsed.Demo,
+        parsed.TestFixtures,
+        parsed.LogDestination
+    with
+    | true, Some _, _ ->
+        Error ArgumentError.DemoWithTestFixtures
+    | true, None, Log.Destination.Production
+    | false, Some _, Log.Destination.Production ->
+        Error ArgumentError.ProductionLogRequiresStandaloneMode
+    | false, None, Log.Destination.Production
+        when parsed.DashboardPort.IsSome ->
+        Error ArgumentError.ProductionLogRequiresStandaloneMode
+    | true, None, Log.Destination.Isolated logDirectory ->
+        Ok(
+            RunMode.Server
+                { WorktreeRoots = []
+                  Port = parsed.Port
+                  CanvasPort = None
+                  Mode =
+                    ServerMode.Demo(
+                        parsed.DashboardPort,
+                        logDirectory
+                    ) }
+        )
+    | false, Some path, Log.Destination.Isolated logDirectory ->
+        ServerMode.Fixtures(
+            path,
+            parsed.DashboardPort,
+            logDirectory
+        )
+        |> serverConfig parsed
+    | false, None, Log.Destination.Isolated logDirectory ->
+        ServerMode.Standard(parsed.DashboardPort, logDirectory)
+        |> serverConfig parsed
+    | false, None, Log.Destination.Production ->
+        ServerMode.Production |> serverConfig parsed
+
 let parseArgs (args: string array) =
     match args |> Array.toList with
     | [ "--terminal-host-deployment-preflight" ] ->
-        RunMode.TerminalHostDeploymentPreflight
+        Ok RunMode.TerminalHostDeploymentPreflight
     | serverArguments ->
-        let rec parse roots port canvasPort dashboardPort testFixtures demo logDestination remaining =
-            match remaining with
-            | "--port" :: portStr :: rest ->
-                match System.Int32.TryParse(portStr) with
-                | true, p -> parse roots p canvasPort dashboardPort testFixtures demo logDestination rest
-                | false, _ ->
-                    eprintfn $"Invalid port number: {portStr}"
-                    exit 1
-            | "--canvas-port" :: portStr :: rest ->
-                match System.Int32.TryParse(portStr) with
-                | true, p -> parse roots port (Some p) dashboardPort testFixtures demo logDestination rest
-                | false, _ ->
-                    eprintfn $"Invalid canvas port number: {portStr}"
-                    exit 1
-            | "--dashboard-port" :: portStr :: rest ->
-                match System.Int32.TryParse(portStr) with
-                | true, p -> parse roots port canvasPort (Some p) testFixtures demo logDestination rest
-                | false, _ ->
-                    eprintfn $"Invalid dashboard port number: {portStr}"
-                    exit 1
-            | "--no-canvas" :: rest ->
-                parse roots port None dashboardPort testFixtures demo logDestination rest
-            | "--test-fixtures" :: path :: rest ->
-                parse roots port canvasPort dashboardPort (Some path) demo logDestination rest
-            | "--demo" :: rest ->
-                parse roots port canvasPort dashboardPort testFixtures true logDestination rest
-            | "--log-dir" :: path :: rest ->
-                match logDestination with
-                | Log.Destination.Isolated None ->
-                    parse
-                        roots
-                        port
-                        canvasPort
-                        dashboardPort
-                        testFixtures
-                        demo
-                        (Log.Destination.Isolated(Some path))
-                        rest
-                | _ ->
-                    eprintfn "Specify only one log destination"
-                    exit 1
-            | "--production-log" :: rest ->
-                match logDestination with
-                | Log.Destination.Isolated None ->
-                    parse
-                        roots
-                        port
-                        canvasPort
-                        dashboardPort
-                        testFixtures
-                        demo
-                        Log.Destination.Production
-                        rest
-                | _ ->
-                    eprintfn "Specify only one log destination"
-                    exit 1
-            | path :: rest when not (path.StartsWith("--")) ->
-                parse (roots @ [ path ]) port canvasPort dashboardPort testFixtures demo logDestination rest
-            | [] ->
-                roots,
-                port,
-                canvasPort,
-                dashboardPort,
-                testFixtures,
-                demo,
-                logDestination
-            | unexpected :: _ ->
-                eprintfn $"Unexpected argument: {unexpected}"
-                exit 1
-
-        match
-            serverArguments
-            |> parse [] 5000 (Some defaultCanvasPort) None None false (Log.Destination.Isolated None)
-        with
-        | _, _, _, _, Some _, true, _ ->
-            eprintfn "--demo and --test-fixtures are mutually exclusive"
-            exit 1
-        | _, _, _, dashboardPort, testFixtures, demo, Log.Destination.Production
-            when demo || testFixtures.IsSome || dashboardPort.IsSome ->
-            eprintfn "--production-log is not valid for development, demo, or fixture mode"
-            exit 1
-        | _, port, _, dashboardPort, _, true, logDestination ->
-            RunMode.Server
-                { WorktreeRoots = []
-                  Port = port
-                  CanvasPort = None
-                  DashboardPort = dashboardPort
-                  TestFixtures = None
-                  Demo = true
-                  LogDestination = logDestination }
-        | roots, port, canvasPort, dashboardPort, testFixtures, _, logDestination ->
-            // Zero positional roots is valid in normal mode: `start`/`dev` no longer require a path.
-            // When no roots are passed the server resolves them from global config (or migrates a
-            // legacy/orphan set) at startup — see resolveWorktreeRoots in main.
-            match canvasPort with
-            | Some cp when cp = port ->
-                eprintfn $"--canvas-port ({cp}) must differ from the main --port ({port})"
-                exit 1
-            | _ ->
-                RunMode.Server
-                    { WorktreeRoots =
-                        roots
-                        |> List.map (fun r -> r.TrimEnd([| '\\'; '/' |]))
-                      Port = port
-                      CanvasPort = canvasPort
-                      DashboardPort = dashboardPort
-                      TestFixtures = testFixtures
-                      Demo = false
-                      LogDestination = logDestination }
+        serverArguments
+        |> parseServerArguments
+        |> Result.bind toRunMode
 
 let internal dashboardOrigins (config: ServerConfig) =
-    match config.DashboardPort with
-    | Some port ->
+    match config.Mode with
+    | ServerMode.Standard(Some port, _)
+    | ServerMode.Demo(Some port, _)
+    | ServerMode.Fixtures(_, Some port, _) ->
         [ $"http://localhost:{port}"
           $"http://127.0.0.1:{port}" ]
-    | None -> []
+    | ServerMode.Production
+    | ServerMode.Standard(None, _)
+    | ServerMode.Demo(None, _)
+    | ServerMode.Fixtures(_, None, _) -> []
 
 let private populateAgentFromFixtures (agent: MailboxProcessor<SchedulerState.StateMsg>) (fixtures: FixtureData) =
     fixtures.Worktrees.Repos
@@ -323,7 +376,11 @@ let internal persistResolvedRoots (resolution: RootsResolution) =
             Log.log "Startup" $"Failed to persist worktree roots: {msg}"
 
 let internal usesSessionActivity (config: ServerConfig) =
-    not config.Demo && config.TestFixtures.IsNone
+    match config.Mode with
+    | ServerMode.Production
+    | ServerMode.Standard _ -> true
+    | ServerMode.Fixtures _
+    | ServerMode.Demo _ -> false
 
 /// Creates one port-scoped runtime store and seeds it from disk, logging the path so a stale or
 /// unexpected file is visible in the startup log.
@@ -424,11 +481,24 @@ let private runTerminalHostDeploymentPreflight () =
 let main args =
     let config =
         match parseArgs args with
-        | RunMode.TerminalHostDeploymentPreflight ->
+        | Error error ->
+            eprintfn $"{argumentErrorMessage error}"
+            exit 1
+        | Ok RunMode.TerminalHostDeploymentPreflight ->
             runTerminalHostDeploymentPreflight () |> exit
-        | RunMode.Server config -> config
+        | Ok(RunMode.Server config) -> config
 
     let serverUrl = $"http://localhost:{config.Port}"
+    let logDestination, fixtures, demo =
+        match config.Mode with
+        | ServerMode.Production ->
+            Log.Destination.Production, None, false
+        | ServerMode.Standard(_, directory) ->
+            Log.Destination.Isolated directory, None, false
+        | ServerMode.Fixtures(path, _, directory) ->
+            Log.Destination.Isolated directory, Some path, false
+        | ServerMode.Demo(_, directory) ->
+            Log.Destination.Isolated directory, None, true
 
     let logPath =
         match
@@ -438,15 +508,25 @@ let main args =
                 config.Port
                 Environment.ProcessId
                 (Guid.NewGuid())
-                config.LogDestination
+                logDestination
         with
         | Ok path -> path
         | Error error ->
             eprintfn $"Invalid log configuration: {error}"
             exit 1
 
-    Log.init logPath
-    printfn $"Server log: {logPath}"
+    match Log.init logPath with
+    | Ok() ->
+        printfn $"Server log: {logPath}"
+    | Error Log.InitializationError.InvalidPath ->
+        eprintfn "Invalid log configuration: log path must be absolute and contain no control characters"
+        exit 1
+    | Error Log.InitializationError.AlreadyInitialized ->
+        eprintfn "Invalid log configuration: log destination was already selected"
+        exit 1
+    | Error(Log.InitializationError.CannotOpen(path, error)) ->
+        eprintfn $"Could not initialize server log '{path}': {error}"
+        exit 1
 
     // Effective roots: CLI args > global config > orphan import (persisted first-time). Resolution
     // is a pure decision; `persistResolvedRoots` applies the first-time persist + orphan cleanup at
@@ -470,7 +550,8 @@ let main args =
     let deployBranchDisplay = deployBranch |> Option.defaultValue "(main)"
     Log.log "Startup" $"Deploy branch: {deployBranchDisplay}"
 
-    config.TestFixtures |> Option.iter (fun path -> Log.log "Startup" $"Test fixtures: {path}")
+    fixtures |> Option.iter (fun path ->
+        Log.log "Startup" $"Test fixtures: {path}")
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
@@ -478,7 +559,7 @@ let main args =
         ProcessIdentityResolverRuntime.defaultResolver
 
     let embeddedTerminal =
-        if config.Demo then None
+        if demo then None
         else
             dashboardOrigins config
             |> EmbeddedTerminal.createWithProcessIdentityResolver
@@ -487,7 +568,7 @@ let main args =
             |> Some
 
     let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, runtimeStoreFlushes =
-        if config.Demo then
+        if demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
             buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None, []
         else
@@ -500,7 +581,7 @@ let main args =
                     embeddedTerminal.Value
             CanvasDocOwnership.load ()
 
-            match config.TestFixtures with
+            match fixtures with
             | Some path ->
                 match WorktreeApi.loadFixtures path with
                 | Ok fixtures ->
@@ -521,7 +602,7 @@ let main args =
                       SnapshotStore = None
                       AutoSyncStore = None
                       WorktreeRoots = worktreeRoots
-                      TestFixtures = config.TestFixtures
+                      TestFixtures = fixtures
                       AppVersion = appVersion
                       DeployBranch = deployBranch }
                 |> buildRemotingHandler,
@@ -589,7 +670,7 @@ let main args =
                           SnapshotStore = Some activity.SnapshotStore
                           AutoSyncStore = Some autoSyncStore
                           WorktreeRoots = worktreeRoots
-                          TestFixtures = config.TestFixtures
+                          TestFixtures = fixtures
                           AppVersion = appVersion
                           DeployBranch = deployBranch }
                     |> buildRemotingHandler,

@@ -70,6 +70,26 @@ type LogDestinationTests() =
             Assert.That(fixture, Is.Not.EqualTo(production)))
 
     [<Test>]
+    member _.``Default isolated logs use the supplied temporary directory``() =
+        let instanceId =
+            Guid.Parse("1889540c-dc76-43a3-a9eb-dd64da8ddcbf")
+
+        let path =
+            resolve (Log.Destination.Isolated None) instanceId
+
+        Assert.That(
+            path,
+            Is.EqualTo(
+                Path.Combine(
+                    Path.GetFullPath tempDirectory,
+                    "treemon",
+                    "server-logs",
+                    "server-58481-1234-1889540cdc7643a3a9ebdd64da8ddcbf.log"
+                )
+            )
+        )
+
+    [<Test>]
     member _.``Concurrent non-production servers receive different log files``() =
         let directory =
             Log.Destination.Isolated(Some isolatedDirectory)
@@ -110,8 +130,23 @@ type LogDestinationTests() =
         | Ok path ->
             Assert.Fail($"Control-bearing log directory resolved to {path}")
 
+    [<Test>]
+    member _.``Log file creation reports an unusable directory``() =
+        withTempDir "treemon-log-init" (fun root ->
+            let blockingFile = Path.Combine(root, "not-a-directory")
+            File.WriteAllText(blockingFile, "test")
+            let logPath = Path.Combine(blockingFile, "server.log")
+
+            match Log.tryCreateLogFile logPath with
+            | Error(Log.InitializationError.CannotOpen(path, _)) ->
+                Assert.That(path, Is.EqualTo(logPath))
+            | Error error ->
+                Assert.Fail($"Unexpected initialization error: {error}")
+            | Ok() ->
+                Assert.Fail("Unusable log directory was accepted"))
+
 [<TestFixture>]
-[<Category("Unit")>]
+[<Category("E2E")>]
 [<Category("Fast")>]
 type FixtureServerLogTests() =
 

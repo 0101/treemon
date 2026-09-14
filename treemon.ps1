@@ -962,7 +962,7 @@ function Start-DualProcess(
     $devApiPort = 5001
     $devVitePort = 5174
     $devTerminalHostStateDirectory = Resolve-DevelopmentTerminalHostStateDirectory
-    $devLogDirectory = Join-Path $LogDir $ModeName.ToLowerInvariant()
+    $devLogDirectory = Join-Path $LogDir ($ModeName.ToLowerInvariant())
     New-Item -ItemType Directory -Force -Path $devTerminalHostStateDirectory | Out-Null
     New-Item -ItemType Directory -Force -Path $devLogDirectory | Out-Null
 
