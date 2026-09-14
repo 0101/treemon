@@ -123,7 +123,7 @@ use `ProcessRunner`:
 
 | Location | Purpose |
 |---|---|
-| `src/Server/SessionManager.fs` (`spawnWtAndResolve`, `openNewTabInWindow`) | Launch Windows Terminal windows/tabs for coding sessions |
+| `src/Server/SessionManager.fs` (`spawnWtAndResolve`) | Launch Windows Terminal windows for explicit native terminal sessions |
 | `src/Server/WorktreeApi.fs` (`openEditor`) | Launch the user's configured editor |
 
 They pass a command line to `ProcessStartInfo` as a string, need no output capture, and in the

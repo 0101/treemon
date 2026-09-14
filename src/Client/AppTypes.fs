@@ -79,9 +79,13 @@ type Msg =
     | OpenTerminal of WorktreePath
     | OpenEmbeddedTerminal of WorktreePath
     | StartEmbeddedTerminal of WorktreePath
+    | StartAgent of WorktreePath
     | EmbeddedTerminalSnapshotChanged of EmbeddedTerminalSnapshot
     | EmbeddedTerminalPollFailed
     | EmbeddedTerminalStarted of
+        WorktreePath *
+        Result<EmbeddedTerminalStartResult, string>
+    | AgentStarted of
         WorktreePath *
         Result<EmbeddedTerminalStartResult, string>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
@@ -109,7 +113,6 @@ type Msg =
     | SessionKilledForArchive of path: WorktreePath
     | DeleteCompleted of Result<unit, string>
     | FocusSession of path: WorktreePath
-    | OpenNewTab of path: WorktreePath
     | SessionResult of Result<unit, string>
     | WorktreeSearchMsg of WorktreeSearch.Msg
     | KeyPressed of key: string * hasModifier: bool
