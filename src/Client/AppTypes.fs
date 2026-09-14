@@ -52,6 +52,7 @@ type Model =
       // The next explicit focus transition clears the override and restores normal focus-following.
       TerminalPaneTarget: WorktreePath option
       EmbeddedTerminals: EmbeddedTerminalSnapshot
+      DismissedEmbeddedTerminals: Set<EmbeddedTerminalId>
       ActiveEmbeddedTerminals: Map<WorktreePath, EmbeddedTerminalId>
       EmbeddedTerminalStarts: Map<WorktreePath, TerminalPane.TerminalStartState>
       EmbeddedTerminalViewStates: Map<EmbeddedTerminalId, TerminalPane.TerminalViewState>
@@ -93,12 +94,10 @@ type Msg =
         signal: TerminalPane.TerminalVisibilitySignal
     | CycleEmbeddedTerminal of EmbeddedTerminalId * TerminalPane.CycleDirection
     | CloseEmbeddedTerminal of EmbeddedTerminalId
-    | EmbeddedTerminalCloseFailed
+    | StartEmbeddedTerminalFromTab of EmbeddedTerminalId
+    | EmbeddedTerminalCloseFailed of EmbeddedTerminalId
     | ToggleTerminalPane
-    | EmbeddedTerminalClosed of
-        EmbeddedTerminalId *
-        before: EmbeddedTerminalSnapshot *
-        after: EmbeddedTerminalSnapshot
+    | EmbeddedTerminalClosed of EmbeddedTerminalSnapshot
     | OpenEditor of WorktreePath
     | ToggleAutoSync of WorktreePath
     | AutoSyncToggleResult of path: WorktreePath * previousEnabled: bool * Result<unit, string>

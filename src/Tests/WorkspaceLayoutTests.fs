@@ -435,7 +435,7 @@ let private terminalDocument (marker: string) =
         .Replace("__MARKER__", marker, StringComparison.Ordinal)
         .Replace(
             "__ACTION__",
-            TerminalPane.TerminalVisibleAction,
+            TerminalPageMessage.TerminalVisible,
             StringComparison.Ordinal
         )
     |> TerminalHost.TerminalProxy.customizeTerminalPage [
@@ -541,6 +541,13 @@ type TerminalPaneDomTests() =
                     ".terminal-tab-label",
                     PageLocatorOptions(HasText = label))))
             .Locator(".terminal-tab-close")
+
+    // Dismissal is optimistic, so a closed tab leaves the DOM before its request reaches the route
+    // handler. Assertions about close calls wait for the response instead of the vanished tab.
+    let closingTerminal (page: IPage) (action: unit -> Task) =
+        page.RunAndWaitForResponseAsync(
+            Func<Task>(action),
+            "**/IWorktreeApi/closeEmbeddedTerminal")
 
     let cardFor (page: IPage) branch =
         page.Locator(
@@ -1218,9 +1225,10 @@ type TerminalPaneDomTests() =
                             document.querySelector('[data-terminal-id="{EmbeddedTerminalId.value firstAlternateTerminalId}"]');
                     }}""")
 
-            do!
-                (closeButtonFor this.Page firstTerminalActivity)
-                    .ClickAsync()
+            let! _ =
+                closingTerminal this.Page (fun () ->
+                    (closeButtonFor this.Page firstTerminalActivity)
+                        .ClickAsync())
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     "() => document.querySelectorAll('.terminal-tab').length === 1")
@@ -1236,9 +1244,10 @@ type TerminalPaneDomTests() =
                         return current === window.__alternateTerminalFrame && current.isConnected;
                     }}""")
 
-            do!
-                (closeButtonFor this.Page firstAlternateTerminalActivity)
-                    .ClickAsync()
+            let! _ =
+                closingTerminal this.Page (fun () ->
+                    (closeButtonFor this.Page firstAlternateTerminalActivity)
+                        .ClickAsync())
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     "() => document.querySelectorAll('.terminal-tab').length === 0")
@@ -1263,11 +1272,11 @@ type TerminalPaneDomTests() =
     [<Test>]
     member this.``Middle-clicking a terminal tab closes it``() =
         task {
-            do!
-                (tabFor this.Page firstTerminalActivity)
-                    .ClickAsync(
-                        LocatorClickOptions(Button = MouseButton.Middle)
-                    )
+            let! _ =
+                closingTerminal this.Page (fun () ->
+                    (tabFor this.Page firstTerminalActivity)
+                        .ClickAsync(
+                            LocatorClickOptions(Button = MouseButton.Middle)))
 
             let! _ =
                 this.Page.WaitForFunctionAsync(
