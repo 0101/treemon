@@ -2561,7 +2561,12 @@ type DashboardTests() =
                 Assert.That(firstTerminalKeydowns, Is.Zero)
                 Assert.That(secondTerminalKeydowns, Is.Zero))
 
-            do! page.Keyboard.PressAsync("Control+W")
+            // Dismissal is optimistic, so the frame detaches before the close request reaches the
+            // route handler; wait for the response before asserting the server saw the close.
+            let! _ =
+                page.RunAndWaitForResponseAsync(
+                    (fun () -> page.Keyboard.PressAsync("Control+W")),
+                    "**/IWorktreeApi/closeEmbeddedTerminal")
             do!
                 thirdIframe.WaitForAsync(
                     LocatorWaitForOptions(
