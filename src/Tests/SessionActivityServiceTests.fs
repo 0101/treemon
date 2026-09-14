@@ -126,9 +126,14 @@ let private requireReplacementReady =
         commands
       ) ->
         epoch, shutdownTargets, commands
-    | TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle ->
+    | TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle _ ->
         Assert.Fail "expected a ready replacement session plan"
         failwith "unreachable"
+
+let private waitingForIdle pendingReconciliationCount nonIdleSessionCount =
+    TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+        { PendingReconciliationCount = pendingReconciliationCount
+          NonIdleSessionCount = nonIdleSessionCount }
 
 /// Distinct exact terminal origins shared by the ownership/replacement fixtures.
 let private terminalA = TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -2189,7 +2194,7 @@ type TerminalOwnershipQueryTests() =
 
         Assert.That(
             waitingPlan,
-            Is.EqualTo TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle,
+            Is.EqualTo(waitingForIdle 0 1),
             "most-recent selection applies to the live resume identity, not to the all-session idle gate"
         )
 
@@ -2248,8 +2253,7 @@ type TerminalOwnershipQueryTests() =
                 )
                 Assert.That(
                     queryReplacementPlanOk service now [ replacementTarget ],
-                    Is.EqualTo
-                        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                    Is.EqualTo(waitingForIdle 0 1)
                 ))
 
             present
@@ -2277,8 +2281,7 @@ type TerminalOwnershipQueryTests() =
                 )
                 Assert.That(
                     queryReplacementPlanOk service now [ replacementTarget ],
-                    Is.EqualTo
-                        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle,
+                    Is.EqualTo(waitingForIdle 0 1),
                     "unowned same-worktree and other-terminal sessions cannot change the exact terminal policy"
                 ))
 
@@ -2344,7 +2347,7 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(retainedCommands, Is.EqualTo(resumeCommandsFor [ terminalA, "owned" ]))))
 
     [<Test>]
-    member _.``startup reconciliation lets a surviving session reassert before replacement``() =
+    member _.``startup reconciliation accepts a surviving session heartbeat before replacement``() =
         let terminalSessionId = terminalC
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-owned-resume-worktree")
@@ -2365,23 +2368,22 @@ type TerminalOwnershipQueryTests() =
             Assert.That(service.ExactSnapshot().Count, Is.EqualTo 1)
             Assert.That(
                 queryReplacementPlanOk service now [ replacementTarget ],
-                Is.EqualTo TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                Is.EqualTo(waitingForIdle 1 0)
             )
 
             let representedAt = now.AddMinutes(1.0)
 
-            let presence =
+            let heartbeat =
                 { mkReport
                     "surviving"
                     worktree
-                    "surviving-presence"
+                    "surviving-heartbeat"
                     (representedAt.ToString("O"))
-                    SessionPresent with
+                    Heartbeat with
                     TerminalSessionId = Some terminalSessionId }
 
-            match service.Present(presence, representedAt) with
-            | PresenceAcknowledge.Recorded _ -> ()
-            | PresenceAcknowledge.NotRecorded(_, reason) -> Assert.Fail reason
+            service.Submit heartbeat
+            service.ExactSnapshot() |> ignore
 
             Assert.That(
                 service.LiveSnapshot() |> Map.keys |> Seq.toList,

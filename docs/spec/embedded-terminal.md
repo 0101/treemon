@@ -264,9 +264,12 @@ queue, delay, or proactively block new terminals, prompts, or Copilot sessions.
 After a Treemon server start, activity ingress becomes available before replacement reconciliation.
 Surviving reporters retry their acknowledged presence bootstrap. Every recently open persisted
 instance with a current terminal origin remains pending until that exact PID and process-start
-identity re-presents, is proven dead, loses its origin from the authoritative registry, or reaches
-`openWindow`. Pending instances gate replacement, so a truly empty terminal remains distinguishable
-from one whose reporter has not reconnected without a global startup delay.
+identity re-presents or sends a validated heartbeat, is proven dead, loses its origin from the
+authoritative registry, or reaches `openWindow`. Presence creates unknown bindings; a heartbeat can
+only reconcile an already-known open binding with matching metadata, so it proves a surviving
+reporter without widening the set of processes that may gate replacement. Pending instances gate
+replacement, so a truly empty terminal remains distinguishable from one whose reporter has not
+reconnected without a global startup delay.
 
 Whenever all currently owned Copilot sessions are naturally idle, Treemon captures the authoritative
 host registry revision and the owned-session activity epoch, then immediately rechecks both. It
@@ -726,8 +729,14 @@ isolated server and fails on incomplete exact process cleanup.
   resetting the global sequence.
 - **Acknowledged startup reconciliation:** activity ingress starts before replacement coordination,
   and surviving reporters retry presence until acknowledged. Recently open persisted identities
-  gate individually until they re-present, die, lose their origin, or reach `openWindow`;
-  replacement does not infer absence from a missed first event or title.
+  gate individually until they re-present or send a validated exact heartbeat, die, lose their
+  origin, or reach `openWindow`; replacement does not infer absence from a missed first event or
+  title.
+- **Transition-based replacement diagnostics:** the coordinator logs only when its observable
+  blocker changes, distinguishing pending startup reconciliation from genuinely non-idle sessions
+  and reporting recheck races without writing one line per one-second poll. Activity-query failures
+  carry their elapsed time, and an unexpected coordinator exception is logged before the background
+  task stops rather than retrying across an unknown replacement boundary.
 - **Opportunistic replacement, not draining:** normal work is never rejected in anticipation of an
   update. A race cancels the attempt rather than delaying the work.
 - **Non-idle sessions are never shut down for replacement:** every open `Working` or

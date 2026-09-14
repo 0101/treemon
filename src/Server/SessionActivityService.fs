@@ -799,21 +799,45 @@ type SessionActivityService internal
         if isDisposed () then
             Error "session activity service is stopped"
         else
+            let timer = Diagnostics.Stopwatch.StartNew()
+
             try
-                mailbox.PostAndReply(
-                    (fun reply ->
-                        QueryTerminalActivity(
-                            now,
-                            reconciliationScope,
-                            terminalSessionIds,
-                            reply
-                        )),
-                    timeout = acknowledgedWriteTimeout
-                )
-            with error ->
+                let result =
+                    mailbox.PostAndReply(
+                        (fun reply ->
+                            QueryTerminalActivity(
+                                now,
+                                reconciliationScope,
+                                terminalSessionIds,
+                                reply
+                            )),
+                        timeout = acknowledgedWriteTimeout
+                    )
+
+                timer.Stop()
+
+                if Log.isSlowOperation timer.Elapsed then
+                    Log.log
+                        "Activity"
+                        $"Exact terminal activity query completed in {timer.ElapsedMilliseconds}ms"
+
+                result
+            with
+            | :? TimeoutException as error ->
+                timer.Stop()
+
                 Log.logException
                     "Activity"
-                    "Exact terminal activity query failed"
+                    $"Exact terminal activity query timed out after {timer.ElapsedMilliseconds}ms"
+                    error
+
+                Error "exact terminal activity query failed"
+            | error ->
+                timer.Stop()
+
+                Log.logException
+                    "Activity"
+                    $"Exact terminal activity query failed after {timer.ElapsedMilliseconds}ms"
                     error
 
                 Error "exact terminal activity query failed"

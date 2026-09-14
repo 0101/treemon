@@ -3314,7 +3314,9 @@ type EmbeddedTerminalReplacementTests() =
 
             let query _ _ =
                 Ok
-                    TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                    (TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                        { PendingReconciliationCount = 1
+                          NonIdleSessionCount = 0 })
 
             let! outcome =
                 runManagerReplacement query defaultReplacementOperations manager
@@ -3324,12 +3326,38 @@ type EmbeddedTerminalReplacementTests() =
                 Assert.That(
                     outcome,
                     Is.EqualTo
-                        TerminalHostReplacement.ReplacementOutcome.WaitingForIdle
+                        (TerminalHostReplacement.ReplacementOutcome.WaitingForIdle
+                            { PendingReconciliationCount = 1
+                              NonIdleSessionCount = 0 })
                 )
                 Assert.That(host.ShutdownRequestCount, Is.Zero)
                 Assert.That(launches, Is.Empty)
                 Assert.That(host.IsOnline, Is.True)
                 Assert.That(host.CurrentTerminals.Length, Is.EqualTo 1))
+        }
+
+    [<Test>]
+    member _.``coordinator propagates an unexpected attempt failure after logging it``() =
+        task {
+            let tryReplace _ =
+                async {
+                    return
+                        invalidOp
+                            "simulated coordinator attempt failure"
+                }
+
+            let run () =
+                TerminalHostReplacement.runCoordinatorWith
+                    (fun () -> DateTimeOffset.UtcNow)
+                    (fun _ -> async.Return false)
+                    tryReplace
+                    System.Threading.CancellationToken.None
+                |> Async.RunSynchronously
+
+            Assert.That(
+                (fun () -> run ()),
+                Throws.TypeOf<InvalidOperationException>()
+            )
         }
 
     [<Test>]
