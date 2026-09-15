@@ -618,20 +618,32 @@ let prSection (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: Wor
     | NoPr -> Html.none
     | HasPr pr -> prBadgeContent callbacks cooldowns wt repoName pr
 
+let private trailingWorkMetrics metrics =
+    match workMetricsItems metrics with
+    | [] -> []
+    | items ->
+        [ Html.span [
+              prop.className "card-work-metrics"
+              prop.children (List.rev items)
+          ] ]
+
 let prRow (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) =
-    match wt.Pr, wt.Branch with
-    | NoPr, ("main" | "master") -> Html.none
-    | NoPr, _ ->
+    let prContents =
+        match wt.Pr, wt.Branch with
+        | NoPr, ("main" | "master") -> []
+        | NoPr, _ ->
+            [ prActionButton callbacks cooldowns wt CreatePr "Create PR" createPrIcon ]
+        | HasPr pr, _ ->
+            [ prBadgeContent callbacks cooldowns wt repoName pr ]
+
+    let contents = prContents @ trailingWorkMetrics wt.WorkMetrics
+
+    match contents with
+    | [] -> Html.none
+    | _ ->
         Html.div [
             prop.className "pr-row"
-            prop.children [
-                prActionButton callbacks cooldowns wt CreatePr "Create PR" createPrIcon
-            ]
-        ]
-    | HasPr pr, _ ->
-        Html.div [
-            prop.className "pr-row"
-            prop.children [ prBadgeContent callbacks cooldowns wt repoName pr ]
+            prop.children contents
         ]
 
 let canResumeSession (wt: WorktreeStatus) =
@@ -748,7 +760,6 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                         prop.children [
                             sessionDots wt
                             Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
-                            FitOrHide (workMetricsItems wt.WorkMetrics)
                         ]
                     ]
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
@@ -769,6 +780,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                     diffButton callbacks wt scopedKey
                     autoSyncButton props.AutoSyncPending callbacks baseBranch wt
                     prSection callbacks props.ActionCooldowns wt repoName
+                    yield! trailingWorkMetrics wt.WorkMetrics
                 ]
             ]
         ]
@@ -800,7 +812,6 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                                 prop.children [
                                     sessionDots wt
                                     Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
-                                    FitOrHide (workMetricsItems wt.WorkMetrics)
                                 ]
                             ]
                             terminalButton callbacks wt

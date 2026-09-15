@@ -219,8 +219,8 @@ type ActionButtonTests() =
             if count = 0 then
                 Assert.Ignore("No main/master branch cards in live data; skipping main-branch test")
             else
-                let prRows = mainBranchCards.Locator(".pr-row")
-                let! prRowCount = prRows.CountAsync()
-                Assert.That(prRowCount, Is.EqualTo(0),
-                    "Main/master branch cards without PRs should not have a pr-row at all")
+                let createPrButtons = mainBranchCards.Locator(".pr-row .action-btn[title='Create PR']")
+                let! buttonCount = createPrButtons.CountAsync()
+                Assert.That(buttonCount, Is.EqualTo(0),
+                    "Main/master branch cards should not have a create-PR action button")
         }

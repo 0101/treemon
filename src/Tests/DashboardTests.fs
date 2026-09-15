@@ -17,6 +17,25 @@ type DashboardTests() =
     let computedStyle (prop: string) (locator: ILocator) =
         locator.EvaluateAsync<string>($"el => getComputedStyle(el).{prop}")
 
+    let assertTrailingWorkMetrics containerName (container: ILocator) =
+        task {
+            let metrics = container.Locator(".card-work-metrics")
+            do! metrics.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f, State = WaitForSelectorState.Attached))
+            let! gridCount = metrics.Locator(".commit-grid").CountAsync()
+            let! diffCount = metrics.Locator(".diff-stats").CountAsync()
+            let! diffPrecedesGrid =
+                metrics.EvaluateAsync<bool>(
+                    "el => { const diff = el.querySelector('.diff-stats'); const grid = el.querySelector('.commit-grid'); return !!(diff && grid && (diff.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING)); }")
+            let! containerBox = container.BoundingBoxAsync()
+            let! metricsBox = metrics.BoundingBoxAsync()
+            Assert.Multiple(fun () ->
+                Assert.That(gridCount, Is.EqualTo(1), $"{containerName} should contain one commit grid")
+                Assert.That(diffCount, Is.EqualTo(1), $"{containerName} should contain additions and deletions")
+                Assert.That(diffPrecedesGrid, Is.True, "Diff stats should precede the commit grid")
+                Assert.That(metricsBox.X + metricsBox.Width, Is.EqualTo(containerBox.X + containerBox.Width).Within(1.0),
+                    $"Work metrics should align to the right edge of the {containerName}"))
+        }
+
     let compactBtn (page: IPage) =
         page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
 
@@ -1258,23 +1277,29 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Work metrics appear in card header``() =
+    member this.``Work metrics appear in PR row instead of card header``() =
         task {
-            let metricsInHeader = this.Page.Locator(".wt-card .card-header .commit-grid")
-            do! metricsInHeader.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f, State = WaitForSelectorState.Attached))
-            let! count = metricsInHeader.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Work metrics should be inside card header")
+            let prRow = this.Page.Locator(".wt-card:not(.compact) .pr-row:has(.card-work-metrics)").First
+            do! assertTrailingWorkMetrics "PR row" prRow
+            let! headerCount =
+                this.Page
+                    .Locator(".wt-card:not(.compact) .card-header .commit-grid, .wt-card:not(.compact) .card-header .diff-stats")
+                    .CountAsync()
+            Assert.That(headerCount, Is.EqualTo(0), "Work metrics should no longer be inside card headers")
         }
 
     [<Test>]
-    member this.``Work metrics appear in compact card header``() =
+    member this.``Work metrics appear in compact detail instead of card header``() =
         task {
             do! (compactBtn this.Page).ClickAsync()
 
-            let metricsInHeader = this.Page.Locator(".wt-card.compact .card-header .commit-grid")
-            do! metricsInHeader.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f, State = WaitForSelectorState.Attached))
-            let! count = metricsInHeader.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Work metrics should be inside compact card header")
+            let detail = this.Page.Locator(".wt-card.compact .compact-detail:has(.card-work-metrics)").First
+            do! assertTrailingWorkMetrics "compact detail row" detail
+            let! headerCount =
+                this.Page
+                    .Locator(".wt-card.compact .card-header .commit-grid, .wt-card.compact .card-header .diff-stats")
+                    .CountAsync()
+            Assert.That(headerCount, Is.EqualTo(0), "Work metrics should no longer be inside compact card headers")
         }
 
     [<Test>]
