@@ -42,6 +42,7 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Card | s | Toggle auto-sync |
 | Card | r | Resume last session (when resumable) |
 | Card | e | Open editor |
+| Card | d / D | Open worktree diff (when available) |
 | Card | Delete | Delete worktree (non-main only) |
 | Repo header | Enter | Toggle collapse/expand |
 | Repo header | + | Create new worktree |
@@ -52,8 +53,10 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Embedded terminal | Ctrl+Shift+Tab | Select the previous terminal for the current worktree |
 | Global | Escape | Reclaim keyboard focus to the worktree navigation (also closes an open modal) |
 
-The Agent shortcut binds both `a` and `A`: focused-card letter bindings match the browser key value
-directly, while Ctrl/Alt/Cmd combinations remain suppressed.
+The Agent and Diff shortcuts bind both lowercase and uppercase browser key values, while
+Ctrl/Alt/Cmd combinations remain suppressed. Diff is available only when the focused card is
+non-archived, reports comparison content, and has a scanned `diff.html` SystemView; otherwise the
+key is a no-op. The Diff action tooltip advertises the binding as `Open worktree diff (D)`.
 
 Archive is intentionally mouse-only so an accidental letter key cannot archive a worktree.
 
@@ -64,6 +67,7 @@ subscription and the cross-origin iframe bridges.
 
 - Collapsing a repo while a child card is focused: focus moves to the repo header
 - Modifier keys (Ctrl/Alt/Cmd) suppress focused letter bindings; Ctrl+P is the explicit global exception
+- Focused-card letter bindings do not fire while an editable control owns the key event
 - `onKeyDown` on `.dashboard` div with `tabIndex 0`, auto-focused on mount
 
 ### Worktree Search
@@ -117,7 +121,8 @@ focus request to the active iframe and the injected bridge restores xterm's help
 `Navigation.FocusTarget` stores stable repository or worktree identity rather than a rendered index.
 `navigateSpatial` is a pure transition over the visible repository/card layout and the measured grid
 column count. `App.keyBinding` maps context-sensitive keys to Elmish messages, while the dashboard
-event handler owns only keyboard plumbing and dispatch.
+event handler owns only keyboard plumbing and dispatch. The Diff button and `d`/`D` binding share
+`CanvasState.canOpenWorktreeDiff`, so visibility and shortcut availability cannot diverge.
 
 The client reads `.card-grid` computed columns when navigation runs, then focuses and scrolls the
 resolved element after React has rendered the new model state. A document-level Escape subscription
@@ -128,6 +133,7 @@ cross-origin bridges needed for global shortcuts while either iframe owns keyboa
 
 - `src/Client/WorktreeSearch.fs` — fuzzy matching, identity-stable selection state, keyboard update, and palette view
 - `src/Client/App.fs` — focused bindings, `globalKeyboard`, modal gating, and shared focus/reveal orchestration
+- `src/Client/CanvasState.fs` — shared Diff availability gate used by the button and focused-card shortcut
 - `src/Client/Navigation.fs` — `FocusTarget` DU, `navigateSpatial`, `reclaimFocusTarget` (focus target to restore on Escape)
 - `src/Server/CanvasDocServer.fs` — global keyboard bridge injected into every canvas doc
 - `src/Client/CanvasPane.fs` — validates and routes active-canvas global shortcut messages
