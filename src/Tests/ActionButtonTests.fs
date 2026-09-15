@@ -69,18 +69,21 @@ type ActionButtonTests() =
         }
 
     [<Test>]
-    member this.``Create-PR action button is inside pr-row``() =
+    member this.``Create-PR action button ends the PR row tail``() =
         task {
-            let prRowsNoPrBadge = this.Page.Locator(".wt-card:not(.compact) .pr-row:not(:has(.pr-badge))")
-            let! count = prRowsNoPrBadge.CountAsync()
+            let createPrButtons =
+                this.Page.Locator(".wt-card:not(.compact) .pr-row-tail .action-btn[title='Create PR']")
+            let! count = createPrButtons.CountAsync()
 
             if count = 0 then
-                Assert.Ignore("No pr-row without pr-badge in live data; skipping create-PR placement test")
+                Assert.Ignore("No create-PR action in live data; skipping placement test")
             else
-                let actionBtns = prRowsNoPrBadge.Locator(".action-btn")
-                let! btnCount = actionBtns.CountAsync()
-                Assert.That(btnCount, Is.GreaterThanOrEqualTo(1),
-                    "Create-PR action button should be inside .pr-row when no PR exists")
+                let tail = createPrButtons.First.Locator("xpath=..")
+                let! createPrIsLast =
+                    tail.EvaluateAsync<bool>(
+                        "el => el.lastElementChild?.getAttribute('title') === 'Create PR'")
+                Assert.That(createPrIsLast, Is.True,
+                    "Create-PR action button should be the final PR-row action")
         }
 
     [<Test>]

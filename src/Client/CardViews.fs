@@ -211,9 +211,7 @@ let autoSyncIcon () =
     ]
 
 let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: string) =
-    let ready = hasSystemView WorktreeDiffFilename wt
-
-    if wt.IsArchived || not ready || not wt.HasDiff then
+    if not (canOpenWorktreeDiff wt) then
         Html.none
     else
         Html.button [
@@ -225,7 +223,7 @@ let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: strin
             prop.onClick (fun e ->
                 e.stopPropagation()
                 callbacks.OpenDiff scopedKey)
-            prop.title "Open worktree diff"
+            prop.title "Open worktree diff (D)"
             prop.children [ diffIcon ]
         ]
 
@@ -256,7 +254,6 @@ let mainBehindRow
     (callbacks: CardCallbacks)
     (baseBranch: string)
     (wt: WorktreeStatus)
-    (scopedKey: string)
     =
     Html.div [
         prop.className "main-behind-row"
@@ -268,7 +265,6 @@ let mainBehindRow
                     prop.text "uncommitted changes"
                 ]
             autoSyncButton pendingPaths callbacks baseBranch wt
-            diffButton callbacks wt scopedKey
             Html.span [
                 prop.className "git-commit-msg"
                 prop.children [
@@ -628,15 +624,32 @@ let private trailingWorkMetrics metrics =
           ] ]
 
 let prRow (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) =
-    let prContents =
+    let prDetails =
+        match wt.Pr with
+        | NoPr -> []
+        | HasPr pr -> [ prBadgeContent callbacks cooldowns wt repoName pr ]
+
+    let createPrAction =
         match wt.Pr, wt.Branch with
         | NoPr, ("main" | "master") -> []
-        | NoPr, _ ->
-            [ prActionButton callbacks cooldowns wt CreatePr "Create PR" createPrIcon ]
-        | HasPr pr, _ ->
-            [ prBadgeContent callbacks cooldowns wt repoName pr ]
+        | NoPr, _ -> [ prActionButton callbacks cooldowns wt CreatePr "Create PR" createPrIcon ]
+        | HasPr _, _ -> []
 
-    let contents = prContents @ trailingWorkMetrics wt.WorkMetrics
+    let tailContents =
+        trailingWorkMetrics wt.WorkMetrics
+        @ (if canOpenWorktreeDiff wt then [ diffButton callbacks wt (WorktreePath.value wt.Path) ] else [])
+        @ createPrAction
+
+    let trailingActions =
+        match tailContents with
+        | [] -> []
+        | _ ->
+            [ Html.span [
+                  prop.className "pr-row-tail"
+                  prop.children tailContents
+              ] ]
+
+    let contents = prDetails @ trailingActions
 
     match contents with
     | [] -> Html.none
@@ -833,7 +846,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                             ]
                         ]
 
-                    mainBehindRow props.AutoSyncPending callbacks baseBranch wt scopedKey
+                    mainBehindRow props.AutoSyncPending callbacks baseBranch wt
 
                     prRow callbacks props.ActionCooldowns wt repoName
                 ]

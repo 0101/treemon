@@ -94,6 +94,11 @@ let hasSystemView (filename: string) (worktree: WorktreeStatus) =
     worktree.CanvasDocs
     |> List.exists (fun doc -> doc.Filename = filename && doc.Kind = SystemView)
 
+let canOpenWorktreeDiff (worktree: WorktreeStatus) =
+    not worktree.IsArchived
+    && worktree.HasDiff
+    && hasSystemView WorktreeDiffFilename worktree
+
 let isKnownSystemView (repos: RepoModel list) (scopedKey: string) (filename: string) =
     findWorktreeByScopedKey repos scopedKey
     |> Option.exists (hasSystemView filename)

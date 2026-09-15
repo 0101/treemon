@@ -17,7 +17,7 @@ type DashboardTests() =
     let computedStyle (prop: string) (locator: ILocator) =
         locator.EvaluateAsync<string>($"el => getComputedStyle(el).{prop}")
 
-    let assertTrailingWorkMetrics containerName (container: ILocator) =
+    let assertWorkMetricsOrder containerName (container: ILocator) =
         task {
             let metrics = container.Locator(".card-work-metrics")
             do! metrics.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f, State = WaitForSelectorState.Attached))
@@ -26,14 +26,18 @@ type DashboardTests() =
             let! diffPrecedesGrid =
                 metrics.EvaluateAsync<bool>(
                     "el => { const diff = el.querySelector('.diff-stats'); const grid = el.querySelector('.commit-grid'); return !!(diff && grid && (diff.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING)); }")
-            let! containerBox = container.BoundingBoxAsync()
-            let! metricsBox = metrics.BoundingBoxAsync()
             Assert.Multiple(fun () ->
                 Assert.That(gridCount, Is.EqualTo(1), $"{containerName} should contain one commit grid")
                 Assert.That(diffCount, Is.EqualTo(1), $"{containerName} should contain additions and deletions")
-                Assert.That(diffPrecedesGrid, Is.True, "Diff stats should precede the commit grid")
-                Assert.That(metricsBox.X + metricsBox.Width, Is.EqualTo(containerBox.X + containerBox.Width).Within(1.0),
-                    $"Work metrics should align to the right edge of the {containerName}"))
+                Assert.That(diffPrecedesGrid, Is.True, "Diff stats should precede the commit grid"))
+        }
+
+    let assertRightAligned childName (container: ILocator) (child: ILocator) =
+        task {
+            let! containerBox = container.BoundingBoxAsync()
+            let! childBox = child.BoundingBoxAsync()
+            Assert.That(childBox.X + childBox.Width, Is.EqualTo(containerBox.X + containerBox.Width).Within(1.0),
+                $"{childName} should align to the right edge")
         }
 
     let compactBtn (page: IPage) =
@@ -1280,7 +1284,9 @@ type DashboardTests() =
     member this.``Work metrics appear in PR row instead of card header``() =
         task {
             let prRow = this.Page.Locator(".wt-card:not(.compact) .pr-row:has(.card-work-metrics)").First
-            do! assertTrailingWorkMetrics "PR row" prRow
+            let tail = prRow.Locator(".pr-row-tail")
+            do! assertWorkMetricsOrder "PR row" prRow
+            do! assertRightAligned "PR row tail" prRow tail
             let! headerCount =
                 this.Page
                     .Locator(".wt-card:not(.compact) .card-header .commit-grid, .wt-card:not(.compact) .card-header .diff-stats")
@@ -1294,7 +1300,9 @@ type DashboardTests() =
             do! (compactBtn this.Page).ClickAsync()
 
             let detail = this.Page.Locator(".wt-card.compact .compact-detail:has(.card-work-metrics)").First
-            do! assertTrailingWorkMetrics "compact detail row" detail
+            let metrics = detail.Locator(".card-work-metrics")
+            do! assertWorkMetricsOrder "compact detail row" detail
+            do! assertRightAligned "Compact work metrics" detail metrics
             let! headerCount =
                 this.Page
                     .Locator(".wt-card.compact .card-header .commit-grid, .wt-card.compact .card-header .diff-stats")
