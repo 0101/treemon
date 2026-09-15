@@ -519,6 +519,7 @@ let private handleCanvasRequest
         let worktreePath = System.Net.WebUtility.UrlDecode worktreePathEncoded |> Server.PathUtils.normalizePath
         let diffDeadline =
             ProcessRunner.createResponseDeadline diffResponseDeadlineMs
+            |> ProcessRunner.withCancellationToken ctx.RequestAborted
 
         let! diffTarget =
             resolveDiffTarget agent worktreePath
@@ -527,7 +528,9 @@ let private handleCanvasRequest
         let comparisonContext = diffTarget |> Option.map snd
         let isKnown = diffTarget |> Option.isSome
 
-        if filename = "diff-summary" then
+        if filename = "diff-comparisons" then
+            do! diffHandlers.Comparisons diffDeadline comparisonContext ctx
+        elif filename = "diff-summary" then
             // Read and validate the repository's categorization on *every* summary request rather
             // than caching it in scheduler state: Refresh must show an edited or agent-written
             // `.treemon.json` immediately instead of at the next scheduler cycle. The read is keyed
