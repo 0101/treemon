@@ -97,13 +97,30 @@ let internal azCommandCandidates isWindows (pathValue: string) (pathExtensions: 
         commandNames
         |> Seq.map (fun commandName -> Path.Combine(directory, commandName)))
 
+let private isUnixExecutable (commandPath: string) =
+    let executeBits =
+        UnixFileMode.UserExecute
+        ||| UnixFileMode.GroupExecute
+        ||| UnixFileMode.OtherExecute
+
+    try
+        (File.GetUnixFileMode(commandPath) &&& executeBits) <> enum<UnixFileMode> 0
+    with
+    | :? IOException
+    | :? UnauthorizedAccessException
+    | :? PlatformNotSupportedException -> false
+
 let internal tryCreateAzInvocation isWindows (commandPath: string) =
     let directInvocation =
         { FileName = commandPath
           PrefixArguments = [] }
 
     match Path.GetExtension(commandPath).ToLowerInvariant() with
-    | "" when not isWindows -> Some directInvocation
+    | "" when not isWindows ->
+        if isUnixExecutable commandPath then
+            Some directInvocation
+        else
+            None
     | "" ->
         try
             use reader = File.OpenText(commandPath)

@@ -107,23 +107,57 @@ type AzureCliResolutionTests() =
             File.WriteAllText(python, "")
 
             let result =
-                resolveAzInvocation true commandDirectory ".COM;.EXE;.BAT;.CMD"
+                resolveAzInvocation true commandDirectory ".com;.exe;.bat;.cmd"
 
             Assert.That(result.IsSome, Is.True)
             Assert.That(result.Value.FileName, Is.EqualTo(python))
             Assert.That(result.Value.PrefixArguments, Is.EqualTo([ "-IBm"; "azure.cli" ])))
 
     [<Test>]
+    [<Platform(Exclude = "Win", Reason = "Unix execute permissions are unavailable on Windows")>]
     member _.``Unix az command is invoked directly``() =
         withTemporaryDirectory (fun directory ->
             let azCommand = Path.Combine(directory, "az")
             File.WriteAllText(azCommand, "")
+            File.SetUnixFileMode(
+                azCommand,
+                UnixFileMode.UserRead ||| UnixFileMode.UserWrite ||| UnixFileMode.UserExecute)
 
             let result =
                 resolveAzInvocation false directory ""
 
             Assert.That(result.IsSome, Is.True)
             Assert.That(result.Value.FileName, Is.EqualTo(azCommand))
+            Assert.That(result.Value.PrefixArguments, Is.Empty))
+
+    [<Test>]
+    [<Platform(Exclude = "Win", Reason = "Unix execute permissions are unavailable on Windows")>]
+    member _.``Unix resolution skips an earlier non-executable az command``() =
+        withTemporaryDirectory (fun directory ->
+            let earlierDirectory = Path.Combine(directory, "earlier")
+            let laterDirectory = Path.Combine(directory, "later")
+            Directory.CreateDirectory(earlierDirectory) |> ignore
+            Directory.CreateDirectory(laterDirectory) |> ignore
+
+            let nonExecutableAz = Path.Combine(earlierDirectory, "az")
+            let executableAz = Path.Combine(laterDirectory, "az")
+            File.WriteAllText(nonExecutableAz, "")
+            File.WriteAllText(executableAz, "")
+            File.SetUnixFileMode(
+                nonExecutableAz,
+                UnixFileMode.UserRead ||| UnixFileMode.UserWrite)
+            File.SetUnixFileMode(
+                executableAz,
+                UnixFileMode.UserRead ||| UnixFileMode.UserWrite ||| UnixFileMode.UserExecute)
+
+            let pathValue =
+                String.Join(Path.PathSeparator, [| earlierDirectory; laterDirectory |])
+
+            let result =
+                resolveAzInvocation false pathValue ""
+
+            Assert.That(result.IsSome, Is.True)
+            Assert.That(result.Value.FileName, Is.EqualTo(executableAz))
             Assert.That(result.Value.PrefixArguments, Is.Empty))
 
 
