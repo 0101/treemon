@@ -126,9 +126,14 @@ let private requireReplacementReady =
         commands
       ) ->
         epoch, shutdownTargets, commands
-    | TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle ->
+    | TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle _ ->
         Assert.Fail "expected a ready replacement session plan"
         failwith "unreachable"
+
+let private waitingForIdle pendingReconciliationCount nonIdleSessionCount =
+    TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+        { PendingReconciliationCount = pendingReconciliationCount
+          NonIdleSessionCount = nonIdleSessionCount }
 
 /// Distinct exact terminal origins shared by the ownership/replacement fixtures.
 let private terminalA = TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -2163,6 +2168,106 @@ type TerminalOwnershipQueryTests() =
             ))
 
     [<Test>]
+    member _.``terminal activity resolver failures include elapsed query time``() =
+        let terminalSessionId = terminalC
+        let now = DateTimeOffset.UtcNow
+        let identity =
+            syntheticProcessIdentityForProcessId
+                (syntheticProcessIdForSessionId "failing-query")
+
+        let resolver =
+            ProcessIdentityResolver.create (fun _ ->
+                Error "simulated process query failure")
+
+        let seed (store: SessionActivityStore) =
+            { instanceOf
+                "failing-query"
+                "C:/wt/a"
+                emptyStatus
+                now
+                now with
+                ProcessIdentity = identity
+                TerminalSessionId = Some terminalSessionId }
+            |> store.UpsertStatus
+            |> ignore
+
+        withServiceSeededAndPathUsingResolver
+            "C:/wt/a"
+            seed
+            resolver
+            (fun (service, _, _, _) ->
+                service.StartAt now
+
+                match
+                    service.QueryTerminalActivityAt(
+                        now,
+                        Set.singleton terminalSessionId
+                    )
+                with
+                | Ok _ -> Assert.Fail "Resolver failure unexpectedly succeeded"
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("simulated process query failure")
+                    )
+                    Assert.That(
+                        error,
+                        Does.Match("activity query failed after [0-9]+ms")
+                    ))
+
+    [<Test>]
+    member _.``terminal activity mailbox timeouts include elapsed query time``() =
+        let terminalSessionId = terminalC
+        let now = DateTimeOffset.UtcNow
+        let identity =
+            syntheticProcessIdentityForProcessId
+                (syntheticProcessIdForSessionId "timed-out-query")
+        use releaseResolver = new System.Threading.ManualResetEventSlim(false)
+
+        let resolver =
+            ProcessIdentityResolver.create (fun _ ->
+                releaseResolver.Wait()
+                Ok(Some identity))
+
+        let seed (store: SessionActivityStore) =
+            { instanceOf
+                "timed-out-query"
+                "C:/wt/a"
+                emptyStatus
+                now
+                now with
+                ProcessIdentity = identity
+                TerminalSessionId = Some terminalSessionId }
+            |> store.UpsertStatus
+            |> ignore
+
+        withServiceSeededAndPathUsingResolver
+            "C:/wt/a"
+            seed
+            resolver
+            (fun (service, _, _, _) ->
+                service.StartAt now
+
+                try
+                    match
+                        service.QueryTerminalActivityAt(
+                            now,
+                            Set.singleton terminalSessionId
+                        )
+                    with
+                    | Ok _ ->
+                        Assert.Fail "Timed-out activity query unexpectedly succeeded"
+                    | Error error ->
+                        Assert.That(
+                            error,
+                            Does.Match(
+                                "^exact terminal activity query failed after [0-9]+ms$"
+                            )
+                        )
+                finally
+                    releaseResolver.Set())
+
+    [<Test>]
     member _.``fresh waiting session gates until input completes``() =
         let terminalSessionId = terminalA
         let worktreePath = "C:/wt/a"
@@ -2189,7 +2294,7 @@ type TerminalOwnershipQueryTests() =
 
         Assert.That(
             waitingPlan,
-            Is.EqualTo TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle,
+            Is.EqualTo(waitingForIdle 0 1),
             "most-recent selection applies to the live resume identity, not to the all-session idle gate"
         )
 
@@ -2248,8 +2353,7 @@ type TerminalOwnershipQueryTests() =
                 )
                 Assert.That(
                     queryReplacementPlanOk service now [ replacementTarget ],
-                    Is.EqualTo
-                        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                    Is.EqualTo(waitingForIdle 0 1)
                 ))
 
             present
@@ -2277,8 +2381,7 @@ type TerminalOwnershipQueryTests() =
                 )
                 Assert.That(
                     queryReplacementPlanOk service now [ replacementTarget ],
-                    Is.EqualTo
-                        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle,
+                    Is.EqualTo(waitingForIdle 0 1),
                     "unowned same-worktree and other-terminal sessions cannot change the exact terminal policy"
                 ))
 
@@ -2344,7 +2447,7 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(retainedCommands, Is.EqualTo(resumeCommandsFor [ terminalA, "owned" ]))))
 
     [<Test>]
-    member _.``startup reconciliation lets a surviving session reassert before replacement``() =
+    member _.``startup reconciliation accepts a surviving session heartbeat before replacement``() =
         let terminalSessionId = terminalC
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-owned-resume-worktree")
@@ -2365,23 +2468,22 @@ type TerminalOwnershipQueryTests() =
             Assert.That(service.ExactSnapshot().Count, Is.EqualTo 1)
             Assert.That(
                 queryReplacementPlanOk service now [ replacementTarget ],
-                Is.EqualTo TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                Is.EqualTo(waitingForIdle 1 0)
             )
 
             let representedAt = now.AddMinutes(1.0)
 
-            let presence =
+            let heartbeat =
                 { mkReport
                     "surviving"
                     worktree
-                    "surviving-presence"
+                    "surviving-heartbeat"
                     (representedAt.ToString("O"))
-                    SessionPresent with
+                    Heartbeat with
                     TerminalSessionId = Some terminalSessionId }
 
-            match service.Present(presence, representedAt) with
-            | PresenceAcknowledge.Recorded _ -> ()
-            | PresenceAcknowledge.NotRecorded(_, reason) -> Assert.Fail reason
+            service.Submit heartbeat
+            service.ExactSnapshot() |> ignore
 
             Assert.That(
                 service.LiveSnapshot() |> Map.keys |> Seq.toList,

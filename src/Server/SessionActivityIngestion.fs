@@ -404,7 +404,12 @@ let private applyHeartbeat
                 (fun (withOrigin: StoredInstance) ->
                     { withOrigin with
                         LastSeen = max prior.LastSeen exact.ReceivedAt })
-                (fun next -> Some(store.UpsertInstance next)))
+                (fun next -> Some(store.UpsertInstance next))
+            |> Result.map (fun accepted ->
+                { accepted with
+                    PendingReconciliation =
+                        accepted.PendingReconciliation
+                        |> Set.remove exact.ProcessIdentity }))
 
 let private applyClosure
     (store: SessionActivityStore)

@@ -841,6 +841,59 @@ type CanvasPaneTests() =
         }
 
     [<Test>]
+    member this.``Selecting canvas tabs preserves the tab strip geometry``() =
+        task {
+            do! this.Page.SetViewportSizeAsync(960, 800)
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            let terminalToggle =
+                this.Page.Locator(
+                    ".header-controls .ctrl-btn",
+                    PageLocatorOptions(HasText = "Terminal"))
+            do! terminalToggle.ClickAsync()
+            do! this.Page.Locator(".terminal-pane.open").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            let openPane = canvasPaneOpen this.Page
+            do! openPane.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! _ =
+                openPane.EvaluateAsync<bool>(
+                    "pane => Promise.all(pane.getAnimations().map(animation => animation.finished)).then(() => true)")
+
+            let tabEntries =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-tab-group > .canvas-system-tab, .canvas-pane .canvas-tab-group > .canvas-tab-shell")
+            do! Assertions.Expect(tabEntries).ToHaveCountAsync(3)
+
+            let systemTab = this.Page.Locator(".canvas-pane .canvas-system-tab")
+            do! systemTab.ClickAsync()
+            do! Assertions.Expect(systemTab).ToHaveClassAsync("canvas-system-tab active")
+
+            let tabGeometry () =
+                [ 0..2 ]
+                |> List.map (fun index ->
+                    task {
+                        let! box = tabEntries.Nth(index).BoundingBoxAsync()
+                        return box.X, box.Y, box.Width, box.Height
+                    })
+                |> Task.WhenAll
+
+            let! initialGeometry = tabGeometry ()
+
+            let dashboardTab =
+                this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = "dashboard"))
+            do! dashboardTab.ClickAsync()
+            do! Assertions.Expect(dashboardTab).ToHaveClassAsync("canvas-tab active")
+            let! selectedGeometry = tabGeometry ()
+
+            for index in 0 .. initialGeometry.Length - 1 do
+                let initialX, initialY, initialWidth, initialHeight = initialGeometry[index]
+                let selectedX, selectedY, selectedWidth, selectedHeight = selectedGeometry[index]
+                Assert.That(selectedX, Is.EqualTo(initialX).Within(0.01), $"Selection must not move tab {index} horizontally")
+                Assert.That(selectedY, Is.EqualTo(initialY).Within(0.01), $"Selection must not move tab {index} vertically")
+                Assert.That(selectedWidth, Is.EqualTo(initialWidth).Within(0.01), $"Selection must not change tab {index}'s width")
+                Assert.That(selectedHeight, Is.EqualTo(initialHeight).Within(0.01), $"Selection must not change tab {index}'s height")
+        }
+
+    [<Test>]
     member this.``Single-doc worktree shows a labeled tab with a compact age``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch

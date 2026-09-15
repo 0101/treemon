@@ -1161,6 +1161,9 @@
             gap: 4px;
             flex-shrink: 0;
             align-items: center;
+            justify-content: flex-end;
+            /* Keep tab wrapping stable as document-specific actions appear. */
+            min-width: 92px;
             margin-left: 8px;
         }
         .canvas-archive-btn {

@@ -113,6 +113,7 @@ let init () =
       DismissedEmbeddedTerminals = Set.empty
       ActiveEmbeddedTerminals = Map.empty
       EmbeddedTerminalStarts = Map.empty
+      EmbeddedTerminalViewStates = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -194,7 +195,10 @@ let targetEmbeddedTerminal path model =
     { model with
         Workspace.ActivePane = WorkspaceLayout.Pane.Terminal
         TerminalPaneOpen = model.Workspace.Mode = WorkspaceLayout.Mode.Desktop || model.TerminalPaneOpen
-        TerminalPaneTarget = Some path }
+        TerminalPaneTarget = Some path
+        EmbeddedTerminalViewStates =
+            model.EmbeddedTerminalViewStates
+            |> TerminalPane.cancelAllViewFocus }
 
 let private targetEmbeddedTerminalStart focusOnCompletion path model =
     { targetEmbeddedTerminal path model with
@@ -251,9 +255,47 @@ let private closeEmbeddedTerminalCmd terminalId =
         | Error _ -> EmbeddedTerminalCloseFailed terminalId)
         (fun _ -> EmbeddedTerminalCloseFailed terminalId)
 
-let private focusEmbeddedTerminalWhenReadyCmd terminalId =
+let private focusEmbeddedTerminalWhenReadyCmd terminalId generation =
     Cmd.ofEffect (fun _ ->
-        TerminalPane.focusTerminalWhenReady terminalId)
+        TerminalPane.focusTerminalWhenReady terminalId generation)
+
+let private focusEmbeddedTerminalViewCmd terminalId generation =
+    Cmd.ofEffect (fun _ ->
+        TerminalPane.focusTerminalView terminalId generation)
+
+let private activeEmbeddedTerminal model =
+    let selectedWorktree =
+        TerminalPane.selectedWorktree
+            model.TerminalPaneTarget
+            model.FocusedElement
+
+    selectedWorktree,
+    TerminalPane.activeTerminalId
+        selectedWorktree
+        model.ActiveEmbeddedTerminals
+        model.EmbeddedTerminals
+
+let private terminalPaneVisible model =
+    WorkspaceLayout.isVisible
+        WorkspaceLayout.Pane.Terminal
+        model.TerminalPaneOpen
+        model.Workspace
+
+let private cancelTerminalViewFocusWhenHidden model =
+    if terminalPaneVisible model then
+        model
+    else
+        { model with
+            EmbeddedTerminalViewStates =
+                model.EmbeddedTerminalViewStates
+                |> TerminalPane.cancelAllViewFocus }
+
+let private reconnectableEmbeddedTerminal model =
+    let _, activeTerminal =
+        activeEmbeddedTerminal model
+
+    model.EmbeddedTerminals
+    |> TerminalPane.tryReconnectableTab activeTerminal
 
 let private launchEmbeddedTerminalCmd model path start =
     Cmd.batch [
@@ -321,7 +363,10 @@ let private applyEmbeddedSnapshot snapshot (model: Model) =
             TerminalPane.reconcileSelections
                 model.EmbeddedTerminals
                 visible
-                model.ActiveEmbeddedTerminals }
+                model.ActiveEmbeddedTerminals
+        EmbeddedTerminalViewStates =
+            model.EmbeddedTerminalViewStates
+            |> TerminalPane.reconcileViewStates visible }
 
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
@@ -393,10 +438,7 @@ let private finishEmbeddedTerminalStart forceFocus path result model =
              || TerminalPane.shouldFocusStartedTerminal
                  path
                  model.EmbeddedTerminalStarts)
-            && WorkspaceLayout.isVisible
-                WorkspaceLayout.Pane.Terminal
-                model.TerminalPaneOpen
-                model.Workspace
+            && terminalPaneVisible model
             && TerminalPane.selectedWorktree
                 model.TerminalPaneTarget
                 model.FocusedElement
@@ -428,7 +470,11 @@ let private finishEmbeddedTerminalStart forceFocus path result model =
         updated,
         Cmd.batch [
             if shouldFocus then
-                focusEmbeddedTerminalWhenReadyCmd started.TerminalId
+                focusEmbeddedTerminalWhenReadyCmd
+                    started.TerminalId
+                    (TerminalPane.viewGeneration
+                        started.TerminalId
+                        updated.EmbeddedTerminalViewStates)
             queuedAgentCmd
         ]
     | Error error ->
@@ -462,6 +508,7 @@ let update msg model =
             { model with
                 Workspace.Mode = mode
                 Workspace.PreferenceError = None }
+            |> cancelTerminalViewFocusWhenHidden
         updated,
         Cmd.batch [
             Cmd.OfFunc.either
@@ -472,7 +519,9 @@ let update msg model =
             CanvasUpdate.syncVisibleDocCmd updated
         ]
     | WorkspaceModeLoaded mode ->
-        let updated = { model with Workspace.Mode = mode }
+        let updated =
+            { model with Workspace.Mode = mode }
+            |> cancelTerminalViewFocusWhenHidden
         updated, CanvasUpdate.syncVisibleDocCmd updated
     | WorkspacePreferenceFailed error ->
         { model with Workspace.PreferenceError = Some error }, Cmd.none
@@ -484,6 +533,7 @@ let update msg model =
             | _ ->
                 let updated = { model with Workspace.ActivePane = pane }
                 updated, CanvasUpdate.syncVisibleDocCmd updated
+        let updated = cancelTerminalViewFocusWhenHidden updated
         updated,
         Cmd.batch [
             syncCmd
@@ -762,8 +812,61 @@ let update msg model =
                 TerminalPane.selectTerminal
                     terminalId
                     model.EmbeddedTerminals
-                    model.ActiveEmbeddedTerminals },
+                    model.ActiveEmbeddedTerminals
+            EmbeddedTerminalViewStates =
+                model.EmbeddedTerminalViewStates
+                |> TerminalPane.cancelOtherViewFocus terminalId },
         Cmd.none
+    | ReconnectEmbeddedTerminalView terminalId ->
+        let isReconnectable =
+            reconnectableEmbeddedTerminal model
+            |> Option.exists (fun tab ->
+                tab.Id = terminalId)
+
+        if terminalPaneVisible model && isReconnectable then
+            let viewStates =
+                model.EmbeddedTerminalViewStates
+                |> TerminalPane.reconnectView terminalId
+
+            { model with
+                EmbeddedTerminalViewStates = viewStates },
+            Cmd.none
+        else
+            model, Cmd.none
+    | EmbeddedTerminalViewLoaded(terminalId, generation) ->
+        let viewStates, focusAfterLoad =
+            model.EmbeddedTerminalViewStates
+            |> TerminalPane.completeViewLoad
+                terminalId
+                generation
+
+        let updated =
+            { model with
+                EmbeddedTerminalViewStates = viewStates }
+
+        let isStillReconnectable =
+            reconnectableEmbeddedTerminal updated
+            |> Option.exists (fun tab ->
+                tab.Id = terminalId)
+
+        updated,
+        if
+            focusAfterLoad
+            && terminalPaneVisible updated
+            && isStillReconnectable
+        then
+            focusEmbeddedTerminalViewCmd
+                terminalId
+                generation
+        else
+            Cmd.none
+    | NotifyEmbeddedTerminalVisibility(terminalId, origin, signal) ->
+        model,
+        Cmd.ofEffect (fun _ ->
+            TerminalPane.notifyTerminalVisibility
+                terminalId
+                origin
+                signal)
     | CycleEmbeddedTerminal (terminalId, direction) ->
         match
             TerminalPane.cycleTerminalFrom
@@ -778,7 +881,19 @@ let update msg model =
                 |> Option.map focusEmbeddedTerminalCmd
                 |> Option.defaultValue Cmd.none
 
-            { model with ActiveEmbeddedTerminals = selections }, focusCmd
+            let viewStates =
+                match terminalToFocus with
+                | Some selectedTerminal ->
+                    model.EmbeddedTerminalViewStates
+                    |> TerminalPane.cancelOtherViewFocus selectedTerminal
+                | None ->
+                    model.EmbeddedTerminalViewStates
+                    |> TerminalPane.cancelAllViewFocus
+
+            { model with
+                ActiveEmbeddedTerminals = selections
+                EmbeddedTerminalViewStates = viewStates },
+            focusCmd
         | None ->
             model, Cmd.none
     | CloseEmbeddedTerminal terminalId
@@ -834,7 +949,14 @@ let update msg model =
             { model with Workspace.ActivePane = WorkspaceLayout.Pane.Terminal }, Cmd.none
         | WorkspaceLayout.Mode.Desktop ->
             let isOpen = not model.TerminalPaneOpen
-            { model with TerminalPaneOpen = isOpen },
+            { model with
+                TerminalPaneOpen = isOpen
+                EmbeddedTerminalViewStates =
+                    if isOpen then
+                        model.EmbeddedTerminalViewStates
+                    else
+                        model.EmbeddedTerminalViewStates
+                        |> TerminalPane.cancelAllViewFocus },
             saveTerminalPaneOpenCmd isOpen model
     | EmbeddedTerminalClosed snapshot ->
         applyEmbeddedSnapshot snapshot model, fetchWorktrees ()
@@ -1058,7 +1180,10 @@ let update msg model =
         let focused, cmd =
             CanvasUpdate.applyFocus false target model
         // Idle canvas auto-display changes focus internally, not by selecting a card.
-        { focused with TerminalPaneTarget = model.TerminalPaneTarget }, cmd
+        { focused with
+            TerminalPaneTarget = model.TerminalPaneTarget
+            EmbeddedTerminalViewStates = model.EmbeddedTerminalViewStates },
+        cmd
 
     | ArchiveMsg archiveMsg ->
         let result, archiveCmd = ArchiveViews.update worktreeApi archiveMsg
@@ -1413,6 +1538,15 @@ let appSubscriptions (model: Model) : Sub<Msg> =
     let overviewSticky (dispatch: Dispatch<Msg>) =
         OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
 
+    let visibleTerminal =
+        let _, activeTerminal =
+            activeEmbeddedTerminal model
+
+        TerminalPane.visibleRunningTerminal
+            (terminalPaneVisible model)
+            activeTerminal
+            model.EmbeddedTerminals
+
     let baseSubs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
@@ -1421,7 +1555,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
           [ "global-keyboard"; if canOpenOverlay model then "enabled" else "blocked" ],
           globalKeyboard ]
 
-    let subs =
+    let panelSubs =
         if model.OverviewPanelOpen
            && WorkspaceLayout.isVisible WorkspaceLayout.Pane.Worktrees true model.Workspace
            && OverviewBand.hasAgentGroups model.Repos then
@@ -1429,7 +1563,22 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         else
             baseSubs
 
-    subs
+    match visibleTerminal with
+    | Some (terminalId, origin) ->
+        ([ "terminal-visible"
+           EmbeddedTerminalId.value terminalId
+           origin ],
+         fun dispatch ->
+             TerminalPane.observeVisibleTerminal terminalId (fun signal ->
+                 dispatch (
+                     NotifyEmbeddedTerminalVisibility(
+                         terminalId,
+                         origin,
+                         signal
+                     )
+                 )))
+        :: panelSubs
+    | None -> panelSubs
 
 let hasAnyActive (repos: RepoModel list) =
     repos |> List.exists (fun r ->
@@ -1630,8 +1779,7 @@ let private isEditableEventTarget (e: Browser.Types.KeyboardEvent) =
 
 let view model dispatch =
     let onePane = model.Workspace.Mode = WorkspaceLayout.Mode.OnePane
-    let terminalPaneOpen =
-        WorkspaceLayout.isVisible WorkspaceLayout.Pane.Terminal model.TerminalPaneOpen model.Workspace
+    let terminalPaneOpen = terminalPaneVisible model
     let canvasPaneOpen = CanvasUpdate.isPaneVisible model
 
     let workspaceWidthClass =
@@ -1729,16 +1877,8 @@ let view model dispatch =
         CanvasView.view model dispatch
 
     let terminalEl =
-        let selectedWorktree =
-            TerminalPane.selectedWorktree
-                model.TerminalPaneTarget
-                model.FocusedElement
-
-        let activeTerminal =
-            TerminalPane.activeTerminalId
-                selectedWorktree
-                model.ActiveEmbeddedTerminals
-                model.EmbeddedTerminals
+        let selectedWorktree, activeTerminal =
+            activeEmbeddedTerminal model
 
         let startState =
             selectedWorktree
@@ -1752,12 +1892,21 @@ let view model dispatch =
               Snapshot = model.EmbeddedTerminals
               ActiveTerminal = activeTerminal
               SelectedWorktree = selectedWorktree
-              StartState = startState }
+              StartState = startState
+              ViewStates = model.EmbeddedTerminalViewStates }
 
         let callbacks: TerminalPane.TerminalPaneCallbacks =
             { SelectTab = SelectEmbeddedTerminal >> dispatch
               CloseTab = CloseEmbeddedTerminal >> dispatch
-              StartTerminal = StartEmbeddedTerminal >> dispatch }
+              StartTerminal = StartEmbeddedTerminal >> dispatch
+              ReconnectView = ReconnectEmbeddedTerminalView >> dispatch
+              ViewLoaded =
+                fun terminalId generation ->
+                    EmbeddedTerminalViewLoaded(
+                        terminalId,
+                        generation
+                    )
+                    |> dispatch }
 
         TerminalPane.view state callbacks
 

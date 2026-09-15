@@ -482,7 +482,7 @@ type StartupReconciliationTests() =
         |> Seq.map (fun scenario -> TestCaseData(scenario).SetName(scenario.Name))
 
     [<Test>]
-    member _.``recent terminal-owned identity stays pending until the same identity re-presents``() =
+    member _.``exact heartbeat clears startup reconciliation for a recent terminal-owned identity``() =
         let now = ts "2026-09-04T10:00:00Z"
         let identity = exactIdentity 4401 5401L
         let owningTerminal = terminal "cccccccccccccccccccccccccccccccc"
@@ -508,17 +508,70 @@ type StartupReconciliationTests() =
                         [ { TerminalHostReplacement.ReplacementTerminal.TerminalSessionId = owningTerminal
                             WorktreePath = "C:/wt/exact" } ]
                         snapshot,
-                    Is.EqualTo TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                            { PendingReconciliationCount = 1
+                              NonIdleSessionCount = 0 }
+                    )
                 ))
 
-            present service 4401 "pending-session" (Some owningTerminal) (now.AddSeconds(1.0))
-            |> requirePresence
-            |> ignore
+            service.Submit(
+                report
+                    4401
+                    "pending-session"
+                    (Some owningTerminal)
+                    "heartbeat-4401"
+                    (now.AddSeconds(1.0))
+                    Heartbeat
+            )
 
-            let _, _, afterPresence =
+            let _, _, afterHeartbeat =
                 queryAt service (now.AddSeconds(1.0)) (Set.singleton owningTerminal)
 
-            Assert.That(afterPresence, Is.Empty))
+            Assert.That(afterHeartbeat, Is.Empty))
+
+    [<Test>]
+    member _.``mismatched heartbeat cannot clear startup reconciliation``() =
+        let now = ts "2026-09-04T10:00:00Z"
+        let identity = exactIdentity 4407 5407L
+        let owningTerminal = terminal "dddddddddddddddddddddddddddddddd"
+        let resolver = ProcessIdentityResolver.create (fun _ -> Ok(Some identity))
+
+        withService resolver (fun (service, store, _) ->
+            store.UpsertInstance(
+                storedInstance identity "pending-session" owningTerminal (now.AddMinutes(-1.0))
+            )
+            |> ignore
+
+            service.StartAt now
+
+            service.Submit(
+                report
+                    4407
+                    "different-session"
+                    (Some owningTerminal)
+                    "mismatched-heartbeat-4407"
+                    (now.AddSeconds(1.0))
+                    Heartbeat
+            )
+
+            service.ExactSnapshot() |> ignore
+
+            let _, _, pending =
+                queryAt service (now.AddSeconds(1.0)) (Set.singleton owningTerminal)
+
+            let persisted = store.InstanceByIdentity identity |> Option.get
+
+            Assert.Multiple(fun () ->
+                Assert.That(pending, Is.EqualTo(Set.singleton identity))
+                Assert.That(
+                    persisted.SessionId,
+                    Is.EqualTo(SessionId "pending-session")
+                )
+                Assert.That(
+                    persisted.LastSeen,
+                    Is.EqualTo(now.AddMinutes(-1.0))
+                )))
 
     [<Test>]
     member _.``preparing one terminal cleanup preserves unrelated pending reconciliation``() =

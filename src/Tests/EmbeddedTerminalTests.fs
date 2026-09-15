@@ -3314,7 +3314,9 @@ type EmbeddedTerminalReplacementTests() =
 
             let query _ _ =
                 Ok
-                    TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                    (TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                        { PendingReconciliationCount = 1
+                          NonIdleSessionCount = 0 })
 
             let! outcome =
                 runManagerReplacement query defaultReplacementOperations manager
@@ -3324,13 +3326,39 @@ type EmbeddedTerminalReplacementTests() =
                 Assert.That(
                     outcome,
                     Is.EqualTo
-                        TerminalHostReplacement.ReplacementOutcome.WaitingForIdle
+                        (TerminalHostReplacement.ReplacementOutcome.WaitingForIdle
+                            { PendingReconciliationCount = 1
+                              NonIdleSessionCount = 0 })
                 )
                 Assert.That(host.ShutdownRequestCount, Is.Zero)
                 Assert.That(launches, Is.Empty)
                 Assert.That(host.IsOnline, Is.True)
                 Assert.That(host.CurrentTerminals.Length, Is.EqualTo 1))
         }
+
+    [<Test>]
+    member _.``coordinator retries after an unexpected pre-commit attempt failure``() =
+        let attempts = ConcurrentQueue<int>()
+
+        TerminalHostReplacement.runCoordinatorWith
+            (fun () -> DateTimeOffset.UtcNow)
+            (fun _ -> async.Return(attempts.Count < 2))
+            (fun _ ->
+                async {
+                    let attempt = attempts.Count + 1
+                    attempts.Enqueue attempt
+
+                    if attempt = 1 then
+                        return invalidOp "simulated coordinator attempt failure"
+                    else
+                        return
+                            TerminalHostReplacement.ReplacementOutcome.Replaced
+                                "2.0.0-recovered"
+                })
+            System.Threading.CancellationToken.None
+        |> Async.RunSynchronously
+
+        Assert.That(attempts.ToArray(), Is.EqualTo([| 1; 2 |]))
 
     [<Test>]
     member _.``registry race between snapshot and recheck aborts without side effects``() =

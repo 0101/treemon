@@ -60,11 +60,14 @@ shared state; no session-log parsing remains.
   in-memory conversation map.
 - The extension sends an acknowledged, idempotent `session_present` bootstrap until the server has
   recorded the instance, then liveness-only heartbeats every 60 seconds. Presence creates the
-  instance even when the session has no title or replayable lifecycle event; heartbeats update only
-  that instance's receipt-time liveness and never create an anonymous conversation. The heartbeat
-  cadence starts immediately after presence is acknowledged and cannot be delayed by replay. A
-  heartbeat transport failure invalidates the in-flight replay generation and restarts the presence
-  handshake.
+  instance even when the session has no title or replayable lifecycle event; heartbeats never create
+  an anonymous conversation and otherwise update only that instance's receipt-time liveness. After
+  server restart, a validated heartbeat for the same known, non-closed exact binding also clears
+  that binding's startup-reconciliation gate and refreshes `LastSeen`, because the current exact
+  report proves the surviving process reached the new server generation even when its previous
+  observation just crossed `openWindow`. The heartbeat cadence starts immediately after presence
+  is acknowledged and cannot be delayed by replay. A heartbeat transport failure invalidates the
+  in-flight replay generation and restarts the presence handshake.
 - A live `session.shutdown` stops that reporter's heartbeats and closes its process-session binding.
   The parent CLI process may remain alive and subsequently present another session; that new binding
   supersedes the prior one without deleting its durable history. Terminal lifecycle orchestration
@@ -154,12 +157,14 @@ shared state; no session-log parsing remains.
   restored. The activity endpoint is made available before replacement reconciliation begins, and
   surviving extensions retry `session_present` until acknowledged. A recently open exact instance
   with a current terminal origin remains pending reconciliation until the same process identity
-  re-presents, that exact process is proven dead, its terminal origin leaves the authoritative
-  registry, or `openWindow` expires. Pending reconciliation gates automatic replacement without
-  introducing another lifecycle status. A process proven dead is monotonically closed and removed
-  from the scheduler's exact live collection; missing-origin and expired rows simply stop
-  participating in terminal ownership. Retained conversations outside the live window remain
-  available for footer and explicit Resume selection, and a closed identity cannot reopen.
+  re-presents or sends a validated heartbeat, that exact process is proven dead, its terminal origin
+  leaves the authoritative registry, or `openWindow` expires. Unknown, closed, metadata-mismatched,
+  and PID-reused reporters cannot clear another binding's pending state. Pending reconciliation
+  gates automatic replacement without introducing another lifecycle status. A process proven dead
+  is monotonically closed and removed from the scheduler's exact live collection; missing-origin and
+  expired rows simply stop participating in terminal ownership. Retained conversations outside the
+  live window remain available for footer and explicit Resume selection, and a closed identity
+  cannot reopen.
 - Background-agent clocks are process-instance-local and durable within retention. Restart restores
   unfinished background work for each exact identity, so an Idle parent remains effectively Working
   until its matching terminal event or stale-gap cleanup.
@@ -271,9 +276,11 @@ use independent ordering paths:
 - Presence resolves the exact Copilot process start identity, creates or refreshes one instance with
   server receipt time, advances the terminal-origin activity epoch, and replies only after the
   store update succeeds.
-- Heartbeats refresh only a known, still-open instance. They affect openness and automatic
-  replacement eligibility but never order footer selection or explicit Resume ownership, which use
-  conversation `UpdatedAt`.
+- Heartbeats refresh only a known, non-closed exact instance. The current heartbeat re-establishes
+  receipt-time openness, including after the prior `openWindow` elapsed; it cannot create a binding
+  or change its session metadata or terminal origin. Heartbeats affect automatic replacement
+  eligibility but never order footer selection or explicit Resume ownership, which use conversation
+  `UpdatedAt`.
 - Closure is monotonic for one process identity whether it came from live `session.shutdown` or
   terminal-authoritative teardown. A report from that same closed process remains closed even when
   it arrives later; only a different process identity can create a new instance. Graceful,
@@ -401,7 +408,7 @@ into lifecycle status.
 | Representative ordering | Use instance `(UpdatedAt, SessionId, ProcessIdentity)`; liveness gates openness and automatic replacement eligibility but never replaces lifecycle ordering. |
 | Multiple instances | Preserve concurrent CLI processes and sequential sessions within one process as separate full fold rows; never let one binding's event or heartbeat replace another's status, origin, or closure. |
 | Ownership boundary | Session activity owns reporting, exact-instance state, liveness, and monotonic closure; embedded-terminal orchestration owns shutdown policy, authoritative teardown, fail-closed staged-host cleanup, and survivor cleanup. |
-| Startup reconciliation | Keep each recently open terminal-owned instance pending until that exact identity re-presents, dies, loses its terminal origin, or reaches `openWindow`; never use one global startup delay. |
+| Startup reconciliation | Keep each recently open terminal-owned instance pending until that exact known, non-closed binding re-presents or sends a validated heartbeat, dies, loses its terminal origin, or reaches `openWindow`; never use one global startup delay. |
 | Background agents | Persist per-tool start/finish clocks on each exact instance; WaitingForUser outranks background Working; stale-gap cleanup bounds abandoned clocks. |
 | Footer | Decouple from the status dot and merge the SQL-ranked greatest durable exact instance per worktree. |
 | Activity | Use freshest source-tagged intent/title; bootstrap title from metadata, never infer intent. |

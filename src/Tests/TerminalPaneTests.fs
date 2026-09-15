@@ -316,6 +316,107 @@ type TerminalPaneStateTests() =
                 Is.EqualTo(None)
             ))
 
+    [<Test>]
+    member _.``Reconnect advances only the selected terminal view generation``() =
+        let states =
+            Map.ofList [
+                firstOne,
+                { Generation = 2
+                  FocusAfterLoad = false }
+                secondOne,
+                { Generation = 7
+                  FocusAfterLoad = false }
+            ]
+
+        let updated =
+            states |> reconnectView firstOne
+
+        Assert.Multiple(fun () ->
+            Assert.That(viewGeneration firstOne updated, Is.EqualTo(3))
+            Assert.That(viewGeneration secondOne updated, Is.EqualTo(7))
+            Assert.That(updated[firstOne].FocusAfterLoad, Is.True)
+            Assert.That(updated[secondOne], Is.EqualTo(states[secondOne])))
+
+    [<Test>]
+    member _.``Only the current reconnect generation completes its focus request``() =
+        let pending =
+            Map.empty |> reconnectView firstOne
+        let generation = viewGeneration firstOne pending
+
+        let stale, staleFocus =
+            pending
+            |> completeViewLoad firstOne (generation - 1)
+
+        let completed, currentFocus =
+            stale
+            |> completeViewLoad firstOne generation
+
+        Assert.Multiple(fun () ->
+            Assert.That(stale, Is.EqualTo(pending))
+            Assert.That(staleFocus, Is.False)
+            Assert.That(currentFocus, Is.True)
+            Assert.That(completed[firstOne].FocusAfterLoad, Is.False))
+
+    [<Test>]
+    member _.``Reconnect eligibility and view state require a safe running terminal``() =
+        let interrupted =
+            tab
+                secondOne
+                second
+                (EmbeddedTerminalLifecycle.Interrupted "host stopped")
+
+        let unsafe =
+            tab
+                thirdOne
+                third
+                (EmbeddedTerminalLifecycle.Running
+                    "https://example.com/terminal")
+
+        let snapshot =
+            { Tabs =
+                [ running firstOne first 61231
+                  interrupted
+                  unsafe ] }
+
+        let states =
+            Map.ofList [
+                firstOne,
+                { Generation = 1
+                  FocusAfterLoad = true }
+                secondOne,
+                { Generation = 2
+                  FocusAfterLoad = true }
+                thirdOne,
+                { Generation = 3
+                  FocusAfterLoad = true }
+            ]
+
+        let reconciled =
+            states |> reconcileViewStates snapshot
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                tryReconnectableTab (Some firstOne) snapshot
+                |> Option.map _.Id,
+                Is.EqualTo(Some firstOne)
+            )
+            Assert.That(
+                tryReconnectableTab (Some secondOne) snapshot,
+                Is.EqualTo(None)
+            )
+            Assert.That(
+                tryReconnectableTab (Some thirdOne) snapshot,
+                Is.EqualTo(None)
+            )
+            Assert.That(
+                tryReconnectableTab None snapshot,
+                Is.EqualTo(None)
+            )
+            Assert.That(
+                reconciled |> Map.toList |> List.map fst,
+                Is.EqualTo([ firstOne ])
+            ))
+
     [<TestCase("http://127.0.0.1:61234/", true)>]
     [<TestCase("http://127.0.0.1:61234/client?arg=value", true)>]
     [<TestCase("https://127.0.0.1:61234/", false)>]
@@ -326,8 +427,8 @@ type TerminalPaneStateTests() =
     [<TestCase("http://127.0.0.1:not-a-port/", false)>]
     member _.``Only loopback non-production ttyd endpoints are rendered``(endpoint: string, expectedSafe: bool) =
         Assert.That(
-            safeEndpoint endpoint |> Option.isSome,
-            Is.EqualTo(expectedSafe)
+            isSafeEndpoint endpoint,
+            Is.EqualTo expectedSafe
         )
 
 let private focusModel : Model =
@@ -385,6 +486,7 @@ let private focusModel : Model =
             second, secondOne
         ]
       EmbeddedTerminalStarts = Map.empty
+      EmbeddedTerminalViewStates = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -400,6 +502,10 @@ let private focusModel : Model =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type TerminalFocusTests() =
+
+    let subscriptionKeys model =
+        App.appSubscriptions model
+        |> List.map (fst >> String.concat "/")
 
     [<Test>]
     member _.``One-pane navigation preserves targets selections and saved desktop visibility``() =
@@ -676,6 +782,76 @@ type TerminalFocusTests() =
             Assert.That(List.length showCmd, Is.EqualTo(1)))
 
     [<Test>]
+    member _.``Terminal visibility subscription follows the active safe iframe``() =
+        let initial = subscriptionKeys focusModel
+
+        let targeted =
+            subscriptionKeys
+                { focusModel with
+                    TerminalPaneTarget = Some second }
+
+        let closed =
+            subscriptionKeys
+                { focusModel with
+                    TerminalPaneOpen = false }
+
+        let hiddenOnePane =
+            subscriptionKeys
+                { focusModel with
+                    Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                    Workspace.ActivePane = WorkspaceLayout.Pane.Worktrees }
+
+        let visibleOnePane =
+            subscriptionKeys
+                { focusModel with
+                    Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                    Workspace.ActivePane = WorkspaceLayout.Pane.Terminal
+                    TerminalPaneOpen = false }
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                initial,
+                Does.Contain(
+                    $"terminal-visible/{EmbeddedTerminalId.value firstTwo}/http://127.0.0.1:61232"
+                )
+            )
+            Assert.That(
+                targeted,
+                Does.Contain(
+                    $"terminal-visible/{EmbeddedTerminalId.value secondOne}/http://127.0.0.1:61233"
+                )
+            )
+            Assert.That(
+                closed,
+                Has.None.StartsWith("terminal-visible/")
+            )
+            Assert.That(
+                hiddenOnePane,
+                Has.None.StartsWith("terminal-visible/")
+            )
+            Assert.That(
+                visibleOnePane,
+                Does.Contain(
+                    $"terminal-visible/{EmbeddedTerminalId.value firstTwo}/http://127.0.0.1:61232"
+                )
+            ))
+
+    [<Test>]
+    member _.``Terminal visibility notification is routed through one command``() =
+        let updated, cmd =
+            App.update
+                (NotifyEmbeddedTerminalVisibility(
+                    firstTwo,
+                    "http://127.0.0.1:61232",
+                    TerminalVisibilitySignal.Activate
+                ))
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated, Is.EqualTo(focusModel))
+            Assert.That(List.length cmd, Is.EqualTo(1)))
+
+    [<Test>]
     member _.``Open embedded terminal reuses the selected worktree terminal``() =
         let model =
             { focusModel with
@@ -841,6 +1017,188 @@ type TerminalFocusTests() =
                 Is.EqualTo(Some TerminalStartState.StartingAndFocus)
             )
             Assert.That(List.length cmd, Is.EqualTo(2)))
+
+    [<Test>]
+    member _.``Reconnect view preserves terminal state and focuses after the current load``() =
+        let reconnecting, reconnectCmd =
+            App.update
+                (ReconnectEmbeddedTerminalView firstTwo)
+                focusModel
+
+        let selectedAgain, _ =
+            App.update
+                (SelectEmbeddedTerminal firstTwo)
+                reconnecting
+
+        let loaded, focusCmd =
+            App.update
+                (EmbeddedTerminalViewLoaded(firstTwo, 1))
+                selectedAgain
+
+        Assert.Multiple(fun () ->
+            Assert.That(reconnectCmd, Is.Empty)
+            Assert.That(reconnecting.EmbeddedTerminals, Is.EqualTo(focusModel.EmbeddedTerminals))
+            Assert.That(
+                reconnecting.ActiveEmbeddedTerminals,
+                Is.EqualTo(focusModel.ActiveEmbeddedTerminals)
+            )
+            Assert.That(
+                selectedAgain.EmbeddedTerminalViewStates[firstTwo],
+                Is.EqualTo(
+                    { Generation = 1
+                      FocusAfterLoad = true }
+                )
+            )
+            Assert.That(
+                viewGeneration
+                    firstOne
+                    reconnecting.EmbeddedTerminalViewStates,
+                Is.Zero
+            )
+            Assert.That(
+                viewGeneration
+                    secondOne
+                    reconnecting.EmbeddedTerminalViewStates,
+                Is.Zero
+            )
+            Assert.That(
+                loaded.EmbeddedTerminalViewStates[firstTwo].FocusAfterLoad,
+                Is.False
+            )
+            Assert.That(List.length focusCmd, Is.EqualTo(1)))
+
+    [<Test>]
+    member _.``Reconnect ignores a terminal that is no longer selected or visible``() =
+        let nonSelected, nonSelectedCmd =
+            App.update
+                (ReconnectEmbeddedTerminalView firstOne)
+                focusModel
+
+        let hidden, hiddenCmd =
+            App.update
+                (ReconnectEmbeddedTerminalView firstTwo)
+                { focusModel with TerminalPaneOpen = false }
+
+        let hiddenOnePaneModel =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Worktrees }
+
+        let hiddenOnePane, hiddenOnePaneCmd =
+            App.update
+                (ReconnectEmbeddedTerminalView firstTwo)
+                hiddenOnePaneModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(nonSelected, Is.EqualTo(focusModel))
+            Assert.That(nonSelectedCmd, Is.Empty)
+            Assert.That(
+                hidden,
+                Is.EqualTo({ focusModel with TerminalPaneOpen = false })
+            )
+            Assert.That(hiddenCmd, Is.Empty)
+            Assert.That(hiddenOnePane, Is.EqualTo(hiddenOnePaneModel))
+            Assert.That(hiddenOnePaneCmd, Is.Empty))
+
+    [<Test>]
+    member _.``One-pane navigation cancels pending reconnect focus when the terminal becomes hidden``() =
+        let model =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Terminal }
+
+        let reconnecting, _ =
+            App.update
+                (ReconnectEmbeddedTerminalView firstTwo)
+                model
+
+        let hidden, _ =
+            App.update
+                (SelectWorkspacePane WorkspaceLayout.Pane.Worktrees)
+                reconnecting
+
+        let loaded, cmd =
+            App.update
+                (EmbeddedTerminalViewLoaded(firstTwo, 1))
+                hidden
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                hidden.EmbeddedTerminalViewStates[firstTwo].FocusAfterLoad,
+                Is.False
+            )
+            Assert.That(
+                loaded.EmbeddedTerminalViewStates[firstTwo].FocusAfterLoad,
+                Is.False
+            )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``Late reconnect load cannot focus after another terminal is selected``() =
+        let reconnecting, _ =
+            App.update
+                (ReconnectEmbeddedTerminalView firstTwo)
+                focusModel
+
+        let selected, _ =
+            App.update
+                (SelectEmbeddedTerminal firstOne)
+                reconnecting
+
+        let loaded, cmd =
+            App.update
+                (EmbeddedTerminalViewLoaded(firstTwo, 1))
+                selected
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                activeTerminalId
+                    (Some first)
+                    loaded.ActiveEmbeddedTerminals
+                    loaded.EmbeddedTerminals,
+                Is.EqualTo(Some firstOne)
+            )
+            Assert.That(
+                loaded.EmbeddedTerminalViewStates[firstTwo].FocusAfterLoad,
+                Is.False
+            )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``Late reconnect load cannot focus a closed terminal``() =
+        let reconnecting, _ =
+            App.update
+                (ReconnectEmbeddedTerminalView firstTwo)
+                focusModel
+
+        let after =
+            { Tabs =
+                [ running firstOne first 61231
+                  running secondOne second 61233 ] }
+
+        let closed, _ =
+            App.update
+                (EmbeddedTerminalClosed after)
+                reconnecting
+
+        let loaded, cmd =
+            App.update
+                (EmbeddedTerminalViewLoaded(firstTwo, 1))
+                closed
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                loaded.EmbeddedTerminalViewStates.ContainsKey firstTwo,
+                Is.False
+            )
+            Assert.That(
+                activeTerminalId
+                    (Some first)
+                    loaded.ActiveEmbeddedTerminals
+                    loaded.EmbeddedTerminals,
+                Is.EqualTo(Some firstOne)
+            )
+            Assert.That(cmd, Is.Empty))
 
     [<Test>]
     member _.``Polled terminal before start response still schedules exact focus``() =
@@ -1403,14 +1761,53 @@ type TerminalFocusTests() =
         Assert.That(updated.TerminalPaneTarget, Is.EqualTo(None))
 
     [<Test>]
+    member _.``Worktree selection permanently cancels pending reconnect focus``() =
+        let reconnecting, _ =
+            App.update
+                (ReconnectEmbeddedTerminalView firstTwo)
+                focusModel
+
+        let selectedOther, _ =
+            App.update
+                (SetFocus (Some (Card (WorktreePath.value second))))
+                reconnecting
+
+        let selectedOriginal, _ =
+            App.update
+                (SetFocus (Some (Card (WorktreePath.value first))))
+                selectedOther
+
+        let loaded, cmd =
+            App.update
+                (EmbeddedTerminalViewLoaded(firstTwo, 1))
+                selectedOriginal
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                loaded.EmbeddedTerminalViewStates[firstTwo].FocusAfterLoad,
+                Is.False
+            )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
     member _.``Automatic canvas focus preserves an explicit terminal target``() =
+        let viewStates =
+            Map.empty |> reconnectView firstTwo
+
         let updated, _ =
             App.update
                 (SetFocusNoRetarget
                     (Some (Card (WorktreePath.value second))))
-                { focusModel with TerminalPaneTarget = Some third }
+                { focusModel with
+                    TerminalPaneTarget = Some third
+                    EmbeddedTerminalViewStates = viewStates }
 
-        Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some third))
+        Assert.Multiple(fun () ->
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some third))
+            Assert.That(
+                updated.EmbeddedTerminalViewStates,
+                Is.EqualTo(viewStates)
+            ))
 
     [<Test>]
     member _.``Card focus with no terminals renders no active terminal``() =
