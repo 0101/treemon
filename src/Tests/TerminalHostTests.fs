@@ -2479,6 +2479,27 @@ type TerminalHostCommandLifetimeTests() =
 [<Category("Fast")>]
 [<Category("TerminalHost")>]
 type TerminalHostSecurityTests() =
+    [<TestCase("http://localhost:5174/", "http://localhost:5174")>]
+    [<TestCase("http://127.0.0.1:5174", "http://127.0.0.1:5174")>]
+    member _.``allowed origins normalize to exact browser origins``(
+        value: string,
+        expected: string
+    ) =
+        Assert.That(
+            RequestSecurity.tryAllowedOrigin value,
+            Is.EqualTo(Some expected)
+        )
+
+    [<TestCase("http://user@localhost:5174/")>]
+    [<TestCase("http://@localhost:5174/")>]
+    [<TestCase("http://localhost:5174/path")>]
+    [<TestCase("http://localhost:5174/?query=true")>]
+    member _.``allowed origins reject non-origin URI components``(value: string) =
+        Assert.That(
+            RequestSecurity.tryAllowedOrigin value,
+            Is.EqualTo(None)
+        )
+
     [<Test>]
     member _.``non-loopback peer is rejected even with valid host origin and token``() =
         let metadata =

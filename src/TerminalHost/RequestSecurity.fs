@@ -23,6 +23,29 @@ type RequestRejection =
 
 [<RequireQualifiedAccess>]
 module RequestSecurity =
+    let internal tryAllowedOrigin (value: string) =
+        // Uri.TryCreate is a byref-only framework parser; mutation stays at this boundary.
+        let mutable uri = Unchecked.defaultof<Uri>
+
+        let isLoopbackHost () =
+            match IPAddress.TryParse uri.Host with
+            | true, address -> IPAddress.IsLoopback address
+            | false, _ ->
+                String.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
+
+        if
+            Uri.TryCreate(value, UriKind.Absolute, &uri)
+            && (uri.Scheme = Uri.UriSchemeHttp || uri.Scheme = Uri.UriSchemeHttps)
+            && isLoopbackHost ()
+            && not (value.Contains('@'))
+            && uri.AbsolutePath = "/"
+            && String.IsNullOrEmpty uri.Query
+            && String.IsNullOrEmpty uri.Fragment
+        then
+            Some(uri.GetLeftPart(UriPartial.Authority))
+        else
+            None
+
     let statusCode = function
         | RequestRejection.Forbidden -> StatusCodes.Status403Forbidden
         | RequestRejection.Unauthorized -> StatusCodes.Status401Unauthorized
