@@ -119,7 +119,7 @@ type ProcessIdentitySchemaTests() =
 type SessionHistoryMigrationTests() =
 
     [<Test>]
-    member _.``Main's session rows migrate to the latest resume identity per worktree``() =
+    member _.``Main's session rows migrate resume identity and context handoff``() =
         withDbPath (fun path ->
             createLegacyDatabase path
 
@@ -128,12 +128,29 @@ type SessionHistoryMigrationTests() =
             Assert.Multiple(fun () ->
                 Assert.That(
                     tableColumns path "resume_sessions",
-                    Is.EqualTo([ "session_id"; "worktree_path"; "updated_at" ])
+                    Is.EqualTo(
+                        [ "session_id"
+                          "worktree_path"
+                          "updated_at"
+                          "context_current_tokens"
+                          "context_token_limit"
+                          "context_usage_at" ]
+                    )
                 )
                 Assert.That(
                     resumeIdentity path "legacy-session",
                     Is.EqualTo(
                         Some("C:/wt/legacy", "2026-09-01T10:04:00.0000000+00:00")
+                    )
+                )
+                Assert.That(
+                    resumeContext path "legacy-session",
+                    Is.EqualTo(
+                        Some(
+                            89085,
+                            922000,
+                            "2026-09-01T10:03:30.0000000+00:00"
+                        )
                     )
                 )
                 Assert.That(
@@ -144,7 +161,7 @@ type SessionHistoryMigrationTests() =
                 Assert.That(
                     store.RetainedByWorktree() |> Map.isEmpty,
                     Is.True,
-                    "pre-upgrade footer content is deliberately not migrated"
+                    "legacy context remains a handoff until an exact process presents"
                 )
                 Assert.That(
                     scalarInt path "SELECT count(*) FROM activity_events;",
@@ -156,7 +173,9 @@ type SessionHistoryMigrationTests() =
                     Is.False
                 ))
 
-            let stored = currentWriterInstance "2026-09-04T10:00:00Z"
+            let stored =
+                currentWriterInstance "2026-09-04T10:00:00Z"
+                |> store.EstablishInstance
 
             let eventRow =
                 { ProcessIdentity = currentWriterIdentity
@@ -166,18 +185,35 @@ type SessionHistoryMigrationTests() =
 
             Assert.That(store.AppendAndUpsert(eventRow, stored) |> Option.isSome, Is.True)
             Assert.That(store.AppendAndUpsert(eventRow, stored), Is.EqualTo None)
-            Assert.That(
-                scalarInt
-                    path
-                    "SELECT count(*) FROM activity_events
-                     WHERE process_id = 7300 AND process_start_ticks = 8300;",
-                Is.EqualTo 1
-            )
-            Assert.That(
-                store.RetainedByWorktree() |> Map.containsKey "C:/wt/legacy",
-                Is.True,
-                "new exact reports restore the worktree representative"
-            ))
+
+            let retained =
+                store.RetainedByWorktree()["C:/wt/legacy"]
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    stored.Status.ContextUsage,
+                    Is.EqualTo(
+                        Some
+                            { CurrentTokens = 89085
+                              TokenLimit = 922000 }
+                    )
+                )
+                Assert.That(
+                    stored.ContextUsageAt,
+                    Is.EqualTo(Some(ts "2026-09-01T10:03:30Z"))
+                )
+                Assert.That(
+                    scalarInt
+                        path
+                        "SELECT count(*) FROM activity_events
+                         WHERE process_id = 7300 AND process_start_ticks = 8300;",
+                    Is.EqualTo 1
+                )
+                Assert.That(
+                    retained.Status.ContextUsage,
+                    Is.EqualTo stored.Status.ContextUsage,
+                    "validated exact presence receives the legacy context handoff"
+                )))
 
     [<Test>]
     member _.``This branch's prior tables collapse into resume identity and dedupe keys``() =
@@ -256,6 +292,51 @@ type SessionHistoryMigrationTests() =
                     |> List.contains "activity_events_migration",
                     Is.False
                 )))
+
+    [<Test>]
+    member _.``Identity-only resume table gains context columns idempotently``() =
+        withDbPath (fun path ->
+            SqliteTestDatabase.execute
+                path
+                """
+CREATE TABLE resume_sessions (
+    session_id    TEXT PRIMARY KEY,
+    worktree_path TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+INSERT INTO resume_sessions (session_id, worktree_path, updated_at)
+VALUES ('identity-only', 'C:/wt/identity-only', '2026-09-01T10:00:00.0000000+00:00');
+"""
+
+            (use _store = new SessionActivityStore(path)
+             ())
+
+            (use _reopened = new SessionActivityStore(path)
+             ())
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    tableColumns path "resume_sessions",
+                    Is.EqualTo(
+                        [ "session_id"
+                          "worktree_path"
+                          "updated_at"
+                          "context_current_tokens"
+                          "context_token_limit"
+                          "context_usage_at" ]
+                    )
+                )
+                Assert.That(
+                    resumeIdentity path "identity-only",
+                    Is.EqualTo(
+                        Some(
+                            "C:/wt/identity-only",
+                            "2026-09-01T10:00:00.0000000+00:00"
+                        )
+                    )
+                )
+                Assert.That(resumeContext path "identity-only", Is.EqualTo None)))
 
     [<Test>]
     member _.``A failed migration rolls back and leaves the legacy tables intact for a retry``() =
