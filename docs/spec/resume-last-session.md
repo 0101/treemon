@@ -18,8 +18,10 @@ When invoked, Treemon:
 3. Returns the running embedded terminal already owning that exact session, when one exists.
 4. Otherwise starts an embedded terminal and submits
    `copilot --experimental --yolo --session-id=<session-id>`.
-5. Falls back to `copilot --experimental --yolo --continue` when no durable session ID remains.
-6. Opens the terminal pane and selects the exact returned terminal.
+5. When the resumed CLI establishes its new exact process binding, initializes its context gauge
+   from the newest retained snapshot for that same durable session and worktree.
+6. Falls back to `copilot --experimental --yolo --continue` when no durable session ID remains.
+7. Opens the terminal pane and selects the exact returned terminal.
 
 Any open coding session in the worktree suppresses Resume; an embedded terminal with no open coding
 session does not. Repeated input while a launch is in flight retargets the pane without issuing
@@ -33,6 +35,11 @@ of heartbeat recency and the live-session window, ranking exact process instance
 pre-upgrade identities retained in `resume_sessions`. `TerminalSessionActivity.tryFindLiveTerminalId`
 joins that selected Copilot session to a running terminal through its exact
 `TREEMON_TERMINAL_SESSION_ID` origin.
+
+`SessionActivityStore.EstablishInstance` atomically initializes a missing gauge from the newest
+complete `session_instances` context with the same session/worktree identity, falling back to the
+legacy `resume_sessions` handoff. No prior process status, liveness, terminal origin, or physical
+identity is copied.
 
 `CodingToolCli` builds the provider-specific resume command with the CLI's direct startup selector,
 `--session-id=<id>`, so extensions join the durable target identity from process start.
@@ -51,6 +58,8 @@ entry points.
   available action.
 - **Durable activity ordering:** heartbeat-only `LastSeen` updates cannot change the selected resume
   identity.
+- **Context continuity without shared process state:** a new exact binding receives one immutable
+  last-known context snapshot, then live usage updates remain independent per process.
 
 ## Key Files
 

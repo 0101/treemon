@@ -13,7 +13,7 @@ shared state; no session-log parsing remains.
 - Derive status and card activity from explicit SDK events rather than log-file timing heuristics.
 - Keep reporting passive: no tools, prompts, or transcript changes.
 - Preserve live status, footer activity, messages, context usage, and resume identity across server
-  restarts.
+  restarts and preserve last-known context when a durable session binds to a new exact process.
 - Support multiple concurrent sessions in one worktree without losing per-process activity.
 - Represent concurrent CLI processes for the same durable Copilot session independently so their
   lifecycle state, liveness, and terminal origins cannot overwrite each other.
@@ -103,8 +103,9 @@ shared state; no session-log parsing remains.
 - `WorktreeStatus.Sessions` contains one marker for every open physical instance after freshness
   adjustment, ordered Working -> WaitingForUser -> Idle, then by `SessionId` and process identity
   within an equal status. Each marker carries an opaque exact-instance ID for stable client keys,
-  plus its own skill and context usage, so duplicate processes for one durable conversation remain
-  visible instead of collapsing into one marker.
+  plus its own skill and context usage. A newly established binding may begin with the durable
+  session's inherited last-known gauge, after which usage updates remain process-local. Duplicate
+  processes for one durable conversation remain visible instead of collapsing into one marker.
 - The live Overview counts and groups physical instances independently. One worktree can contribute
   processes to several activity groups at once.
 - `CodingToolSince` is captured whenever the collapsed worktree status changes and remains stable
@@ -147,6 +148,15 @@ shared state; no session-log parsing remains.
   values and usage cannot block a lifecycle transition.
 - Usage values and their ordering timestamp are stored on `session_instances`; usage is not appended
   to `activity_events` and cannot establish presence for an unknown process identity.
+- When validated presence establishes or reconnects an exact binding whose gauge is absent, the
+  store initializes it from the newest complete context snapshot with the same durable `SessionId`
+  and worktree. Current-format `session_instances` are the primary source; a pre-exact
+  `resume_sessions` snapshot is the fallback. Only `ContextUsage` and `ContextUsageAt` cross the
+  process boundary. Status, activity, liveness, provider, terminal origin, process identity, and
+  closure remain properties of the current binding.
+- Concurrent exact processes for one durable session may inherit the same immutable snapshot at
+  presence and then diverge independently. A later live usage event updates only its own binding
+  and wins by `ContextUsageAt`.
 - Once invoked, explicit worktree Resume selects the greatest `(UpdatedAt, SessionId)` from all
   durable sessions for the worktree, regardless of current status or heartbeat recency. Sessions
   older than the live window remain manually resumable until retention removes them. Automatic
@@ -216,11 +226,14 @@ closure.
 
 Subscriptions are attached before replay. The first successful `getEvents()` result is mapped
 through one runtime-scoped compact last-write-wins accumulator and cached for the process lifetime.
-It retains the latest lifecycle, skill, usage, title, intent, user and assistant message facts;
+It retains the latest lifecycle, skill, title, intent, user and assistant message facts, plus usage
+when the returned history contains a token-bearing `session.usage_info`;
 independent ask-user request/completion clocks; and active or recently completed background-agent
 clocks. Every replay merges that cached historical snapshot with a fresh compact
 current-process snapshot. A failed history read is not cached, so a later reconnect can retry it.
-Heartbeat delivery uses a separate lane from historical replay.
+Heartbeat delivery uses a separate lane from historical replay. Persisted Copilot history may omit
+`session.usage_info`, so replay is not the durability mechanism for context across exact-process
+Resume.
 
 After subscriptions and replay are active, the extension reads
 `session.rpc.metadata.snapshot().summary` in a non-blocking background task and emits
@@ -274,8 +287,8 @@ use independent ordering paths:
 - Title bootstrap hydrates durable state without appending an event or advancing lifecycle time.
 - Usage persists only the latest gauge on its own ordering clock.
 - Presence resolves the exact Copilot process start identity, creates or refreshes one instance with
-  server receipt time, advances the terminal-origin activity epoch, and replies only after the
-  store update succeeds.
+  server receipt time, inherits missing context from the newest matching durable snapshot, advances
+  the terminal-origin activity epoch, and replies only after the store update succeeds.
 - Heartbeats refresh only a known, non-closed exact instance. The current heartbeat re-establishes
   receipt-time openness, including after the prior `openWindow` elapsed; it cannot create a binding
   or change its session metadata or terminal origin. Heartbeats affect automatic replacement
@@ -289,10 +302,11 @@ use independent ordering paths:
   process must exit with its host before the selected durable session is resumed in a recreated
   terminal.
 
-Ingestion paths consult the exact process-instance row whenever prior state is needed. This
-preserves concurrent process state without allowing one CLI to steal another process's terminal
-origin, mark another instance Idle, or reopen an explicitly closed instance. Before advancing an
-instance after a stale gap, the service clears its old background clocks.
+Ingestion paths consult the exact process-instance row whenever prior state is needed. New-binding
+presence additionally reads only the newest context snapshot for the same durable session and
+worktree. This preserves concurrent process state without allowing one CLI to steal another
+process's terminal origin, status, activity, liveness, or closure. Before advancing an instance
+after a stale gap, the service clears its old background clocks.
 
 The mailbox also maintains a process-local monotonic activity sequence per terminal origin. An
 instance report stamps its terminal origin, so presence or closure changes that terminal's epoch.
@@ -329,10 +343,11 @@ environment values, exception text, and raw reports are not diagnostic inputs.
   durable session identity: optional terminal origin, worktree, provider, lifecycle state, activity,
   messages, context gauge, independent clocks, receipt-time liveness, and binding-local monotonic
   closure.
-- `resume_sessions` keeps only `session_id`, `worktree_path`, and `updated_at` for sessions that
-  existed before this schema. It exists so explicit Resume can still select a pre-upgrade
-  conversation; it carries no status, footer content, liveness, or process identity, and retention
-  removes old rows.
+- `resume_sessions` keeps `session_id`, `worktree_path`, `updated_at`, and an optional complete
+  context triple for sessions that existed before this schema. It exists so explicit Resume can
+  still select a pre-upgrade conversation and so its first validated exact binding can inherit the
+  last-known gauge. It carries no status, footer content, liveness, terminal origin, or process
+  identity, and retention removes old rows.
 - `activity_events` stores only
   `(process_id, process_start_ticks, session_id, event_id)` plus `ts`. It is a deduplication key set,
   not an audit log: folded state lives on `session_instances`, and canonical Overview history uses
@@ -340,19 +355,21 @@ environment values, exception text, and raw reports are not diagnostic inputs.
 - Background-agent start/finish clocks are stored on the process instance so server restart cannot
   misclassify an Idle parent with active delegated work.
 
-Store construction is one transaction: it creates the current tables, adds the per-instance
+Store construction is one transaction: it creates the current tables, idempotently adds the
+optional context columns to an older identity-only `resume_sessions`, adds the per-instance
 lifecycle clock to older exact rows, expands process-only instance keys to process-session bindings,
-copies the durable identity of any pre-upgrade `session_status` or prior `retained_sessions` row
-into `resume_sessions` (greatest `updated_at` per session), rebuilds `activity_events` down to its
-binding-scoped dedupe key, and drops the retired `session_status`, `retained_sessions`, and
-`worktree_representatives` tables. Process-keyed event rows gain their session ID from the
-one-row-per-process schema they accompany; rows keyed by event ID alone are discarded because their
-exact producer cannot be recovered. Repeating construction is a no-op and any failure rolls the
-whole upgrade back.
+copies the durable identity and complete last-known context triple of any pre-upgrade
+`session_status` or prior `retained_sessions` row into `resume_sessions`, rebuilds
+`activity_events` down to its binding-scoped dedupe key, and drops the retired `session_status`,
+`retained_sessions`, and `worktree_representatives` tables. Activity and context use their own
+ordering clocks when legacy sources converge. Process-keyed event rows gain their session ID from
+the one-row-per-process schema they accompany; rows keyed by event ID alone are discarded because
+their exact producer cannot be recovered. Repeating construction is a no-op, incomplete context
+triples fail explicitly, and any failure rolls the whole upgrade back.
 
-Pre-upgrade footer content — titles, intents, messages, skill, and context gauges — is deliberately
-not migrated. Immediately after upgrade a card can show no footer history until its worktree reports
-again, while explicit Resume still selects the latest pre-upgrade `SessionId`.
+Pre-upgrade titles, intents, messages, skill, status, liveness, terminal origin, and process
+identity are not migrated. The optional context gauge remains a handoff only until that durable
+session establishes a validated exact binding.
 
 The terminal-origin index follows `(terminal_session_id, updated_at DESC, session_id DESC)`; its
 leading origin key supports retained-origin scans used when pruning process-local activity epochs.
@@ -412,8 +429,8 @@ into lifecycle status.
 | Background agents | Persist per-tool start/finish clocks on each exact instance; WaitingForUser outranks background Working; stale-gap cleanup bounds abandoned clocks. |
 | Footer | Decouple from the status dot and merge the SQL-ranked greatest durable exact instance per worktree. |
 | Activity | Use freshest source-tagged intent/title; bootstrap title from metadata, never infer intent. |
-| Context usage | Persist the last-known gauge and ordering timestamp; do not append it to activity events. |
-| Persistence | Store exact process-session binding folds in full; keep event rows as binding-scoped dedupe keys only and pre-upgrade history as bare resume identity; rebuild legacy schema transactionally. |
+| Context usage | Persist each binding's last-known gauge and ordering timestamp; initialize a new binding from the newest same-session/worktree snapshot, then keep later updates process-local. Do not append usage to activity events or depend on replay history containing it. |
+| Persistence | Store exact process-session binding folds in full; keep event rows as binding-scoped dedupe keys only and pre-upgrade history as resume identity plus an optional complete context handoff; rebuild legacy schema transactionally. |
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
 | Explicit Resume | Once invoked, query durable most-recent activity identity, then use bounded live exact-origin state only to reuse that target's running terminal instead of launching a duplicate process. |
