@@ -1,7 +1,20 @@
 module Tests.ServerParsingTests
 
+open System
+open System.IO
 open NUnit.Framework
 open Server.PrStatus
+
+let private withTemporaryDirectory action =
+    let directory =
+        Path.Combine(Path.GetTempPath(), $"treemon-az-{Guid.NewGuid():N}")
+
+    Directory.CreateDirectory(directory) |> ignore
+
+    try
+        action directory
+    finally
+        Directory.Delete(directory, true)
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -62,6 +75,56 @@ type ParseAzureDevOpsUrlTests() =
     member _.``Empty string returns None``() =
         let result = parseAzureDevOpsUrl ""
         Assert.That(result, Is.EqualTo(None))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type AzureCliResolutionTests() =
+
+    [<Test>]
+    member _.``Windows az script uses its shebang interpreter``() =
+        withTemporaryDirectory (fun directory ->
+            let interpreter = Path.Combine(directory, "python.exe")
+            let azScript = Path.Combine(directory, "az")
+            File.WriteAllText(interpreter, "")
+            File.WriteAllText(azScript, $"#!\"{interpreter}\"{Environment.NewLine}")
+
+            let result =
+                resolveAzInvocation true directory ".COM;.EXE;.BAT;.CMD"
+
+            Assert.That(result.IsSome, Is.True)
+            Assert.That(result.Value.FileName, Is.EqualTo(interpreter))
+            Assert.That(result.Value.PrefixArguments, Is.EqualTo([ azScript ])))
+
+    [<Test>]
+    member _.``Windows packaged az command uses its bundled Python``() =
+        withTemporaryDirectory (fun directory ->
+            let commandDirectory = Path.Combine(directory, "wbin")
+            Directory.CreateDirectory(commandDirectory) |> ignore
+            let azCommand = Path.Combine(commandDirectory, "az.cmd")
+            let python = Path.Combine(directory, "python.exe")
+            File.WriteAllText(azCommand, "")
+            File.WriteAllText(python, "")
+
+            let result =
+                resolveAzInvocation true commandDirectory ".COM;.EXE;.BAT;.CMD"
+
+            Assert.That(result.IsSome, Is.True)
+            Assert.That(result.Value.FileName, Is.EqualTo(python))
+            Assert.That(result.Value.PrefixArguments, Is.EqualTo([ "-IBm"; "azure.cli" ])))
+
+    [<Test>]
+    member _.``Unix az command is invoked directly``() =
+        withTemporaryDirectory (fun directory ->
+            let azCommand = Path.Combine(directory, "az")
+            File.WriteAllText(azCommand, "")
+
+            let result =
+                resolveAzInvocation false directory ""
+
+            Assert.That(result.IsSome, Is.True)
+            Assert.That(result.Value.FileName, Is.EqualTo(azCommand))
+            Assert.That(result.Value.PrefixArguments, Is.Empty))
 
 
 [<TestFixture>]
