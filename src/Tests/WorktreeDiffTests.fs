@@ -110,7 +110,6 @@ let private initializeDiffRepo repoDir =
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type WorktreeDiffIntegrationTests() =
 
     let mutable tempDir = "" // NUnit SetUp and TearDown must share the per-test directory through fixture state.

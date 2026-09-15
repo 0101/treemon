@@ -20,8 +20,6 @@ open OverviewData
 let private repoRoot =
     Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 
-let private serverProjectPath = Path.Combine(repoRoot, "src", "Server")
-
 let private fixturePath =
     Path.Combine(repoRoot, "src", "Tests", "fixtures", "overview-band.json")
 
@@ -43,7 +41,7 @@ let private terminalHostStateDirectory = TestUtils.terminalHostStateDirectory ()
 let private startServer () =
     task {
         let proc =
-            TestUtils.startServerProcess serverProjectPath repoRoot $"\"{repoRoot}\"" serverPort canvasPort fixturePath terminalHostStateDirectory
+            TestUtils.startServerProcess repoRoot $"\"{repoRoot}\"" serverPort canvasPort fixturePath terminalHostStateDirectory
         serverProcess.Value <- Some proc
         do! TestUtils.waitForUrl serverUrl 30000
     }

@@ -165,7 +165,7 @@ let private withChangedCanvasAndFooter branch changedAt (response: DashboardResp
 [<TestFixture>]
 [<Category("E2E")>]
 type CardFooterRenderingTests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     [<Test>]
     member this.``Canvas event activity and messages render together in the card footer``() =
@@ -377,7 +377,7 @@ let private focusCardAndWait (page: IPage) branch =
 [<TestFixture>]
 [<Category("E2E")>]
 type WorktreeDiffActionTests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     override this.ContextOptions() =
         let options = base.ContextOptions()

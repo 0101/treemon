@@ -414,31 +414,27 @@ let stopTerminalHostState (stateDirectory: string) =
     | Ok() ->
         removeTerminalHostStateDirectory stateDirectory
 
-/// Launch the Treemon API server process for an E2E fixture. `rootArgs` is the already-quoted,
-/// space-joined worktree-root list; each fixture keeps its own port / orphan-kill / fixture policy
-/// but shares this launch command. `terminalHostStateDirectory` isolates the fixture's TerminalHost
-/// discovery/state from production and from every other fixture. The server log is placed under
-/// that same fixture-owned directory, so teardown removes only state owned by this fixture.
-let startServerProcess (serverProjectPath: string) (repoRoot: string) (rootArgs: string) (port: int) (canvasPort: int) (fixturePath: string) (terminalHostStateDirectory: string) : Process =
-#if DEBUG
-    let configuration = "Debug"
-#else
-    let configuration = "Release"
-#endif
+/// Launch the built Treemon assembly directly so teardown owns the server process rather than a
+/// `dotnet run` wrapper. `terminalHostStateDirectory` keeps discovery and logs isolated.
+let startServerProcess (repoRoot: string) (rootArgs: string) (port: int) (canvasPort: int) (fixturePath: string) (terminalHostStateDirectory: string) : Process =
+    let serverAssemblyPath = Path.Combine(AppContext.BaseDirectory, "Treemon.dll")
     let logDirectory = serverLogDirectory terminalHostStateDirectory
 
     startProcess
         "dotnet"
-        $"""run --no-build --configuration {configuration} --project "{serverProjectPath}" -- {rootArgs} --port {port} --canvas-port {canvasPort} --test-fixtures "{fixturePath}" --log-dir "{logDirectory}" """
+        $""""{serverAssemblyPath}" {rootArgs} --port {port} --canvas-port {canvasPort} --test-fixtures "{fixturePath}" --log-dir "{logDirectory}" """
         repoRoot
         [ "TREEMON_TERMINAL_HOST_STATE_DIR", terminalHostStateDirectory ]
         false
 
-/// Launch a Vite dev-server process wired to the given API/canvas ports for an E2E fixture.
+/// Launch the installed Vite script directly so teardown owns Node rather than an `npx` wrapper.
 let startViteProcess (repoRoot: string) (vitePort: int) (apiPort: int) (canvasPort: int) : Process =
+    let viteScriptPath =
+        Path.Combine(repoRoot, "node_modules", "vite", "bin", "vite.js")
+
     startProcess
-        "npx"
-        "vite --host"
+        "node"
+        $""""{viteScriptPath}" --host"""
         repoRoot
         [ "VITE_PORT", string vitePort
           "API_PORT", string apiPort

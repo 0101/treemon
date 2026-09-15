@@ -26,7 +26,7 @@ let private mockBeadsJson = """[
 [<Category("E2E")>]
 [<Category("Canvas")>]
 type BeadspaceCanvasTests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     let beadsPageUrl = $"{ServerFixture.canvasUrl}/e2e-test-worktree/beads.html"
 

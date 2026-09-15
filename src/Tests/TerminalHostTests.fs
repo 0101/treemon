@@ -1936,7 +1936,6 @@ let private requireTerminalInputFrame (upstream: TestWebSocket) =
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 [<Category("TerminalHost")>]
 type TerminalHostProxyTests() =
     [<Test>]

@@ -10,7 +10,7 @@ open Shared
 [<TestFixture>]
 [<Category("E2E")>]
 type DashboardTests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     let baseUrl = ServerFixture.viteUrl
 
@@ -88,7 +88,6 @@ type DashboardTests() =
     [<TestCase("waiting", "rgb(249, 226, 175)")>]
     [<TestCase("idle", "rgb(137, 180, 250)")>]
     [<TestCase("nosession", "rgb(88, 91, 112)")>]
-    [<Category("Fast")>]
     member this.``CT dot has correct background color``(status: string, expectedColor: string) =
         task {
             let dots = this.Page.Locator($".ct-dot.{status}:not(.ct-donut)")
@@ -109,7 +108,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Dashboard loads with at least one worktree card``() =
         task {
             let cards = this.Page.Locator(".wt-card")
@@ -118,7 +116,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Worktree cards display branch names``() =
         task {
             let branchNames = this.Page.Locator(".wt-card .branch-name")
@@ -141,7 +138,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Worktree cards display commit time``() =
         task {
             let commitTimes = this.Page.Locator(".wt-card .commit-time")
@@ -187,7 +183,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Beads counts appear on cards``() =
         task {
             let beadsCounts = this.Page.Locator(".wt-card .beads-counts")
@@ -228,7 +223,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``PR badge shows when PR data is present``() =
         task {
             let prBadges = this.Page.Locator(".wt-card .pr-badge")
@@ -307,7 +301,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Compact mode toggle switches to compact cards``() =
         task {
             let btn = compactBtn this.Page
@@ -380,7 +373,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Build badge renders when build data is present``() =
         task {
             let buildBadges = this.Page.Locator(".wt-card .build-badge")
@@ -479,7 +471,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Main-behind indicator present on cards``() =
         task {
             let mainBehindElements = this.Page.Locator(".wt-card .main-behind")
@@ -1292,7 +1283,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Scheduler footer uses monospace font``() =
         task {
             let footer = this.Page.Locator(".scheduler-footer")
@@ -1346,7 +1336,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Cold start skeleton renders when IsReady is false``() =
         task {
             let! page = this.Context.NewPageAsync()
@@ -1497,7 +1486,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Working dot has pulse animation``() =
         task {
             let workingDots = this.Page.Locator(".ct-dot.working:not(.ct-donut)")
@@ -2200,7 +2188,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``No launch-btn elements exist on any card``() =
         task {
             let launchBtns = this.Page.Locator(".wt-card .launch-btn")
@@ -2209,7 +2196,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``No focus-btn elements exist on any card``() =
         task {
             let focusBtns = this.Page.Locator(".wt-card .focus-btn")
@@ -2218,7 +2204,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``No kill-btn elements exist on any card``() =
         task {
             let killBtns = this.Page.Locator(".wt-card .kill-btn")
@@ -2227,7 +2212,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``No modal-overlay on initial page load``() =
         task {
             let modalOverlays = this.Page.Locator(".modal-overlay")
@@ -2236,7 +2220,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``No launch-dialog elements exist in DOM``() =
         task {
             let launchDialogs = this.Page.Locator(".launch-dialog")
@@ -2245,7 +2228,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Native and embedded terminal controls coexist on every card``() =
         task {
             let cards = this.Page.Locator(".wt-card")
@@ -2278,7 +2260,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Embedded terminal translates input and forwards supported shortcuts``() =
         task {
             do! this.Context.GrantPermissionsAsync([| "clipboard-read"; "clipboard-write" |])
@@ -2683,7 +2664,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Empty terminal snapshot discovers a background terminal without stealing focus``() =
         task {
             let! page = this.Context.NewPageAsync()
@@ -2786,7 +2766,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Dashboard div has tabIndex 0 for keyboard events``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -2795,7 +2774,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Arrow down focuses first visible element``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -2812,7 +2790,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Arrow up focuses first visible element when nothing focused``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -2826,7 +2803,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Focus ring has correct CSS outline``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -2847,7 +2823,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Arrow down navigates from header to first card``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -2868,7 +2843,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Arrow up from first card navigates spatially to previous repo``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -2892,7 +2866,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Only one element has focused class at a time``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -2909,7 +2882,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Enter on repo header toggles collapse``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -2939,7 +2911,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Collapsed repo cards are skipped during navigation``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -2978,7 +2949,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Navigation wraps from last to first element``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3009,7 +2979,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Navigation wraps from first to last element``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3031,7 +3000,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Dashboard has no focused element initially``() =
         task {
             let focused = this.Page.Locator(".focused")
@@ -3040,7 +3008,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Modifier keys do not trigger actions on focused card``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3062,7 +3029,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Focused card class applied to wt-card element``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3078,7 +3044,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Focused repo header class applied to repo-header element``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3093,7 +3058,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Dashboard div does not show outline when focused``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3104,7 +3068,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Collapsing repo while child card is focused moves focus to header``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3134,7 +3097,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``ArrowRight moves focus to next card in same visual row``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3162,7 +3124,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``ArrowLeft moves focus to previous card in same visual row``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3188,7 +3149,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``ArrowDown jumps by column count to same column next row``() =
         task {
             do! this.Page.SetViewportSizeAsync(1300, 800)
@@ -3229,7 +3189,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``ArrowUp jumps by column count to same column previous row``() =
         task {
             do! this.Page.SetViewportSizeAsync(1300, 800)
@@ -3268,7 +3227,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``ArrowLeft on repo header collapses it``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3298,7 +3256,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``ArrowRight on collapsed repo header expands it``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3330,7 +3287,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``ArrowLeft on already collapsed header is no-op``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3361,7 +3317,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``ArrowRight on already expanded header is no-op``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3388,7 +3343,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Navigation crosses repo boundary on ArrowDown``() =
         task {
             do! this.Page.SetViewportSizeAsync(1300, 800)
@@ -3427,7 +3381,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``ArrowLeft from first column card goes to header or previous repo``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3451,7 +3404,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Scroll into view moves focused element into viewport``() =
         task {
             do! this.Page.SetViewportSizeAsync(1300, 400)
@@ -3492,7 +3444,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``ArrowRight at end of row wraps to next row or repo``() =
         task {
             do! this.Page.SetViewportSizeAsync(1300, 800)
@@ -3532,7 +3483,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Existing keyboard nav tests regression - sequential navigation still works``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3571,7 +3521,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Plus button visible on every repo header``() =
         task {
             let repoHeaders = this.Page.Locator(".repo-header")
@@ -3588,7 +3537,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Home key navigates to first visible element``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3615,7 +3563,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Plus button click opens modal with name input focused``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -3638,7 +3585,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``End key navigates to last visible element``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3667,7 +3613,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Modal has base branch dropdown populated and pre-selected``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -3686,7 +3631,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Home and End scroll focused element into view``() =
         task {
             do! this.Page.SetViewportSizeAsync(1300, 400)
@@ -3729,7 +3673,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Modal has header, Cancel and Create buttons``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -3754,7 +3697,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Wrap-around navigation scrolls focused element into view``() =
         task {
             do! this.Page.SetViewportSizeAsync(1300, 400)
@@ -3790,7 +3732,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Submit button disabled when name is empty``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -3804,7 +3745,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``First keypress captures focus without page scroll``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3826,7 +3766,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Submit button enabled after typing a name``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -3843,7 +3782,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``End key from no focus goes to last element``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3865,7 +3803,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Escape key closes modal``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -3883,7 +3820,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Arrow keys preventDefault so page does not scroll``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3946,7 +3882,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Cancel button closes modal``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -3965,7 +3900,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Cards with LastUserMessage show user-prompt class``() =
         task {
             let userPrompts = this.Page.Locator(".wt-card .card-footer .user-prompt")
@@ -3979,7 +3913,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Clicking overlay background closes modal``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -3997,7 +3930,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``User prompt shown in card-footer for working card``() =
         task {
             let activeCard = this.Page.Locator(".wt-card.ct-working").First
@@ -4010,7 +3942,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Plus button click does not toggle repo collapse``() =
         task {
             let repoSection = this.Page.Locator(".repo-section").First
@@ -4032,7 +3963,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``No-session cards have no user-prompt but have git-commit-msg``() =
         task {
             let idleCard = this.Page.Locator(".wt-card.ct-nosession").First
@@ -4050,7 +3980,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Full roundtrip: submit form, modal closes on success``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -4071,7 +4000,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Commit message shown in git-commit-msg when user prompt present and not dirty``() =
         task {
             let activeCard = this.Page.Locator(".wt-card.ct-working").First
@@ -4087,7 +4015,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Full roundtrip via Enter key: type name, press Enter, modal closes``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -4106,7 +4033,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Agent button is visible on every worktree card``() =
         task {
             let cards = this.Page.Locator(".wt-card")
@@ -4119,7 +4045,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Modal re-opens correctly after previous submission``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -4147,7 +4072,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Agent button has a robot icon and accessible label``() =
         task {
             let agentBtn = this.Page.Locator(".wt-card .agent-btn").First
@@ -4159,7 +4083,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Agent button requests a fresh Copilot terminal``() =
         task {
             let requests =
@@ -4193,7 +4116,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Agent button remains visible without an active native session``() =
         task {
             let nonSessionCards = this.Page.Locator(".wt-card:not(.has-session)")
@@ -4208,7 +4130,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Agent button is inside card header``() =
         task {
             let headerBtns = this.Page.Locator(".wt-card .card-header .agent-btn")
@@ -4222,7 +4143,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Agent button appears on every compact card``() =
         task {
             do! (compactBtn this.Page).ClickAsync()
@@ -4238,7 +4158,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Commit message always visible in main-behind-row``() =
         task {
             let gitCommitMsgs = this.Page.Locator(".wt-card:not(.compact) .main-behind-row .git-commit-msg")
@@ -4252,7 +4171,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Commit message visible even when user prompt is shown``() =
         task {
             let activeCard = this.Page.Locator(".wt-card.ct-working").First
@@ -4273,7 +4191,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Commit message visible on dirty cards``() =
         task {
             let dirtyRow = this.Page.Locator(".wt-card .main-behind-row:has(.dirty-warning)")
@@ -4289,7 +4206,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Terminal button has box-shadow on has-session cards``() =
         task {
             let sessionTerminalBtns = this.Page.Locator(".wt-card.has-session .terminal-btn")
@@ -4306,7 +4222,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Has-session card does not have left border highlight``() =
         task {
             let sessionCards = this.Page.Locator(".wt-card.has-session")
@@ -4318,7 +4233,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Closed eye SVG has dimmed opacity``() =
         task {
             let eyeClosed = this.Page.Locator(".eye-logo.eye-closed")
@@ -4338,7 +4252,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Scroll into view works after arrow key navigation via requestAnimationFrame``() =
         task {
             do! this.Page.SetViewportSizeAsync(1300, 300)
@@ -4370,7 +4283,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Arrow key navigation scrolls card into view after focus change``() =
         task {
             do! this.Page.SetViewportSizeAsync(1300, 300)
@@ -4402,7 +4314,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Non-session terminal button has no box-shadow``() =
         task {
             let nonSessionBtns = this.Page.Locator(".wt-card:not(.has-session) .terminal-btn")
@@ -4414,7 +4325,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Git commit message includes relative time in main-behind-row``() =
         task {
             let commitTimes = this.Page.Locator(".wt-card:not(.compact) .main-behind-row .git-commit-msg .commit-time")
@@ -4429,7 +4339,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Provider icon SVG exists in repo-header for recognized remotes``() =
         task {
             let headers = this.Page.Locator(".repo-section .repo-header")
@@ -4446,7 +4355,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Enter key in modal input does not collapse repo``() =
         task {
             let repoSection = this.Page.Locator(".repo-section").First
@@ -4471,7 +4379,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Provider icon SVG has valid viewBox for GitHub or AzDo``() =
         task {
             let icons = this.Page.Locator(".repo-header .provider-icon")
@@ -4492,7 +4399,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Escape closes modal and restores focus to repo header for arrow key nav``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -4531,7 +4437,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Escape from outside the dashboard reclaims focus and restores arrow nav``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -4564,7 +4469,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Escape does not reclaim focus while an editable field has focus``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -4583,7 +4487,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Ctrl P finds a worktree across repository and branch then reveals its collapsed card``() =
         task {
             let expandedSection = this.Page.Locator(".repo-section:has(.wt-card)").First
@@ -4683,7 +4586,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Open worktree search consumes Ctrl P and exposes combobox semantics``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -4721,7 +4623,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Worktree search focus-lock keeps Tab on the input``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -4755,7 +4656,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Create and confirmation modals leave Ctrl P unconsumed``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -4802,7 +4702,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Worktree search keeps composed input and selected results visible``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -4859,7 +4758,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Cancel button closes modal and restores focus for arrow key nav``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -4897,7 +4795,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Modal shows loading state with spinner text``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -4915,7 +4812,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Modal creating state shows creating text and dots``() =
         task {
             let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
@@ -4937,7 +4833,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Arrow keys suppressed while modal is open``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
