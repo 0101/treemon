@@ -48,7 +48,7 @@ let private injectLive (kind: CanvasDocKind) (filename: string) (docHtml: string
 [<Category("Canvas")>]
 [<Category("AuthoringDxE2E")>]
 type CanvasInjectionThemeE2ETests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     override this.ContextOptions() =
         let opts = base.ContextOptions()
@@ -594,7 +594,7 @@ type CanvasInjectionThemeE2ETests() =
 // ============================================================================
 // Item 2 (canvasSend tab switch) + Item 3 (doc JS error banner)
 //
-// Full-app pane E2E (server + Fable + Vite via ServerFixture.GlobalSetup). We
+// Full-app pane E2E (server + Fable + Vite via ServerFixture.SharedPageTest). We
 // intercept the canvas-doc-server iframe requests (ServerFixture.canvasUrl/.../<doc>)
 // and serve the REAL injected doc, so the genuine in-iframe window.canvasSend /
 // window.onerror / unhandledrejection drive the genuine Elmish pane.
@@ -604,7 +604,7 @@ type CanvasInjectionThemeE2ETests() =
 [<Category("Canvas")>]
 [<Category("AuthoringDxE2E")>]
 type CanvasAuthoringDxPaneE2ETests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     let baseUrl = ServerFixture.viteUrl
     let [<Literal>] MultiDocBranch = "feature-multidoc"
@@ -818,7 +818,7 @@ type CanvasAuthoringDxPaneE2ETests() =
 [<Category("Canvas")>]
 [<Category("AuthoringDxE2E")>]
 type CanvasGlobalKeyboardBridgeE2ETests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     override this.ContextOptions() =
         let opts = base.ContextOptions()
@@ -946,7 +946,7 @@ let private selectionLifecycleBody =
 [<Category("Canvas")>]
 [<Category("AuthoringDxE2E")>]
 type CanvasSelectionContextE2ETests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     override this.ContextOptions() =
         let opts = base.ContextOptions()

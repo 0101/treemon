@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <NUnit>
+    <AssemblySelectLimit>10000</AssemblySelectLimit>
+  </NUnit>
+</RunSettings>
