@@ -173,6 +173,20 @@ try {
     $candidateServer = Publish-ServerCandidate
     Assert-True ($candidateServer -is [string]) "Server candidate path was not scalar"
     $candidateHost = Join-Path $candidateServer "terminal-host"
+    $revisionStampedHostAssemblies = @(
+        @("TerminalHost.exe", "TerminalHost.dll", "Shared.dll", "TerminalHostLayout.dll") |
+            Where-Object {
+                $version = [Diagnostics.FileVersionInfo]::GetVersionInfo(
+                    (Join-Path $candidateHost $_)
+                ).ProductVersion
+                $version -match "\+[0-9a-fA-F]{40}$"
+            }
+    )
+    Assert-True (
+        $revisionStampedHostAssemblies.Count -eq 0
+    ) "Published TerminalHost assemblies included repository revision metadata"
+    Write-Host "PASS: published host identity excludes repository revision metadata"
+
     Publish-TestProject (
         Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
     ) $baseline "1.0.0-deployment-test"
@@ -239,6 +253,15 @@ try {
         $directorySnapshotBeforePdbChange
     ) "Directory snapshot excluded a PDB"
     Write-Host "PASS: shared fingerprint entries support bundle and snapshot modes"
+
+    $fingerprintRuntime = Join-Path $fingerprintNestedDirectory "runtime.json"
+    Set-Content -LiteralPath $fingerprintRuntime -Value "runtime-v2" -NoNewline
+    Assert-True (
+        (Get-TerminalHostBundleDigest $fingerprintDirectory $layoutProbe.Layout) -cne
+        $bundleDigestBeforePdbChange
+    ) "TerminalHost bundle digest ignored a changed runtime file"
+    Set-Content -LiteralPath $fingerprintRuntime -Value "runtime" -NoNewline
+    Write-Host "PASS: host bundle digest detects runtime content changes"
 
     $missingBundleMember =
         Join-Path $fingerprintDirectory $layoutProbe.Layout.TtydExecutableName
