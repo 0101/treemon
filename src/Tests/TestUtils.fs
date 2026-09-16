@@ -158,17 +158,18 @@ let killProc (procOpt: Process option) =
     |> Option.iter (fun p ->
         try
             if not p.HasExited then
-                p.Kill(entireProcessTree = true)
+                try
+                    p.Kill(entireProcessTree = true)
+                with :? InvalidOperationException ->
+                    ()
 
-                match p.WaitForExit(10000) with
-                | true -> ()
-                | false ->
-                    TestContext.Error.WriteLine(
-                        $"Process {p.Id} did not exit within 10s after Kill")
-
-            p.Dispose()
-        with ex ->
-            TestContext.Error.WriteLine($"Failed to kill process: {ex.Message}"))
+                Assert.That(
+                    p.HasExited || p.WaitForExit(10000),
+                    Is.True,
+                    $"Process {p.Id} did not exit within 10s after Kill"
+                )
+        finally
+            p.Dispose())
 
 let private findPidsOnPortWindows (port: int) =
     let psi =
