@@ -1,6 +1,6 @@
 ---
 autofix: false
-model: sonnet
+model: gpt-5.6-terra
 applies-to: ["src/Cli/**/*.fs", "src/Client/**/*.fs", "src/Extension/**/*.fs", "src/Server/**/*.fs", "src/Shared/**/*.fs"]
 ---
 # Tuple Matching

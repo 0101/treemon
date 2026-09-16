@@ -1,6 +1,6 @@
 ---
 autofix: false
-model: sonnet
+model: gpt-5.6-terra
 source: "built-in"
 ---
 # Code Duplication
