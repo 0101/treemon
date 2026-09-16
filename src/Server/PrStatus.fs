@@ -15,6 +15,10 @@ type RemoteInfo =
     | AzureDevOps of AzDoRemote
     | GitHub of GithubPrStatus.GithubRemote
 
+type internal AzInvocation =
+    { FileName: string
+      PrefixArguments: string list }
+
 let parseAzureDevOpsUrl (url: string) =
     try
         let parts = url.TrimEnd('/').Split('/')
@@ -53,27 +57,127 @@ let toRepoProvider = function
     | AzureDevOps r -> AzDoProvider $"https://dev.azure.com/{r.Org}/{r.Project}/_git/{r.Repo}"
     | GitHub r -> GitHubProvider $"https://github.com/{r.Owner}/{r.Repo}"
 
-let private azPythonExe =
-    lazy
-        let azCmd =
-            (Environment.GetEnvironmentVariable("PATH") |> Option.ofObj |> Option.defaultValue "").Split(Path.PathSeparator)
-            |> Array.tryPick (fun dir ->
-                let candidate = Path.Combine(dir, "az.cmd")
-                if File.Exists(candidate) then Some candidate else None)
+let internal tryParseShebangInterpreter (line: string) =
+    if not (line.StartsWith("#!", StringComparison.Ordinal)) then
+        None
+    else
+        let command = line[2..].Trim()
 
-        azCmd
-        |> Option.bind (fun cmd ->
-            let python = Path.Combine(Path.GetDirectoryName(cmd), "..", "python.exe") |> Path.GetFullPath
-            if File.Exists(python) then Some python else None)
+        if command.StartsWith("\"", StringComparison.Ordinal) then
+            let closingQuote = command.IndexOf('"', 1)
+
+            if closingQuote > 1 then
+                Some command[1..closingQuote - 1]
+            else
+                None
+        else
+            command.Split([| ' '; '\t' |], StringSplitOptions.RemoveEmptyEntries)
+            |> Array.tryHead
+
+let internal azCommandCandidates isWindows (pathValue: string) (pathExtensions: string) =
+    let commandNames =
+        if isWindows then
+            pathExtensions.Split(';', StringSplitOptions.RemoveEmptyEntries)
+            |> Array.map (fun extension ->
+                let suffix =
+                    if extension.StartsWith(".", StringComparison.Ordinal) then
+                        extension
+                    else
+                        "." + extension
+
+                "az" + suffix)
+            |> Array.append [| "az" |]
+        else
+            [| "az" |]
+
+    pathValue.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+    |> Seq.map (fun directory -> directory.Trim().Trim('"'))
+    |> Seq.filter (String.IsNullOrWhiteSpace >> not)
+    |> Seq.collect (fun directory ->
+        commandNames
+        |> Seq.map (fun commandName -> Path.Combine(directory, commandName)))
+
+let private isUnixExecutable (commandPath: string) =
+    let executeBits =
+        UnixFileMode.UserExecute
+        ||| UnixFileMode.GroupExecute
+        ||| UnixFileMode.OtherExecute
+
+    try
+        (File.GetUnixFileMode(commandPath) &&& executeBits) <> enum<UnixFileMode> 0
+    with
+    | :? IOException
+    | :? UnauthorizedAccessException
+    | :? PlatformNotSupportedException -> false
+
+let internal tryCreateAzInvocation isWindows (commandPath: string) =
+    let directInvocation =
+        { FileName = commandPath
+          PrefixArguments = [] }
+
+    match Path.GetExtension(commandPath).ToLowerInvariant() with
+    | "" when not isWindows ->
+        if isUnixExecutable commandPath then
+            Some directInvocation
+        else
+            None
+    | "" ->
+        try
+            use reader = File.OpenText(commandPath)
+
+            reader.ReadLine()
+            |> Option.ofObj
+            |> Option.bind tryParseShebangInterpreter
+            |> Option.filter Path.IsPathFullyQualified
+            |> Option.filter File.Exists
+            |> Option.map (fun interpreter ->
+                { FileName = interpreter
+                  PrefixArguments = [ commandPath ] })
+        with
+        | :? IOException
+        | :? UnauthorizedAccessException -> None
+    | ".com"
+    | ".exe" -> Some directInvocation
+    | ".cmd" ->
+        let python =
+            Path.Combine(Path.GetDirectoryName(commandPath), "..", "python.exe")
+            |> Path.GetFullPath
+
+        if File.Exists(python) then
+            Some
+                { FileName = python
+                  PrefixArguments = [ "-IBm"; "azure.cli" ] }
+        else
+            None
+    | _ -> None
+
+let internal resolveAzInvocation isWindows pathValue pathExtensions =
+    azCommandCandidates isWindows pathValue pathExtensions
+    |> Seq.filter File.Exists
+    |> Seq.tryPick (tryCreateAzInvocation isWindows)
+
+let private azInvocation =
+    lazy
+        let pathValue =
+            Environment.GetEnvironmentVariable("PATH")
+            |> Option.ofObj
+            |> Option.defaultValue ""
+
+        let pathExtensions =
+            Environment.GetEnvironmentVariable("PATHEXT")
+            |> Option.ofObj
+            |> Option.defaultValue ".COM;.EXE;.BAT;.CMD"
+
+        resolveAzInvocation (OperatingSystem.IsWindows()) pathValue pathExtensions
 
 let private runAz (arguments: string list) =
-    match azPythonExe.Value with
-    | Some python ->
+    match azInvocation.Value with
+    | Some invocation ->
         ProcessRunner.text
-            { ProcessRunner.Spawn.create python with Context = "PR" }
-            ("-IBm" :: "azure.cli" :: arguments)
+            { ProcessRunner.Spawn.create invocation.FileName with Context = "PR" }
+            (invocation.PrefixArguments @ arguments)
     | None ->
-        Log.log "PR" "Could not locate Azure CLI python.exe via PATH"
+        Log.log "PR" "Could not locate a supported az command via PATH"
         async { return None }
 
 let buildRemoteUrlArgs (repoRoot: string) (remoteName: string) =
