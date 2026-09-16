@@ -1843,7 +1843,6 @@ type RestartRebuildTests() =
 // ── exact terminal ownership queries ─────────────────────────────────────────
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type TerminalOwnershipQueryTests() =
 
     let ownedStored terminalSessionId sessionId lastSeen =

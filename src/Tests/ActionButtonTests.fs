@@ -7,7 +7,7 @@ open Microsoft.Playwright.NUnit
 [<TestFixture>]
 [<Category("E2E")>]
 type ActionButtonTests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     let baseUrl = ServerFixture.viteUrl
 
@@ -28,7 +28,6 @@ type ActionButtonTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Action buttons have action-btn CSS class``() =
         task {
             let actionBtns = this.Page.Locator(".wt-card .action-btn")
@@ -38,7 +37,6 @@ type ActionButtonTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Action buttons are inside wt-card DOM``() =
         task {
             let actionBtns = this.Page.Locator(".wt-card .action-btn")
@@ -52,7 +50,6 @@ type ActionButtonTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Create-PR action button appears on cards with no PR badge``() =
         task {
             let noPrCards = this.Page.Locator(".wt-card:not(.compact):not(:has(.pr-badge))")
@@ -121,7 +118,6 @@ type ActionButtonTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
     member this.``Fix-build action button appears next to failed build badge``() =
         task {
             let failedBuildBadges = this.Page.Locator(".wt-card .build-badge.failed")
