@@ -9,7 +9,6 @@ let internal maxListedValues = 8
 type internal ObservationBoundary =
     | Presence
     | Bridge
-    | Replacement
 
 [<RequireQualifiedAccess>]
 type internal PresenceKind =
@@ -44,12 +43,6 @@ type internal SameSessionMultiplicityDiagnostic =
       ProcessIdentities: ProcessIdentity list
       TerminalSessionIds: TerminalSessionId list
       UnattributedProcessCount: int }
-
-type internal TerminalConversationAnomalyDiagnostic =
-    { TerminalSessionId: TerminalSessionId
-      SelectedSessionId: SessionId option
-      RetainedSessionIds: SessionId list
-      ProcessIdentities: ProcessIdentity list }
 
 [<RequireQualifiedAccess>]
 type internal ShutdownRejection =
@@ -89,43 +82,6 @@ type internal ExactClosureDiagnostic =
       Outcome: ExactClosureOutcome }
 
 [<RequireQualifiedAccess>]
-type internal ReplacementFailureKind =
-    | GracefulShutdown
-    | OldHostStop
-    | StagedHostLaunch
-    | StagedHostVerification
-    | StagedRegistry
-    | TerminalRecreation
-    | CommandDelivery
-
-[<RequireQualifiedAccess>]
-type internal ReplacementHostOutcome =
-    | OldHostRunning
-    | OldHostUnresolved
-    | StagedHostRetained
-    | NoHostRunning
-
-[<RequireQualifiedAccess>]
-type internal ReplacementStage =
-    | Captured of terminalCount: int * processCount: int * selectedSessionCount: int
-    | RecheckStarted
-    | RaceLost
-    | RecheckFailed
-    | GracefulShutdownStarted of processCount: int
-    | GracefulShutdownCompleted of completedCount: int * failedCount: int
-    | OldHostCloseStarted of ProcessIdentity option
-    | OldHostCloseConfirmed of ProcessIdentity option
-    | OldHostCloseUnconfirmed of ProcessIdentity option
-    | StagedHostLaunchStarted
-    | StagedHostLaunchRejected
-    | StagedHostStartedUnhealthy
-    | StagedHostRunning of ProcessIdentity option
-    | TerminalRecreationStarted of terminalCount: int * selectedSessionCount: int
-    | TerminalRecreationCompleted of recreatedCount: int * deliveredCommandCount: int
-    | Failed of ReplacementFailureKind * ReplacementHostOutcome * ProcessIdentity option
-    | Completed
-
-[<RequireQualifiedAccess>]
 type internal TeardownTarget =
     | Terminal
     | Worktree
@@ -151,10 +107,8 @@ type internal Diagnostic =
     | BridgeRegistration of BridgeRegistrationDiagnostic
     | MultipleSessionsObserved of MultipleSessionsDiagnostic
     | SameSessionMultiplicityObserved of SameSessionMultiplicityDiagnostic
-    | TerminalConversationAnomalyObserved of TerminalConversationAnomalyDiagnostic
     | ShutdownTransition of ShutdownDiagnostic
     | ExactClosure of ExactClosureDiagnostic
-    | ReplacementTransition of ReplacementStage
     | TeardownTransition of TeardownStage
 
 type internal Sink = Diagnostic -> unit
@@ -188,7 +142,6 @@ let private boundaryText =
     function
     | ObservationBoundary.Presence -> "presence"
     | ObservationBoundary.Bridge -> "bridge"
-    | ObservationBoundary.Replacement -> "replacement"
 
 let private shutdownRejectionText =
     function
@@ -199,60 +152,6 @@ let private shutdownRejectionText =
     | ShutdownRejection.Rejected -> "endpoint_rejected"
     | ShutdownRejection.RequestFailed -> "request_failed"
     | ShutdownRejection.VerificationFailed -> "verification_failed"
-
-let private replacementFailureText =
-    function
-    | ReplacementFailureKind.GracefulShutdown -> "graceful_shutdown"
-    | ReplacementFailureKind.OldHostStop -> "old_host_stop"
-    | ReplacementFailureKind.StagedHostLaunch -> "staged_host_launch"
-    | ReplacementFailureKind.StagedHostVerification -> "staged_host_verification"
-    | ReplacementFailureKind.StagedRegistry -> "staged_registry"
-    | ReplacementFailureKind.TerminalRecreation -> "terminal_recreation"
-    | ReplacementFailureKind.CommandDelivery -> "command_delivery"
-
-let private replacementHostOutcomeText =
-    function
-    | ReplacementHostOutcome.OldHostRunning -> "old_host_running"
-    | ReplacementHostOutcome.OldHostUnresolved -> "old_host_unresolved"
-    | ReplacementHostOutcome.StagedHostRetained -> "staged_host_retained"
-    | ReplacementHostOutcome.NoHostRunning -> "no_host_running"
-
-let private formatReplacementStage =
-    function
-    | ReplacementStage.Captured(terminalCount, processCount, selectedSessionCount) ->
-        $"event=replacement stage=captured terminal_count={terminalCount} process_count={processCount} selected_session_count={selectedSessionCount}"
-    | ReplacementStage.RecheckStarted ->
-        "event=replacement stage=recheck_started"
-    | ReplacementStage.RaceLost ->
-        "event=replacement stage=race_lost"
-    | ReplacementStage.RecheckFailed ->
-        "event=replacement stage=recheck_failed"
-    | ReplacementStage.GracefulShutdownStarted processCount ->
-        $"event=replacement stage=graceful_shutdown_started process_count={processCount}"
-    | ReplacementStage.GracefulShutdownCompleted(completedCount, failedCount) ->
-        $"event=replacement stage=graceful_shutdown_completed completed_count={completedCount} failed_count={failedCount}"
-    | ReplacementStage.OldHostCloseStarted identity ->
-        $"event=replacement stage=old_host_close_started host_process={optionText processIdentityText identity}"
-    | ReplacementStage.OldHostCloseConfirmed identity ->
-        $"event=replacement stage=old_host_close_confirmed host_process={optionText processIdentityText identity}"
-    | ReplacementStage.OldHostCloseUnconfirmed identity ->
-        $"event=replacement stage=old_host_close_unconfirmed host_process={optionText processIdentityText identity}"
-    | ReplacementStage.StagedHostLaunchStarted ->
-        "event=replacement stage=staged_host_launch_started"
-    | ReplacementStage.StagedHostLaunchRejected ->
-        "event=replacement stage=staged_host_launch_rejected"
-    | ReplacementStage.StagedHostStartedUnhealthy ->
-        "event=replacement stage=staged_host_started_unhealthy"
-    | ReplacementStage.StagedHostRunning identity ->
-        $"event=replacement stage=staged_host_running host_process={optionText processIdentityText identity}"
-    | ReplacementStage.TerminalRecreationStarted(terminalCount, selectedSessionCount) ->
-        $"event=replacement stage=terminal_recreation_started terminal_count={terminalCount} selected_session_count={selectedSessionCount}"
-    | ReplacementStage.TerminalRecreationCompleted(recreatedCount, deliveredCommandCount) ->
-        $"event=replacement stage=terminal_recreation_completed recreated_count={recreatedCount} delivered_command_count={deliveredCommandCount}"
-    | ReplacementStage.Failed(failure, hostOutcome, identity) ->
-        $"event=replacement stage=failed failure={replacementFailureText failure} host_state={replacementHostOutcomeText hostOutcome} host_process={optionText processIdentityText identity}"
-    | ReplacementStage.Completed ->
-        "event=replacement stage=completed"
 
 let private formatTeardownStage =
     function
@@ -321,20 +220,6 @@ let internal format =
                 multiplicity.TerminalSessionIds
 
         $"event=same_session_multiplicity boundary={boundaryText multiplicity.Boundary} session={sessionIdText multiplicity.SessionId} {processFields} {terminalFields} unattributed_process_count={multiplicity.UnattributedProcessCount}"
-    | Diagnostic.TerminalConversationAnomalyObserved multiplicity ->
-        let retainedFields =
-            boundedFields
-                "retained_sessions"
-                sessionIdText
-                multiplicity.RetainedSessionIds
-
-        let processFields =
-            boundedFields
-                "processes"
-                processIdentityText
-                multiplicity.ProcessIdentities
-
-        $"event=terminal_origin_conversation_anomaly terminal={terminalSessionIdText multiplicity.TerminalSessionId} selected_session={optionText sessionIdText multiplicity.SelectedSessionId} {retainedFields} {processFields}"
     | Diagnostic.ShutdownTransition shutdown ->
         let stage =
             match shutdown.Stage with
@@ -355,8 +240,6 @@ let internal format =
             | ExactClosureOutcome.Failed -> "failed"
 
         $"event=exact_closure source=terminal_teardown outcome={outcome} process={processIdentityText closure.ProcessIdentity} session={sessionIdText closure.SessionId} terminal={terminalSessionIdText closure.TerminalSessionId}"
-    | Diagnostic.ReplacementTransition stage ->
-        formatReplacementStage stage
     | Diagnostic.TeardownTransition stage ->
         formatTeardownStage stage
 

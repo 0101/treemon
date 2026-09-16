@@ -29,6 +29,7 @@ type Model =
       IsLoading: bool
       HasError: bool
       SortMode: SortMode
+      TerminalHostUpdate: TerminalHostUpdateState
       IsCompact: bool
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
@@ -73,6 +74,8 @@ type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
     | DataFailed of exn
     | ToggleSort
+    | UpdateTerminalHost
+    | TerminalHostUpdateCompleted of TerminalHostUpdateState
     | ToggleCompact
     | ToggleCollapse of repoId: RepoId
     | Tick of now: float

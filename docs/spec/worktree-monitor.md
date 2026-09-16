@@ -19,6 +19,10 @@
 - Scheduler footer: one row per refresh category, persistent status (never reverts to "pending")
 - Loading skeleton on cold start until first worktree list completes
 - Fixed header bar with system metrics and deploy branch badge
+- A staged TerminalHost update adds one neutral
+  **Update TerminalHost (restarts sessions)** action beside Sort. Clicking it blocks the complete UI
+  until the forward-only terminal maintenance transaction succeeds or enters its permanent fatal
+  state; see `docs/spec/embedded-terminal.md`.
 - Header workspace ratios follow the fixed `Terminal | Canvas | Dashboard` order: `1:1:1`,
   `1:2:1`, and `2:2:1`. With either Terminal or Canvas hidden, the controls become `1:1` and `2:1`
   for the remaining pane and Dashboard; both wide modes use `2:1` and retain their three-pane
@@ -335,14 +339,14 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/GitBranchSync.fs` | Bounded mechanical sync of a worktree onto its base and non-force branch push |
 | `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, upstream remote, and the raw `diffCategories` read |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
-| `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
+| `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring, `DashboardResponse` assembly, and the TerminalHost update trigger |
 | `src/Server/HttpSecurity.fs` | Shared loopback Origin/Referer guard for state-changing HTTP routes |
 | `src/Server/Log.fs` | Stable production log selection and unique per-process non-production log paths |
 | `src/Server/PathUtils.fs` | Canonical path normalization and `RepoId` / `WorktreePath` construction |
 | `src/Server/SessionManager.fs` | Explicit native card-terminal spawn/focus/kill and persistence |
 | `src/Server/TerminalLaunch.fs` | Shared native-versus-embedded terminal launch policy |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
-| `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, `appSubscriptions`, top-level `view` wiring |
+| `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, TerminalHost update overlay, subscriptions, and top-level view wiring |
 | `src/Client/CardViews.fs` | Worktree card rendering, including the persistent circular two-arrow auto-sync toggle, action buttons, badges, and event-log helpers |
 | `src/Client/OverviewViews.fs` | Status-overview row + scheduler footer rendering |
 | `src/Client/MascotState.fs` / `MascotView.fs` | Mascot eyes: gaze slice + eye SVG render (observes `ActivityLevel`) |

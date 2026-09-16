@@ -172,7 +172,7 @@
     </PropertyGroup>
     <MSBuild Projects="..\TerminalHost\TerminalHost.fsproj"
              Targets="Publish"
-             Properties="Configuration=$(Configuration);PublishDir=$(_TerminalHostPublishDir);SelfContained=false" />
+             Properties="Configuration=$(Configuration);PublishDir=$(_TerminalHostPublishDir);SelfContained=false;IncludeSourceRevisionInInformationalVersion=false" />
   </Target>
 
 </Project>

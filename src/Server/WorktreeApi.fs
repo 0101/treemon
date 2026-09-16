@@ -20,6 +20,8 @@ let loadFixtures (path: string) : Result<FixtureData, string> =
         // Sanitize null lists — Fable.Remoting client can't deserialize null as F# list
         let sanitized =
             { data with
+                Worktrees.TerminalHostUpdate =
+                    TerminalHostUpdateState.Unavailable
                 Worktrees.Repos =
                     data.Worktrees.Repos
                     |> List.map (fun r ->
@@ -55,6 +57,11 @@ let readOnlyApi
       startAgent = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       getEmbeddedTerminals = fun () -> async { return EmbeddedTerminalSnapshot.empty }
       closeEmbeddedTerminal = fun _ -> async { return Ok EmbeddedTerminalSnapshot.empty }
+      updateTerminalHost =
+        fun () ->
+            async {
+                return TerminalHostUpdateState.Unavailable
+            }
       openEditor = fun _ -> async { return () }
       toggleAutoSync = fun _ _ -> async { return Error $"Auto-sync is not available in {modeName}" }
       deleteWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
@@ -486,6 +493,7 @@ let getWorktrees
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (activityStore: SessionActivityStore.SessionActivityStore option)
+    (embeddedTerminal: EmbeddedTerminal.Manager)
     (rootPaths: Map<RepoId, string>)
     (appVersion: string)
     (deployBranch: string option)
@@ -493,6 +501,8 @@ let getWorktrees
     async {
         let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
+        let! terminalHostUpdate =
+            EmbeddedTerminal.getUpdateState embeddedTerminal
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
         let inputs = loadRepoAssemblyInputs DateTimeOffset.UtcNow activityStore rootPaths
@@ -511,7 +521,8 @@ let getWorktrees
               TerminalPaneOpen = readTerminalPaneOpen ()
               CanvasPaneOpen = readCanvasPaneOpen ()
               OverviewPanelOpen = readOverviewPanelOpen ()
-              WorkspaceWidth = readWorkspaceWidth () }
+              WorkspaceWidth = readWorkspaceWidth ()
+              TerminalHostUpdate = terminalHostUpdate }
     }
 
 let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePath) =
@@ -701,7 +712,7 @@ let internal diffCategoryReport (repoRoot: string) : Async<Result<DiffCategoryRe
 /// `string option`, so a positional call could transpose them silently, and the three optional
 /// stores read as a run of bare `None`s at every call site. Naming each one makes the fixture-mode
 /// wiring readable and a swap a compile error.
-type WorktreeApiDependencies =
+type internal WorktreeApiDependencies =
     { Agent: MailboxProcessor<SchedulerState.StateMsg>
       CardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>
       SessionAgent: SessionManager.SessionAgent
@@ -710,6 +721,8 @@ type WorktreeApiDependencies =
       ActivityStore: SessionActivityStore.SessionActivityStore option
       SnapshotStore: OverviewSnapshotStore.OverviewSnapshotStore option
       AutoSyncStore: AutoSyncStore.Store option
+      TerminalHostRestartSessions:
+        TerminalHostReplacement.RestartSessionQuery option
       WorktreeRoots: string list
       TestFixtures: string option
       AppVersion: string
@@ -727,6 +740,7 @@ let internal worktreeApiWithLaunch
           ActivityStore = activityStore
           SnapshotStore = snapshotStore
           AutoSyncStore = autoSyncStore
+          TerminalHostRestartSessions = terminalHostRestartSessions
           WorktreeRoots = worktreeRoots
           TestFixtures = testFixtures
           AppVersion = appVersion
@@ -856,12 +870,33 @@ let internal worktreeApiWithLaunch
             getEmbeddedTerminals = getEmbeddedTerminals
             closeEmbeddedTerminal = closeEmbeddedTerminal }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
+        { getWorktrees =
+            fun () ->
+                getWorktrees
+                    agent
+                    sessionAgent
+                    activityStore
+                    embeddedTerminal
+                    rootPaths
+                    appVersion
+                    deployBranch
           openTerminal = openTerminal validatePath terminalLaunch.OpenNativeTerminal
           startEmbeddedTerminal = startEmbeddedTerminal
           startAgent = startAgent
           getEmbeddedTerminals = getEmbeddedTerminals
           closeEmbeddedTerminal = closeEmbeddedTerminal
+          updateTerminalHost =
+            fun () ->
+                match terminalHostRestartSessions with
+                | Some snapshot ->
+                    EmbeddedTerminal.updateTerminalHost
+                        embeddedTerminal
+                        snapshot
+                | None ->
+                    async {
+                        return
+                            TerminalHostUpdateState.Unavailable
+                    }
           openEditor = openEditor validatePath
           toggleAutoSync = fun wtPath enabled ->
               let path = WorktreePath.value wtPath
@@ -1238,7 +1273,9 @@ let internal worktreeApiWithLaunch
                             )
                     } }
 
-let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
+let internal worktreeApi
+    (dependencies: WorktreeApiDependencies)
+    : IWorktreeApi =
     worktreeApiWithLaunch
         (TerminalLaunch.create
             dependencies.SessionAgent

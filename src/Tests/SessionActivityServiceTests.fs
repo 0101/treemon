@@ -79,82 +79,33 @@ let private queryOwnedOk
         Assert.Fail $"expected owned-session snapshot, got Error: {error}"
         failwith "unreachable"
 
-let private queryActivityOk
-    (service: SessionActivityService)
-    terminalSessionIds
-    : int64 * StoredInstance list =
-    match service.QueryTerminalActivity terminalSessionIds with
-    | Ok(epoch, instances, _) -> epoch, instances
-    | Error error ->
-        Assert.Fail $"expected terminal activity snapshot, got Error: {error}"
-        failwith "unreachable"
-
-let private replacementTerminal
+let private hostedTerminal
     terminalSessionId
     worktreePath
-    : TerminalHostReplacement.ReplacementTerminal =
+    : TerminalHostReplacement.HostedTerminal =
     { TerminalSessionId = terminalSessionId
       WorktreePath = worktreePath }
 
-let private replacementResume sessionId command:
-    TerminalHostReplacement.ReplacementResumeCommand =
-    { CopilotSessionId = SessionId sessionId
-      Command = command }
-
-let private queryReplacementPlanOk
+let private restartSessionsOk
     (service: SessionActivityService)
     now
     terminals
     =
     match
-        queryReplacementPlan
+        restartSessions
             CodingToolStatus.readConfiguredProvider
             (fun ids -> service.QueryTerminalActivity ids)
             now
             terminals
     with
-    | Ok plan -> plan
+    | Ok sessions -> sessions
     | Error error ->
-        Assert.Fail $"expected replacement session plan, got Error: {error}"
+        Assert.Fail $"expected restart-session snapshot, got Error: {error}"
         failwith "unreachable"
 
-let private requireReplacementReady =
-    function
-    | TerminalHostReplacement.ReplacementSessionPlan.Ready(
-        epoch,
-        shutdownTargets,
-        commands
-      ) ->
-        epoch, shutdownTargets, commands
-    | TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle _ ->
-        Assert.Fail "expected a ready replacement session plan"
-        failwith "unreachable"
-
-let private waitingForIdle pendingReconciliationCount nonIdleSessionCount =
-    TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
-        { PendingReconciliationCount = pendingReconciliationCount
-          NonIdleSessionCount = nonIdleSessionCount }
-
-/// Distinct exact terminal origins shared by the ownership/replacement fixtures.
 let private terminalA = TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 let private terminalB = TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 let private terminalC = TerminalSessionId "cccccccccccccccccccccccccccccccc"
-
-/// An open exact session as the ownership snapshot projects it for one terminal.
-let private openSession terminalSessionId sessionId status =
-    { ProcessIdentity = syntheticProcessIdentityForSessionId sessionId
-      TerminalSessionId = terminalSessionId
-      CopilotSessionId = SessionId sessionId
-      Status = status }
-
-/// The provider-specific Resume command the session orchestration layer must emit for a durable
-/// conversation, keyed by the exact terminal that owns it.
-let private resumeCommandsFor entries =
-    entries
-    |> List.map (fun (terminalSessionId, sessionId) ->
-        terminalSessionId,
-        replacementResume sessionId $"copilot --experimental --yolo --session-id='{sessionId}'")
-    |> Map.ofList
 
 // --- Service / store fixture -------------------------------------------------------------------
 
@@ -1944,7 +1895,7 @@ type TerminalOwnershipQueryTests() =
         )
 
     [<Test>]
-    member _.``stale durable terminal history is not a replacement candidate``() =
+    member _.``stale durable terminal history is not a restart candidate``() =
         let oldTerminal = terminalA
         let freshTerminal = terminalB
         let at = ts "2026-03-01T12:01:00Z"
@@ -1965,554 +1916,103 @@ type TerminalOwnershipQueryTests() =
 
             let live = service.LiveSnapshot()
             let retained = queryOwnedOk service at (Set.singleton oldTerminal)
-
-            let _, shutdownTargets, resumeCommands =
-                queryReplacementPlanOk service at [ replacementTerminal oldTerminal "C:/wt/a" ]
-                |> requireReplacementReady
+            let restartSnapshot =
+                restartSessionsOk
+                    service
+                    at
+                    [ hostedTerminal oldTerminal "C:/wt/a" ]
 
             Assert.Multiple(fun () ->
-                Assert.That(live |> Map.keys |> Seq.toList, Is.EqualTo([ SessionId "fresh" ]))
+                Assert.That(
+                    live |> Map.keys |> Seq.toList,
+                    Is.EqualTo([ SessionId "fresh" ])
+                )
                 Assert.That(retained.OpenSessions, Is.Empty)
-                Assert.That(shutdownTargets, Is.Empty)
-                Assert.That(resumeCommands, Is.Empty)))
+                Assert.That(restartSnapshot, Is.Empty)))
 
     [<Test>]
-    member _.``epoch pruning keeps retained and current origins and never reuses sequence values``() =
-        let current = terminalA
-        let retained = terminalB
-        let expired = terminalC
-
-        let initial =
-            emptyTerminalOriginEpochState
-            |> recordTerminalOriginActivity (Set.singleton current)
-
-        let firstCurrentEpoch, withCurrent =
-            observeCurrentTerminalOrigins (Set.singleton current) initial
-
-        let beforePrune =
-            withCurrent
-            |> recordTerminalOriginActivity (Set.ofList [ retained; expired ])
-
-        let pruned =
-            beforePrune
-            |> pruneTerminalOriginEpochs (Set.singleton retained)
-
-        let currentEpoch, _ =
-            observeCurrentTerminalOrigins (Set.singleton current) pruned
-
-        let retainedEpoch, _ =
-            observeCurrentTerminalOrigins (Set.singleton retained) pruned
-
-        let expiredEpoch, withoutExpired =
-            observeCurrentTerminalOrigins (Set.singleton expired) pruned
-
-        let reused =
-            withoutExpired
-            |> recordTerminalOriginActivity (Set.singleton current)
-
-        let nextCurrentEpoch, _ =
-            observeCurrentTerminalOrigins (Set.singleton current) reused
-
-        Assert.Multiple(fun () ->
-            Assert.That(firstCurrentEpoch, Is.GreaterThan 0L)
-            Assert.That(currentEpoch, Is.EqualTo firstCurrentEpoch)
-            Assert.That(retainedEpoch, Is.GreaterThan firstCurrentEpoch)
-            Assert.That(expiredEpoch, Is.Zero)
-            Assert.That(
-                nextCurrentEpoch,
-                Is.GreaterThan retainedEpoch,
-                "pruning an origin must not reset the monotonic global sequence"
-            ))
-
-    [<Test>]
-    member _.``retention sweep removes stale live state and inactive terminal epochs``() =
-        let current = terminalA
-        let expired = terminalB
-        let oldAt = ts "2026-01-01T10:00:00Z"
-        let now = oldAt + retentionPeriod + TimeSpan.FromDays 1.0
-
-        withService "C:/wt/a" (fun (service, _, store) ->
-            queryActivityOk service (Set.singleton current) |> ignore
-
-            { mkReport "expired" "C:/wt/a" "expired-event" "2026-01-01T10:00:00Z" TurnStarted with
-                TerminalSessionId = Some expired }
-            |> service.Submit
-
-            service.LiveSnapshot() |> ignore
-            service.RunRetention now
-
-            let activityEpoch, sessions =
-                queryActivityOk service (Set.singleton expired)
-
-            Assert.Multiple(fun () ->
-                Assert.That(service.LiveSnapshot(), Is.Empty)
-                Assert.That(activityEpoch, Is.Zero)
-                Assert.That(sessions, Is.Empty)
-                Assert.That(store.StatusBySession(SessionId "expired"), Is.EqualTo None)))
-
-    [<Test>]
-    member _.``replacement policy binds the provider command to its exact terminal``() =
-        let ownedTerminal = terminalA
-        let plainTerminal = terminalB
-        let ownedPath = "C:/wt/owned"
+    member _.``restart snapshot includes active and idle durable sessions but omits empty shells``() =
+        let now = ts "2026-03-01T12:00:00Z"
+        let active =
+            { ownedStored terminalA "active-session" now with
+                Status =
+                    { emptyStatus with
+                        Status = SessionLevelStatus.Working } }
+        let idle = ownedStored terminalB "idle-session" now
+        let emptyTerminal = TerminalSessionId "dddddddddddddddddddddddddddddddd"
         let terminals =
-            [ replacementTerminal ownedTerminal ownedPath
-              replacementTerminal plainTerminal "C:/wt/plain" ]
+            [ hostedTerminal terminalA "C:/wt/active"
+              hostedTerminal terminalB "C:/wt/idle"
+              hostedTerminal emptyTerminal "C:/wt/empty" ]
 
-        let snapshot: OwnedSessionSnapshot =
-            { ActivityEpoch = 17L
-              OpenSessions =
-                [ openSession ownedTerminal "provider-owned-session" SessionLevelStatus.Idle ]
-              PendingReconciliation = Set.empty
-              ReplacementSessionIds =
-                Map.ofList [ ownedTerminal, SessionId "provider-owned-session" ] }
-
-        let resolveProvider (path: string) =
-            Assert.That(
-                path,
-                Is.EqualTo ownedPath,
-                "only the live replacement terminal selects a provider from its own worktree"
-            )
-
-            Some CopilotCli
-
-        let epoch, shutdownTargets, commands =
-            replacementSessionPlan resolveProvider terminals snapshot
-            |> requireReplacementReady
-
-        let expectedShutdownTarget: TerminalHostReplacement.ReplacementShutdownTarget =
-            { TerminalSessionId = ownedTerminal
-              WorktreePath = ownedPath
-              CopilotSessionId = SessionId "provider-owned-session"
-              ProcessIdentity = syntheticProcessIdentityForSessionId "provider-owned-session" }
+        let sessions =
+            match
+                restartSessions
+                    (fun _ -> Some CopilotCli)
+                    (fun _ -> Ok [ active; idle ])
+                    now
+                    terminals
+            with
+            | Ok value -> value
+            | Error error ->
+                Assert.Fail error
+                []
 
         Assert.Multiple(fun () ->
-            Assert.That(epoch, Is.EqualTo snapshot.ActivityEpoch)
-            Assert.That(shutdownTargets, Is.EqualTo([ expectedShutdownTarget ]))
             Assert.That(
-                commands,
-                Is.EqualTo(resumeCommandsFor [ ownedTerminal, "provider-owned-session" ]),
-                "the unrelated terminal remains a plain shell"
+                sessions |> List.map _.WorktreePath,
+                Is.EqualTo([ "C:/wt/active"; "C:/wt/idle" ])
+            )
+            Assert.That(
+                sessions[0].Command,
+                Does.Contain("--session-id='active-session'")
+            )
+            Assert.That(
+                sessions[1].Command,
+                Does.Contain("--session-id='idle-session'")
+            )
+            Assert.That(
+                sessions
+                |> List.forall (fun session ->
+                    not (
+                        session.Command.Contains(
+                            " resume ",
+                            StringComparison.OrdinalIgnoreCase
+                        )
+                    )),
+                Is.True
             ))
 
     [<Test>]
-    member _.``one terminal keeps every exact shutdown target but selects one resume conversation``() =
-        let terminal = terminalA
-        let now = ts "2026-03-01T10:05:00Z"
+    member _.``one terminal restarts only its greatest-activity durable session``() =
+        let now = ts "2026-03-01T12:00:00Z"
         let older =
-            { ownedStored terminal "older-conversation" now with
+            { ownedStored terminalA "older-session" now with
                 UpdatedAt = now.AddMinutes(-2.0) }
         let newer =
-            { ownedStored terminal "newer-conversation" now with
+            { ownedStored terminalA "newer-session" now with
                 UpdatedAt = now.AddMinutes(-1.0) }
 
-        let snapshot =
-            ownedSessionSnapshot now (Set.singleton terminal) (19L, [ older; newer ], Set.empty)
-
-        let _, shutdownTargets, resumeCommands =
-            replacementSessionPlan
-                (fun _ -> Some CopilotCli)
-                [ replacementTerminal terminal "C:/wt/a" ]
-                snapshot
-            |> requireReplacementReady
-
-        let bothProcesses = Set.ofList [ older.ProcessIdentity; newer.ProcessIdentity ]
-
-        Assert.Multiple(fun () ->
-            Assert.That(
-                snapshot.OpenSessions |> List.map _.ProcessIdentity |> Set.ofList,
-                Is.EqualTo bothProcesses,
-                "every physical process remains an exact shutdown target"
-            )
-            Assert.That(
-                snapshot.ReplacementSessionIds,
-                Is.EqualTo(Map.ofList [ terminal, SessionId "newer-conversation" ]),
-                "only the greatest-activity conversation is selected for automatic Resume"
-            )
-            Assert.That(
-                shutdownTargets |> List.map _.ProcessIdentity |> Set.ofList,
-                Is.EqualTo bothProcesses,
-                "both physical processes must be returned as independent shutdown targets"
-            )
-            Assert.That(
-                resumeCommands,
-                Is.EqualTo(resumeCommandsFor [ terminal, "newer-conversation" ]),
-                "only the selected durable conversation receives an automatic Resume command"
-            ))
-
-    [<Test>]
-    member _.``replacement queries per-instance reconciliation immediately without a global startup delay``() =
-        let now = ts "2026-03-01T10:00:00Z"
-        let terminal = replacementTerminal terminalA "C:/wt/a"
-
-        // Test-boundary mutation records whether the policy query was invoked.
-        let mutable queried = false
-
-        let result =
-            queryReplacementPlan
-                (fun _ -> Some CopilotCli)
-                (fun _ ->
-                    queried <- true
-                    Ok(7L, [], Set.empty))
-                now
-                [ terminal ]
-
-        Assert.Multiple(fun () ->
-            Assert.That(queried, Is.True)
-            Assert.That(
-                result,
-                Is.EqualTo(
-                    Ok(TerminalHostReplacement.ReplacementSessionPlan.Ready(7L, [], Map.empty))
-                    : Result<TerminalHostReplacement.ReplacementSessionPlan, string>
-                )
-            ))
-
-    [<Test>]
-    member _.``terminal activity resolver failures include elapsed query time``() =
-        let terminalSessionId = terminalC
-        let now = DateTimeOffset.UtcNow
-        let identity =
-            syntheticProcessIdentityForProcessId
-                (syntheticProcessIdForSessionId "failing-query")
-
-        let resolver =
-            ProcessIdentityResolver.create (fun _ ->
-                Error "simulated process query failure")
-
-        let seed (store: SessionActivityStore) =
-            { instanceOf
-                "failing-query"
-                "C:/wt/a"
-                emptyStatus
-                now
-                now with
-                ProcessIdentity = identity
-                TerminalSessionId = Some terminalSessionId }
-            |> store.UpsertStatus
-            |> ignore
-
-        withServiceSeededAndPathUsingResolver
-            "C:/wt/a"
-            seed
-            resolver
-            (fun (service, _, _, _) ->
-                service.StartAt now
-
-                match
-                    service.QueryTerminalActivityAt(
-                        now,
-                        Set.singleton terminalSessionId
-                    )
-                with
-                | Ok _ -> Assert.Fail "Resolver failure unexpectedly succeeded"
-                | Error error ->
-                    Assert.That(
-                        error,
-                        Does.Contain("simulated process query failure")
-                    )
-                    Assert.That(
-                        error,
-                        Does.Match("activity query failed after [0-9]+ms")
-                    ))
-
-    [<Test>]
-    member _.``terminal activity mailbox timeouts include elapsed query time``() =
-        let terminalSessionId = terminalC
-        let now = DateTimeOffset.UtcNow
-        let identity =
-            syntheticProcessIdentityForProcessId
-                (syntheticProcessIdForSessionId "timed-out-query")
-        use releaseResolver = new System.Threading.ManualResetEventSlim(false)
-
-        let resolver =
-            ProcessIdentityResolver.create (fun _ ->
-                releaseResolver.Wait()
-                Ok(Some identity))
-
-        let seed (store: SessionActivityStore) =
-            { instanceOf
-                "timed-out-query"
-                "C:/wt/a"
-                emptyStatus
-                now
-                now with
-                ProcessIdentity = identity
-                TerminalSessionId = Some terminalSessionId }
-            |> store.UpsertStatus
-            |> ignore
-
-        withServiceSeededAndPathUsingResolver
-            "C:/wt/a"
-            seed
-            resolver
-            (fun (service, _, _, _) ->
-                service.StartAt now
-
-                try
-                    match
-                        service.QueryTerminalActivityAt(
-                            now,
-                            Set.singleton terminalSessionId
-                        )
-                    with
-                    | Ok _ ->
-                        Assert.Fail "Timed-out activity query unexpectedly succeeded"
-                    | Error error ->
-                        Assert.That(
-                            error,
-                            Does.Match(
-                                "^exact terminal activity query failed after [0-9]+ms$"
-                            )
-                        )
-                finally
-                    releaseResolver.Set())
-
-    [<Test>]
-    member _.``fresh waiting session gates until input completes``() =
-        let terminalSessionId = terminalA
-        let worktreePath = "C:/wt/a"
-        let awaitingAt = ts "2026-03-01T10:00:00Z"
-        let completedAt = ts "2026-03-01T10:01:00Z"
-        let now = ts "2026-03-01T10:02:30Z"
-        let waiting =
-            { ownedStored terminalSessionId "waiting" awaitingAt with
-                Status = fold emptyStatus (AwaitingUserInput(None, awaitingAt)) }
-
-        let newerIdle =
-            ownedStored terminalSessionId "newer-idle" (ts "2026-03-01T10:02:00Z")
-
-        let planFor sessions =
-            ownedSessionSnapshot now (Set.singleton terminalSessionId) (31L, sessions, Set.empty)
-            |> fun snapshot ->
-                snapshot,
-                replacementSessionPlan
+        let sessions =
+            match
+                restartSessions
                     (fun _ -> Some CopilotCli)
-                    [ replacementTerminal terminalSessionId worktreePath ]
-                    snapshot
-
-        let _, waitingPlan = planFor [ waiting; newerIdle ]
-
-        Assert.That(
-            waitingPlan,
-            Is.EqualTo(waitingForIdle 0 1),
-            "most-recent selection applies to the live resume identity, not to the all-session idle gate"
-        )
-
-        let completed =
-            { waiting with
-                Status = fold waiting.Status (UserInputCompleted completedAt)
-                UpdatedAt = completedAt
-                LastSeen = completedAt }
-
-        let completedSnapshot, completedPlan = planFor [ completed; newerIdle ]
-        let epoch, shutdownTargets, resumeCommands = requireReplacementReady completedPlan
+                    (fun _ -> Ok [ older; newer ])
+                    now
+                    [ hostedTerminal terminalA "C:/wt/shared" ]
+            with
+            | Ok value -> value
+            | Error error ->
+                Assert.Fail error
+                []
 
         Assert.Multiple(fun () ->
-            Assert.That(epoch, Is.EqualTo completedSnapshot.ActivityEpoch)
-            Assert.That(shutdownTargets.Length, Is.EqualTo(2))
+            Assert.That(sessions.Length, Is.EqualTo 1)
             Assert.That(
-                resumeCommands,
-                Is.EqualTo(resumeCommandsFor [ terminalSessionId, "newer-idle" ])
+                sessions.Head.Command,
+                Does.Contain("--session-id='newer-session'")
+            )
+            Assert.That(
+                sessions.Head.Command,
+                Does.Not.Contain("older-session")
             ))
-
-    [<Test>]
-    member _.``only exact current terminal origins join and advance their activity epoch``() =
-        let now = ts "2026-03-01T10:00:30Z"
-        let replacementTarget = replacementTerminal terminalA "C:/wt/a"
-
-        let withOrigin terminalSessionId (report: SessionActivityReport) =
-            { report with TerminalSessionId = Some terminalSessionId }
-
-        withService "C:/wt/a" (fun (service, _, store) ->
-            present service "owned" "C:/wt/a" (ts "2026-03-01T10:00:00Z") |> ignore
-            mkReport "owned" "C:/wt/a" "owned-idle" "2026-03-01T10:00:00Z" TurnEnded
-            |> withOrigin terminalA
-            |> service.Submit
-
-            mkReport
-                "owned"
-                "C:/wt/a"
-                "owned-background"
-                "2026-03-01T10:00:05Z"
-                (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:05Z"))
-            |> withOrigin terminalA
-            |> service.Submit
-
-            let working =
-                queryOwnedOk service now (Set.singleton terminalA)
-
-            Assert.Multiple(fun () ->
-                Assert.That(working.ActivityEpoch, Is.GreaterThan 0L)
-                Assert.That(
-                    working.OpenSessions,
-                    Is.EqualTo([ openSession terminalA "owned" SessionLevelStatus.Working ])
-                )
-                Assert.That(
-                    working.ReplacementSessionIds,
-                    Is.EqualTo(Map.ofList [ terminalA, SessionId "owned" ])
-                )
-                Assert.That(
-                    queryReplacementPlanOk service now [ replacementTarget ],
-                    Is.EqualTo(waitingForIdle 0 1)
-                ))
-
-            present
-                service
-                "same-worktree-unowned"
-                "C:/wt/a"
-                (ts "2026-03-01T10:00:10Z")
-            |> ignore
-            mkReport "same-worktree-unowned" "C:/wt/a" "unowned" "2026-03-01T10:00:10Z" TurnStarted
-            |> service.Submit
-
-            present service "other-terminal" "C:/wt/a" (ts "2026-03-01T10:00:11Z") |> ignore
-            mkReport "other-terminal" "C:/wt/a" "other" "2026-03-01T10:00:11Z" TurnStarted
-            |> withOrigin terminalB
-            |> service.Submit
-
-            let afterUnrelated =
-                queryOwnedOk service now (Set.singleton terminalA)
-
-            Assert.Multiple(fun () ->
-                Assert.That(afterUnrelated.ActivityEpoch, Is.EqualTo working.ActivityEpoch)
-                Assert.That(
-                    afterUnrelated.OpenSessions |> List.map _.CopilotSessionId,
-                    Is.EqualTo([ SessionId "owned" ])
-                )
-                Assert.That(
-                    queryReplacementPlanOk service now [ replacementTarget ],
-                    Is.EqualTo(waitingForIdle 0 1),
-                    "unowned same-worktree and other-terminal sessions cannot change the exact terminal policy"
-                ))
-
-            mkReport
-                "owned"
-                "C:/wt/a"
-                "owned-finished"
-                "2026-03-01T10:00:15Z"
-                (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:15Z"))
-            |> withOrigin terminalA
-            |> service.Submit
-
-            let idle =
-                queryOwnedOk service now (Set.singleton terminalA)
-            let policyEpoch, shutdownTargets, resumeCommands =
-                queryReplacementPlanOk service now [ replacementTarget ]
-                |> requireReplacementReady
-
-            Assert.Multiple(fun () ->
-                Assert.That(idle.ActivityEpoch, Is.GreaterThan afterUnrelated.ActivityEpoch)
-                Assert.That(idle.OpenSessions |> List.map _.Status, Is.EqualTo([ SessionLevelStatus.Idle ]))
-                Assert.That(policyEpoch, Is.EqualTo idle.ActivityEpoch)
-                Assert.That(
-                    shutdownTargets |> List.map _.ProcessIdentity,
-                    Is.EqualTo(idle.OpenSessions |> List.map _.ProcessIdentity)
-                )
-                Assert.That(
-                    resumeCommands,
-                    Is.EqualTo(resumeCommandsFor [ terminalA, "owned" ]),
-                    "the session orchestration layer selects the provider-specific resume command"
-                )
-                Assert.That(
-                    store.StatusBySession(SessionId "same-worktree-unowned")
-                    |> Option.bind _.TerminalSessionId,
-                    Is.EqualTo None
-                ))
-
-            mkReport "owned" "C:/wt/a" "origin-omitted" "2026-03-01T10:00:20Z" WentIdle
-            |> service.Submit
-
-            let retained =
-                queryOwnedOk service now (Set.singleton terminalA)
-            let retainedEpoch, retainedTargets, retainedCommands =
-                queryReplacementPlanOk service now [ replacementTarget ]
-                |> requireReplacementReady
-
-            Assert.Multiple(fun () ->
-                Assert.That(retained.ActivityEpoch, Is.GreaterThan idle.ActivityEpoch)
-                Assert.That(
-                    retained.OpenSessions,
-                    Is.EqualTo([ openSession terminalA "owned" SessionLevelStatus.Idle ]),
-                    "an omitted origin keeps the session attached to its exact terminal"
-                )
-                Assert.That(
-                    retained.ReplacementSessionIds,
-                    Is.EqualTo(Map.ofList [ terminalA, SessionId "owned" ])
-                )
-                Assert.That(retainedEpoch, Is.EqualTo retained.ActivityEpoch)
-                Assert.That(
-                    retainedTargets |> List.map _.ProcessIdentity,
-                    Is.EqualTo(retained.OpenSessions |> List.map _.ProcessIdentity)
-                )
-                Assert.That(retainedCommands, Is.EqualTo(resumeCommandsFor [ terminalA, "owned" ]))))
-
-    [<Test>]
-    member _.``startup reconciliation accepts a surviving session heartbeat before replacement``() =
-        let terminalSessionId = terminalC
-        let now = DateTimeOffset.UtcNow
-        let worktree = Path.Combine(Path.GetTempPath(), "treemon-owned-resume-worktree")
-        let replacementTarget = replacementTerminal terminalSessionId worktree
-
-        let seed (store: SessionActivityStore) =
-            { instanceOf
-                "surviving"
-                worktree
-                { emptyStatus with Status = SessionLevelStatus.Idle }
-                (now.AddMinutes(-1.0))
-                (now.AddMinutes(-1.0)) with
-                TerminalSessionId = Some terminalSessionId }
-            |> store.UpsertStatus
-
-        withServiceSeeded worktree seed (fun (service, _, _) ->
-            service.Start()
-            Assert.That(service.ExactSnapshot().Count, Is.EqualTo 1)
-            Assert.That(
-                queryReplacementPlanOk service now [ replacementTarget ],
-                Is.EqualTo(waitingForIdle 1 0)
-            )
-
-            let representedAt = now.AddMinutes(1.0)
-
-            let heartbeat =
-                { mkReport
-                    "surviving"
-                    worktree
-                    "surviving-heartbeat"
-                    (representedAt.ToString("O"))
-                    Heartbeat with
-                    TerminalSessionId = Some terminalSessionId }
-
-            service.Submit heartbeat
-            service.ExactSnapshot() |> ignore
-
-            Assert.That(
-                service.LiveSnapshot() |> Map.keys |> Seq.toList,
-                Is.EqualTo([ SessionId "surviving" ])
-            )
-
-            let snapshot =
-                queryOwnedOk service representedAt (Set.singleton terminalSessionId)
-
-            let policyEpoch, shutdownTargets, resumeCommands =
-                queryReplacementPlanOk service representedAt [ replacementTarget ]
-                |> requireReplacementReady
-
-            Assert.Multiple(fun () ->
-                Assert.That(snapshot.ActivityEpoch, Is.GreaterThan 0L)
-                Assert.That(
-                    snapshot.OpenSessions,
-                    Is.EqualTo([ openSession terminalSessionId "surviving" SessionLevelStatus.Idle ])
-                )
-                Assert.That(
-                    snapshot.ReplacementSessionIds,
-                    Is.EqualTo(Map.ofList [ terminalSessionId, SessionId "surviving" ])
-                )
-                Assert.That(policyEpoch, Is.EqualTo snapshot.ActivityEpoch)
-                Assert.That(
-                    shutdownTargets |> List.map _.ProcessIdentity,
-                    Is.EqualTo(snapshot.OpenSessions |> List.map _.ProcessIdentity)
-                )
-                Assert.That(
-                    resumeCommands,
-                    Is.EqualTo(resumeCommandsFor [ terminalSessionId, "surviving" ])
-                )))

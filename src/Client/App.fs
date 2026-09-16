@@ -29,6 +29,18 @@ let fetchEmbeddedTerminals (api: Lazy<IWorktreeApi>) =
         EmbeddedTerminalSnapshotChanged
         (fun _ -> EmbeddedTerminalPollFailed)
 
+let updateTerminalHost () =
+    Cmd.OfAsync.either
+        (fun () ->
+            worktreeApi.Value.updateTerminalHost ())
+        ()
+        TerminalHostUpdateCompleted
+        (fun _ ->
+            TerminalHostUpdateCompleted(
+                TerminalHostUpdateState.Fatal
+                    "The TerminalHost update request failed. Terminal actions remain blocked in this browser. Redeploy or restart Treemon manually from an external PowerShell window."
+            ))
+
 let fetchSyncStatus () =
     Cmd.OfAsync.perform (fun () -> worktreeApi.Value.getSyncStatus ()) () SyncStatusUpdate
 
@@ -88,6 +100,8 @@ let init () =
       IsLoading = true
       HasError = false
       SortMode = ByActivity
+      TerminalHostUpdate =
+        TerminalHostUpdateState.Unavailable
       IsCompact = false
       SchedulerEvents = []
       LatestByCategory = Map.empty
@@ -427,19 +441,57 @@ let private focusEmbeddedTerminalOrDashboardCmd terminalId =
 
 [<RequireQualifiedAccess>]
 type private ActiveOverlay =
+    | TerminalHostUpdate
     | WorktreeSearch
     | Confirmation
     | CreateWorktree
 
 let private activeOverlay model =
-    if WorktreeSearch.isOpen model.WorktreeSearch then
+    match model.TerminalHostUpdate with
+    | TerminalHostUpdateState.Updating
+    | TerminalHostUpdateState.Fatal _ ->
+        Some ActiveOverlay.TerminalHostUpdate
+    | TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available
+        when WorktreeSearch.isOpen model.WorktreeSearch ->
         Some ActiveOverlay.WorktreeSearch
-    elif model.ConfirmModal <> ConfirmModal.NoConfirm then
+    | TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available
+        when model.ConfirmModal <> ConfirmModal.NoConfirm ->
         Some ActiveOverlay.Confirmation
-    elif CreateWorktreeModal.isOpen model.CreateModal then
+    | TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available
+        when CreateWorktreeModal.isOpen model.CreateModal ->
         Some ActiveOverlay.CreateWorktree
-    else
+    | TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available ->
         None
+
+let private mergeTerminalHostUpdate current reported =
+    match current, reported with
+    | TerminalHostUpdateState.Updating,
+      TerminalHostUpdateState.Available ->
+        current
+    | TerminalHostUpdateState.Fatal _,
+      TerminalHostUpdateState.Fatal error ->
+        TerminalHostUpdateState.Fatal error
+    | TerminalHostUpdateState.Fatal _,
+      (TerminalHostUpdateState.Unavailable
+      | TerminalHostUpdateState.Available
+      | TerminalHostUpdateState.Updating) ->
+        current
+    | (TerminalHostUpdateState.Unavailable
+      | TerminalHostUpdateState.Available
+      | TerminalHostUpdateState.Updating),
+      ((TerminalHostUpdateState.Unavailable
+      | TerminalHostUpdateState.Available
+      | TerminalHostUpdateState.Updating) as next) ->
+        next
+    | (TerminalHostUpdateState.Unavailable
+      | TerminalHostUpdateState.Available
+      | TerminalHostUpdateState.Updating),
+      TerminalHostUpdateState.Fatal error ->
+        TerminalHostUpdateState.Fatal error
 
 let private canOpenOverlay model =
     activeOverlay model |> Option.isNone
@@ -557,6 +609,10 @@ let update msg model =
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
+                TerminalHostUpdate =
+                    mergeTerminalHostUpdate
+                        model.TerminalHostUpdate
+                        response.TerminalHostUpdate
                 TerminalPaneOpen =
                     if model.AppVersion.IsNone then response.TerminalPaneOpen
                     else model.TerminalPaneOpen
@@ -621,6 +677,30 @@ let update msg model =
             SortMode = newSort
             Repos = model.Repos |> List.map (fun r -> { r with Worktrees = sortWorktrees newSort r.Worktrees }) },
         Cmd.none
+
+    | UpdateTerminalHost
+        when model.TerminalHostUpdate
+             <> TerminalHostUpdateState.Available ->
+        model, Cmd.none
+
+    | UpdateTerminalHost ->
+        { model with
+            TerminalHostUpdate =
+                TerminalHostUpdateState.Updating },
+        updateTerminalHost ()
+
+    | TerminalHostUpdateCompleted update ->
+        { model with TerminalHostUpdate = update },
+        match update with
+        | TerminalHostUpdateState.Unavailable ->
+            Cmd.batch [
+                fetchWorktrees ()
+                fetchEmbeddedTerminals worktreeApi
+            ]
+        | TerminalHostUpdateState.Available
+        | TerminalHostUpdateState.Updating
+        | TerminalHostUpdateState.Fatal _ ->
+            Cmd.none
 
     | ToggleCompact ->
         { model with IsCompact = not model.IsCompact }, Cmd.none
@@ -1161,6 +1241,8 @@ let update msg model =
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView hint newFocus)
 
         match activeOverlay model with
+        | Some ActiveOverlay.TerminalHostUpdate ->
+            model, Cmd.none
         | Some ActiveOverlay.WorktreeSearch ->
             match key with
             | "Escape" ->
@@ -1418,6 +1500,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
                         dispatch (WorktreeSearchMsg WorktreeSearch.Msg.Open)
                     | Some ActiveOverlay.WorktreeSearch ->
                         ke.preventDefault()
+                    | Some ActiveOverlay.TerminalHostUpdate
                     | Some ActiveOverlay.Confirmation
                     | Some ActiveOverlay.CreateWorktree ->
                         ()
@@ -1551,6 +1634,53 @@ let viewSystemMetrics (metrics: SystemMetrics option) =
             ]
         ]
 
+let viewTerminalHostUpdateOverlay state =
+    match state with
+    | TerminalHostUpdateState.Updating ->
+        ModalOverlay.modalOverlayWithClasses
+            (Some "terminal-host-update-overlay")
+            None
+            None
+            [
+                Html.div [
+                    prop.className "modal-header"
+                    prop.text "Updating TerminalHost"
+                ]
+                Html.div [
+                    prop.className "modal-body"
+                    prop.children [
+                        Html.div [
+                            prop.className "modal-loading"
+                            prop.text
+                                "Stopping TerminalHost and restarting durable sessions..."
+                        ]
+                    ]
+                ]
+            ]
+    | TerminalHostUpdateState.Fatal error ->
+        ModalOverlay.modalOverlayWithClasses
+            (Some "terminal-host-update-overlay")
+            None
+            None
+            [
+                Html.div [
+                    prop.className "modal-header error"
+                    prop.text "TerminalHost update failed"
+                ]
+                Html.div [
+                    prop.className "modal-body"
+                    prop.children [
+                        Html.div [
+                            prop.className "modal-error-message"
+                            prop.text error
+                        ]
+                    ]
+                ]
+            ]
+    | TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available ->
+        Html.none
+
 let viewAppHeader model dispatch =
     let widthChoices =
         match model.TerminalPaneOpen, model.Canvas.CanvasPaneOpen with
@@ -1607,6 +1737,20 @@ let viewAppHeader model dispatch =
                                 prop.onClick (fun _ -> dispatch ToggleSort)
                                 prop.text ($"Sort: {sortLabel model.SortMode}")
                             ]
+                            if
+                                model.TerminalHostUpdate
+                                = TerminalHostUpdateState.Available
+                            then
+                                Html.button [
+                                    prop.className "action-btn"
+                                    yield! noFocusProps
+                                    prop.onClick (fun _ ->
+                                        dispatch UpdateTerminalHost)
+                                    prop.title
+                                        "Update TerminalHost (restarts sessions)"
+                                    prop.text
+                                        "Update TerminalHost (restarts sessions)"
+                                ]
                             Html.button [
                                 prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
                                 yield! noFocusProps
@@ -1760,6 +1904,9 @@ let view model dispatch =
                 OverviewViews.schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
 
                 match activeOverlay model with
+                | Some ActiveOverlay.TerminalHostUpdate ->
+                    viewTerminalHostUpdateOverlay
+                        model.TerminalHostUpdate
                 | Some ActiveOverlay.WorktreeSearch ->
                     WorktreeSearch.view
                         (WorktreeSearchMsg >> dispatch)

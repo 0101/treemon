@@ -28,6 +28,7 @@ let private model enabled : Model =
       IsLoading = false
       HasError = false
       SortMode = ByActivity
+      TerminalHostUpdate = TerminalHostUpdateState.Unavailable
       IsCompact = false
       SchedulerEvents = []
       LatestByCategory = Map.empty
@@ -88,7 +89,8 @@ let private response enabled : DashboardResponse =
       TerminalPaneOpen = false
       CanvasPaneOpen = false
       OverviewPanelOpen = false
-      WorkspaceWidth = WorkspaceWidth.EqualThirds }
+      WorkspaceWidth = WorkspaceWidth.EqualThirds
+      TerminalHostUpdate = TerminalHostUpdateState.Unavailable }
 
 [<TestFixture>]
 [<Category("Unit")>]

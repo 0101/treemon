@@ -43,6 +43,7 @@ let private createApiWithTerminal agent roots embeddedTerminal =
           ActivityStore = None
           SnapshotStore = None
           AutoSyncStore = None
+          TerminalHostRestartSessions = None
           WorktreeRoots = roots
           TestFixtures = None
           AppVersion = "1.0"

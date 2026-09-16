@@ -53,6 +53,7 @@ let private defaultModel : Model =
       IsLoading = false
       HasError = false
       SortMode = ByActivity
+      TerminalHostUpdate = TerminalHostUpdateState.Unavailable
       IsCompact = false
       SchedulerEvents = []
       LatestByCategory = Map.empty
@@ -185,7 +186,7 @@ type DeleteWithSessionSequencingTests() =
 
         let recovered, refresh =
             update
-                (DeleteCompleted(Error "TerminalHost replacement is in progress"))
+                (DeleteCompleted(Error "TerminalHost update is in progress"))
                 pending
 
         Assert.Multiple(fun () ->

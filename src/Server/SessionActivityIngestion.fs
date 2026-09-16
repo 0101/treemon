@@ -12,14 +12,10 @@ type internal ExactReport =
       Report: SessionActivityReport }
 
 type internal ServiceState =
-    { Live: Map<ProcessIdentity, StoredInstance>
-      PendingReconciliation: Set<ProcessIdentity>
-      ActivityEpochState: TerminalOriginEpochState }
+    { Live: Map<ProcessIdentity, StoredInstance> }
 
 let internal emptyServiceState =
-    { Live = Map.empty
-      PendingReconciliation = Set.empty
-      ActivityEpochState = emptyTerminalOriginEpochState }
+    { Live = Map.empty }
 
 let private exactMetadataMatches
     (prior: StoredInstance)
@@ -72,12 +68,6 @@ let internal tryPrior
     |> Option.orElseWith (fun () ->
         store.InstanceByIdentity identity)
 
-let private originsChanged prior current =
-    [ prior |> Option.bind _.TerminalSessionId
-      current.TerminalSessionId ]
-    |> List.choose id
-    |> Set.ofList
-
 let internal publishInstance
     (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
     (observedAt: DateTimeOffset)
@@ -97,11 +87,7 @@ let internal publishInstance
         )
     )
 
-    { state with
-        Live = live
-        ActivityEpochState =
-            state.ActivityEpochState
-            |> recordTerminalOriginActivity (originsChanged prior persisted) }
+    { state with Live = live }
 
 let private createPresenceInstance (exact: ExactReport) =
     { ProcessIdentity = exact.ProcessIdentity
@@ -176,12 +162,7 @@ let internal applyPresence
                     state
                     persisted
 
-            Ok
-                ({ published with
-                    PendingReconciliation =
-                        state.PendingReconciliation
-                        |> Set.remove exact.ProcessIdentity },
-                 persisted)
+            Ok(published, persisted)
     | None ->
         let persisted =
             exact |> createPresenceInstance |> store.UpsertInstance
@@ -404,12 +385,7 @@ let private applyHeartbeat
                 (fun (withOrigin: StoredInstance) ->
                     { withOrigin with
                         LastSeen = max prior.LastSeen exact.ReceivedAt })
-                (fun next -> Some(store.UpsertInstance next))
-            |> Result.map (fun accepted ->
-                { accepted with
-                    PendingReconciliation =
-                        accepted.PendingReconciliation
-                        |> Set.remove exact.ProcessIdentity }))
+                (fun next -> Some(store.UpsertInstance next)))
 
 let private applyClosure
     (store: SessionActivityStore)
@@ -431,18 +407,12 @@ let private applyClosure
             with
             | None -> state
             | Some persisted ->
-                let published =
-                    publishInstance
-                        scheduler
-                        exact.ReceivedAt
-                        (Some prior)
-                        state
-                        persisted
-
-                { published with
-                    PendingReconciliation =
-                        state.PendingReconciliation
-                        |> Set.remove exact.ProcessIdentity }))
+                publishInstance
+                    scheduler
+                    exact.ReceivedAt
+                    (Some prior)
+                    state
+                    persisted))
 
 let internal applyKnownReport
     (store: SessionActivityStore)
@@ -511,92 +481,3 @@ let internal statusesForTerminalOrigins
         instance.TerminalSessionId
         |> Option.exists terminalSessionIds.Contains)
     |> List.ofSeq
-
-[<RequireQualifiedAccess>]
-type internal ReconciliationScope =
-    | AuthoritativeOrigins
-    | SelectedOrigins
-
-let internal reconcilePending
-    (resolver: ProcessIdentityResolver)
-    (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
-    (now: DateTimeOffset)
-    (scope: ReconciliationScope)
-    (terminalSessionIds: Set<TerminalSessionId>)
-    (store: SessionActivityStore)
-    (state: ServiceState)
-    =
-    let clear identity origin current =
-        let changedOrigins =
-            origin
-            |> Option.map Set.singleton
-            |> Option.defaultValue Set.empty
-
-        { current with
-            PendingReconciliation =
-                current.PendingReconciliation
-                |> Set.remove identity
-            ActivityEpochState =
-                current.ActivityEpochState
-                |> recordTerminalOriginActivity changedOrigins }
-
-    let closeDead identity (instance: StoredInstance) current =
-        try
-            match
-                store.CloseInstance(
-                    identity,
-                    instance.SessionId,
-                    now,
-                    instance.TerminalSessionId
-                )
-            with
-            | None -> Ok(clear identity instance.TerminalSessionId current)
-            | Some persisted ->
-                let published =
-                    publishInstance
-                        scheduler
-                        now
-                        (Some instance)
-                        current
-                        persisted
-
-                Ok
-                    { published with
-                        PendingReconciliation =
-                            published.PendingReconciliation
-                            |> Set.remove identity }
-        with error ->
-            Error
-                $"Could not close dead startup session identity: {error.Message}"
-
-    let folder result identity =
-        result
-        |> Result.bind (fun current ->
-            match tryPrior store current identity with
-            | None ->
-                Ok(clear identity None current)
-            | Some instance ->
-                if instance.ClosedAt.IsSome then
-                    Ok(clear identity instance.TerminalSessionId current)
-                elif now - instance.LastSeen >= openWindow then
-                    Ok(clear identity instance.TerminalSessionId current)
-                else
-                    match instance.TerminalSessionId with
-                    | None -> Ok(clear identity None current)
-                    | Some origin when not (terminalSessionIds.Contains origin) ->
-                        match scope with
-                        | ReconciliationScope.AuthoritativeOrigins ->
-                            Ok(clear identity (Some origin) current)
-                        | ReconciliationScope.SelectedOrigins -> Ok current
-                    | Some _ ->
-                        ProcessIdentityResolver.isAlive resolver identity
-                        |> Result.bind (fun alive ->
-                            if alive then
-                                Ok current
-                            else
-                                closeDead identity instance current))
-
-    state.PendingReconciliation
-    |> Set.fold
-        folder
-        (Ok state)

@@ -8,21 +8,15 @@ open Server.SessionActivityStore
 type internal OwnedSessionState =
     { ProcessIdentity: ProcessIdentity
       TerminalSessionId: TerminalSessionId
-      CopilotSessionId: SessionId
-      Status: SessionLevelStatus }
+      CopilotSessionId: SessionId }
 
 type internal OwnedSessionSnapshot =
-    { ActivityEpoch: int64
-      OpenSessions: OwnedSessionState list
-      PendingReconciliation: Set<ProcessIdentity>
-      ReplacementSessionIds: Map<TerminalSessionId, SessionId> }
+    { OpenSessions: OwnedSessionState list
+      RestartSessionIds: Map<TerminalSessionId, SessionId> }
 
 type internal ActivityQuery =
     Set<TerminalSessionId>
-        -> Result<
-            int64 * StoredInstance list * Set<ProcessIdentity>,
-            string
-         >
+        -> Result<StoredInstance list, string>
 
 let internal joinOwnedInstances
     (terminalSessionIds: Set<TerminalSessionId>)
@@ -38,11 +32,7 @@ let internal joinOwnedInstances
 let internal ownedSessionSnapshot
     (now: DateTimeOffset)
     (terminalSessionIds: Set<TerminalSessionId>)
-    (
-        activityEpoch: int64,
-        instances: StoredInstance list,
-        pendingReconciliation: Set<ProcessIdentity>
-    )
+    (instances: StoredInstance list)
     : OwnedSessionSnapshot =
     let liveOwnedInstances =
         instances
@@ -54,30 +44,26 @@ let internal ownedSessionSnapshot
         |> List.map (fun (terminalId, instance) ->
             { ProcessIdentity = instance.ProcessIdentity
               TerminalSessionId = terminalId
-              CopilotSessionId = instance.SessionId
-              Status =
-                instance.Status
-                |> freshnessAdjusted now instance.LastSeen
-                |> effectiveStatus })
+              CopilotSessionId = instance.SessionId })
         |> List.sortBy (fun session ->
             session.TerminalSessionId,
             session.CopilotSessionId,
             ProcessIdentity.sortKey session.ProcessIdentity)
 
-    let replacementSessionIds =
+    let restartSessionIds =
         liveOwnedInstances
         |> List.groupBy fst
         |> List.choose (fun (terminalId, terminalInstances) ->
             terminalInstances
             |> List.map snd
             |> StoredInstance.tryMostRecentActivity
-            |> Option.map (fun latest -> terminalId, latest.SessionId))
+            |> Option.map (fun latest ->
+                terminalId,
+                latest.SessionId))
         |> Map.ofList
 
-    { ActivityEpoch = activityEpoch
-      OpenSessions = openSessions
-      PendingReconciliation = pendingReconciliation
-      ReplacementSessionIds = replacementSessionIds }
+    { OpenSessions = openSessions
+      RestartSessionIds = restartSessionIds }
 
 let internal queryOwnedSessions
     (queryActivity: ActivityQuery)
@@ -85,7 +71,11 @@ let internal queryOwnedSessions
     (terminalSessionIds: Set<TerminalSessionId>)
     =
     queryActivity terminalSessionIds
-    |> Result.map (ownedSessionSnapshot now terminalSessionIds)
+    |> Result.map (
+        ownedSessionSnapshot
+            now
+            terminalSessionIds
+    )
 
 let private terminalOrigin (tab: EmbeddedTerminalTab) =
     tab.Id
@@ -105,7 +95,8 @@ let internal tryFindLiveTerminalId
         snapshot.Tabs
         |> List.choose (fun tab ->
             match tab.Lifecycle with
-            | EmbeddedTerminalLifecycle.Running _ when tab.Worktree = worktreePath ->
+            | EmbeddedTerminalLifecycle.Running _
+                when tab.Worktree = worktreePath ->
                 Some(terminalOrigin tab, tab.Id)
             | _ -> None)
         |> Map.ofList
@@ -117,16 +108,22 @@ let internal tryFindLiveTerminalId
         && StoredInstance.isOpenAt now instance)
     |> joinOwnedInstances
         (runningTerminals |> Map.keys |> Set.ofSeq)
-    |> List.sortByDescending (snd >> StoredInstance.activityOrderKey)
+    |> List.sortByDescending (
+        snd >> StoredInstance.activityOrderKey
+    )
     |> List.tryPick (fun (terminalSessionId, _) ->
-        runningTerminals |> Map.tryFind terminalSessionId)
+        runningTerminals
+        |> Map.tryFind terminalSessionId)
 
 let internal withReportedActivity
     (now: DateTimeOffset)
     (instances: StoredInstance seq)
     (snapshot: EmbeddedTerminalSnapshot)
     =
-    let terminalSessionIds = snapshot.Tabs |> List.map terminalOrigin |> Set.ofList
+    let terminalSessionIds =
+        snapshot.Tabs
+        |> List.map terminalOrigin
+        |> Set.ofList
 
     let reportedActivity =
         instances
@@ -137,92 +134,50 @@ let internal withReportedActivity
             ownedSessions
             |> List.map snd
             |> CodingToolStatus.representativeActivityText now
-            |> Option.map (fun activity -> terminalSessionId, activity))
+            |> Option.map (fun activity ->
+                terminalSessionId,
+                activity))
         |> Map.ofList
 
     { snapshot with
         Tabs =
             snapshot.Tabs
             |> List.map (fun tab ->
-                { tab with ReportedActivity = reportedActivity |> Map.tryFind (terminalOrigin tab) }) }
+                { tab with
+                    ReportedActivity =
+                        reportedActivity
+                        |> Map.tryFind (terminalOrigin tab) }) }
 
-let internal replacementSessionPlan
-    resolveProvider
-    (terminals: TerminalHostReplacement.ReplacementTerminal list)
-    (snapshot: OwnedSessionSnapshot)
-    =
-    let blockers: TerminalHostReplacement.ReplacementBlockers =
-        { PendingReconciliationCount = snapshot.PendingReconciliation.Count
-          NonIdleSessionCount =
-            snapshot.OpenSessions
-            |> List.sumBy (fun session ->
-                if session.Status = SessionLevelStatus.Idle then 0 else 1) }
-
-    if blockers.PendingReconciliationCount + blockers.NonIdleSessionCount > 0 then
-        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle blockers
-    else
-        let terminalsById =
-            terminals
-            |> List.map (fun terminal ->
-                terminal.TerminalSessionId,
-                terminal)
-            |> Map.ofList
-
-        let shutdownTargets =
-            snapshot.OpenSessions
-            |> List.map (fun session ->
-                let terminal =
-                    terminalsById
-                    |> Map.find session.TerminalSessionId
-
-                let target:
-                    TerminalHostReplacement.ReplacementShutdownTarget =
-                    { TerminalSessionId =
-                        terminal.TerminalSessionId
-                      WorktreePath = terminal.WorktreePath
-                      CopilotSessionId = session.CopilotSessionId
-                      ProcessIdentity =
-                        session.ProcessIdentity }
-
-                target)
-
-        let resumeCommands =
-            terminals
-            |> List.choose (fun terminal ->
-                snapshot.ReplacementSessionIds
-                |> Map.tryFind terminal.TerminalSessionId
-                |> Option.map (fun sessionId ->
-                    let resume:
-                        TerminalHostReplacement.ReplacementResumeCommand =
-                        { CopilotSessionId = sessionId
-                          Command =
-                            CodingToolCli.build
-                                (resolveProvider terminal.WorktreePath)
-                                (CodingToolCli.Resume(Some(SessionId.value sessionId)))
-                            |> _.AsShellString }
-
-                    terminal.TerminalSessionId, resume))
-            |> Map.ofList
-
-        TerminalHostReplacement.ReplacementSessionPlan.Ready(
-            snapshot.ActivityEpoch,
-            shutdownTargets,
-            resumeCommands
-        )
-
-/// Adapt the session-activity service's narrow raw query into the opaque policy consumed by
-/// TerminalHost replacement. All exact ownership, terminal-specific gating, resume selection, and
-/// provider command construction stays in this terminal-focused module.
-let internal queryReplacementPlan
+let internal restartSessions
     resolveProvider
     (queryActivity: ActivityQuery)
     (now: DateTimeOffset)
-    (terminals: TerminalHostReplacement.ReplacementTerminal list)
+    (terminals: TerminalHostReplacement.HostedTerminal list)
     =
     let terminalSessionIds =
         terminals
         |> List.map _.TerminalSessionId
         |> Set.ofList
 
-    queryOwnedSessions queryActivity now terminalSessionIds
-    |> Result.map (replacementSessionPlan resolveProvider terminals)
+    queryOwnedSessions
+        queryActivity
+        now
+        terminalSessionIds
+    |> Result.map (fun snapshot ->
+        terminals
+        |> List.choose (fun terminal ->
+            snapshot.RestartSessionIds
+            |> Map.tryFind terminal.TerminalSessionId
+            |> Option.map (fun sessionId ->
+                let restart:
+                    TerminalHostReplacement.RestartSession =
+                    { WorktreePath = terminal.WorktreePath
+                      Command =
+                        CodingToolCli.build
+                            (resolveProvider terminal.WorktreePath)
+                            (CodingToolCli.Resume(
+                                Some(SessionId.value sessionId)
+                            ))
+                        |> _.AsShellString }
+
+                restart)))
