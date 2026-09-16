@@ -275,7 +275,7 @@ let viewerScript = File.ReadAllText(viewerAssetPath "viewer.js")
 /// The routing and navigation every diff viewer fixture needs. Both E2E fixtures inherit it, so
 /// the served template, the pinned bundles and the summary/file endpoints are set up once.
 type DiffViewerHarness() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     override this.ContextOptions() =
         let options = base.ContextOptions()

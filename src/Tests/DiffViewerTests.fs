@@ -4326,7 +4326,7 @@ type DiffViewerE2ETests() =
 [<Category("Canvas")>]
 [<NonParallelizable>]
 type DiffSummaryPerformanceE2ETests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     [<Test>]
     member this.``warm 250-path summary appears within five seconds``() =

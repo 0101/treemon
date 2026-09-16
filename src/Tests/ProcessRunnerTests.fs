@@ -72,7 +72,6 @@ let private testSpawn fileName =
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type ProcessRunnerArgumentListTests() =
 
     let mutable tempDir = "" // NUnit SetUp and TearDown must share the per-test directory through fixture state.

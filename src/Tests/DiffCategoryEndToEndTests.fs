@@ -219,6 +219,8 @@ let private agentKnowing (repoRoot: string) =
 [<Category("Canvas")>]
 [<NonParallelizable>]
 type DiffCategoryRepositoryE2ETests() =
+    inherit ServerFixture.SharedServerFixture()
+
 
     let requestSummary (client: HttpClient) baseUrl repoRoot =
         use response =
@@ -414,7 +416,7 @@ type DiffCategoryRepositoryE2ETests() =
 [<Category("Canvas")>]
 [<NonParallelizable>]
 type DiffCategoryDocumentE2ETests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     /// The layer preference the document reads before its first request, so the browser asks for the
     /// same three layers the HTTP verification does.
