@@ -444,6 +444,17 @@
         .chart-tip .swatch { width: 10px; height: 10px; border-radius: 2px; background: currentColor; flex: none; }
 
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: var(--fs-base); }
+        .card-work-metrics {
+            display: flex; align-items: center; gap: 4px;
+            margin-left: auto; flex-shrink: 0;
+        }
+        .card-work-metrics .diff-stats,
+        .card-work-metrics .commit-overflow { margin-left: 0; }
+        .pr-row-tail {
+            display: flex; align-items: center; gap: 6px;
+            margin-left: auto; flex-shrink: 0;
+        }
+        .pr-row-tail .card-work-metrics { margin-left: 0; }
         .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 600; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
         .pr-badge:hover { background: #3b4068; }
         .pr-badge.draft { background: #313244; color: #7f849c; }
