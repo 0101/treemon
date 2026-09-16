@@ -458,6 +458,64 @@ type WorktreeDiffActionTests() =
                 Assert.That(targetClass, Does.Not.Contain("focused")))
         }
 
+    [<TestCase("d")>]
+    [<TestCase("D")>]
+    member this.``D-key opens Diff for its focused card``(key: string) =
+        task {
+            do! this.NavigateWithDiffDocs()
+            do! focusCardAndWait this.Page "feature-recent"
+            do! this.Page.Locator(".dashboard").FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync(key)
+
+            let activeIframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
+            do! activeIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! src = activeIframe.GetAttributeAsync("src")
+            let! focusedClass = (cardByBranch this.Page "feature-recent").GetAttributeAsync("class")
+            Assert.Multiple(fun () ->
+                Assert.That(src, Does.Contain("feature-recent").And.EndWith("/diff.html"))
+                Assert.That(focusedClass, Does.Contain("focused"), "Opening Diff should preserve card focus"))
+        }
+
+    [<Test>]
+    member this.``D-key requires a focused card with an available Diff``() =
+        task {
+            do! this.NavigateWithDiffDocs()
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("d")
+            let! noFocusCount = this.Page.Locator(".canvas-pane.open").CountAsync()
+
+            do! focusCardAndWait this.Page "feature-idle"
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("d")
+            let! unavailableCount = this.Page.Locator(".canvas-pane.open").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(noFocusCount, Is.Zero, "D should do nothing without a focused card")
+                Assert.That(unavailableCount, Is.Zero, "D should do nothing when Diff is unavailable"))
+        }
+
+    [<Test>]
+    member this.``D-key remains text in an editable search field``() =
+        task {
+            do! this.NavigateWithDiffDocs()
+            do! focusCardAndWait this.Page "feature-recent"
+            do! this.Page.Locator(".dashboard").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Control+p")
+
+            let searchInput = this.Page.Locator("#worktree-search-input")
+            do! searchInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! searchInput.PressAsync("d")
+
+            let! query = searchInput.InputValueAsync()
+            let! openDiffCount = this.Page.Locator(".canvas-pane.open").CountAsync()
+            Assert.Multiple(fun () ->
+                Assert.That(query, Is.EqualTo("d"), "Editable fields should retain the typed key")
+                Assert.That(openDiffCount, Is.Zero, "Typing d in an editable field should not open Diff"))
+        }
+
     [<Test>]
     member this.``Diff action visibility follows comparison content readiness and archive state in both layouts``() =
         task {
@@ -488,6 +546,38 @@ type WorktreeDiffActionTests() =
                 [| compactUntracked; compactCommitted; compactLocal; compactNetZero |],
                 Is.EqualTo([| 1; 1; 1; 0 |])
             )
+        }
+
+    [<Test>]
+    member this.``PR row orders details metrics Diff and Create PR``() =
+        task {
+            do! this.NavigateWithDiffDocs()
+
+            let prCard = cardByBranch this.Page "feature-recent"
+            let prRow = prCard.Locator(".pr-row")
+            let! prOrder =
+                prRow.EvaluateAsync<bool>(
+                    """row => {
+                        const follows = (a, b) => !!(a && b && (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
+                        return follows(row.querySelector('.pr-badge'), row.querySelector('.pr-row-tail'))
+                            && follows(row.querySelector('.diff-stats'), row.querySelector('.commit-grid'))
+                            && follows(row.querySelector('.commit-grid'), row.querySelector('.diff-action-btn'));
+                    }""")
+            let! diffInMainBehind = prCard.Locator(".main-behind-row .diff-action-btn").CountAsync()
+
+            let createPrTail = (cardByBranch this.Page "feature-stale").Locator(".pr-row-tail")
+            let! createPrOrder =
+                createPrTail.EvaluateAsync<bool>(
+                    """tail => {
+                        const diff = tail.querySelector('.diff-action-btn');
+                        const createPr = tail.querySelector(".action-btn[title='Create PR']");
+                        return !!(diff && createPr && (diff.compareDocumentPosition(createPr) & Node.DOCUMENT_POSITION_FOLLOWING));
+                    }""")
+
+            Assert.Multiple(fun () ->
+                Assert.That(prOrder, Is.True, "PR details, metrics, and Diff should follow the requested order")
+                Assert.That(diffInMainBehind, Is.Zero, "Diff should no longer render in the main-behind row")
+                Assert.That(createPrOrder, Is.True, "Create PR should follow Diff at the end of the PR row"))
         }
 
     [<Test>]
@@ -524,7 +614,7 @@ type WorktreeDiffActionTests() =
 
             let expected =
                 [| "Open worktree diff"
-                   "Open worktree diff"
+                   "Open worktree diff (D)"
                    "svg"
                    "true"
                    "1"
