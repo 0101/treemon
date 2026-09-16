@@ -1,7 +1,20 @@
 module Tests.ServerParsingTests
 
+open System
+open System.IO
 open NUnit.Framework
 open Server.PrStatus
+
+let private withTemporaryDirectory action =
+    let directory =
+        Path.Combine(Path.GetTempPath(), $"treemon-az-{Guid.NewGuid():N}")
+
+    Directory.CreateDirectory(directory) |> ignore
+
+    try
+        action directory
+    finally
+        Directory.Delete(directory, true)
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -62,6 +75,90 @@ type ParseAzureDevOpsUrlTests() =
     member _.``Empty string returns None``() =
         let result = parseAzureDevOpsUrl ""
         Assert.That(result, Is.EqualTo(None))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type AzureCliResolutionTests() =
+
+    [<Test>]
+    member _.``Windows az script uses its shebang interpreter``() =
+        withTemporaryDirectory (fun directory ->
+            let interpreter = Path.Combine(directory, "python.exe")
+            let azScript = Path.Combine(directory, "az")
+            File.WriteAllText(interpreter, "")
+            File.WriteAllText(azScript, $"#!\"{interpreter}\"{Environment.NewLine}")
+
+            let result =
+                resolveAzInvocation true directory ".COM;.EXE;.BAT;.CMD"
+
+            Assert.That(result.IsSome, Is.True)
+            Assert.That(result.Value.FileName, Is.EqualTo(interpreter))
+            Assert.That(result.Value.PrefixArguments, Is.EqualTo([ azScript ])))
+
+    [<Test>]
+    member _.``Windows packaged az command uses its bundled Python``() =
+        withTemporaryDirectory (fun directory ->
+            let commandDirectory = Path.Combine(directory, "wbin")
+            Directory.CreateDirectory(commandDirectory) |> ignore
+            let azCommand = Path.Combine(commandDirectory, "az.cmd")
+            let python = Path.Combine(directory, "python.exe")
+            File.WriteAllText(azCommand, "")
+            File.WriteAllText(python, "")
+
+            let result =
+                resolveAzInvocation true commandDirectory ".com;.exe;.bat;.cmd"
+
+            Assert.That(result.IsSome, Is.True)
+            Assert.That(result.Value.FileName, Is.EqualTo(python))
+            Assert.That(result.Value.PrefixArguments, Is.EqualTo([ "-IBm"; "azure.cli" ])))
+
+    [<Test>]
+    [<Platform(Exclude = "Win", Reason = "Unix execute permissions are unavailable on Windows")>]
+    member _.``Unix az command is invoked directly``() =
+        withTemporaryDirectory (fun directory ->
+            let azCommand = Path.Combine(directory, "az")
+            File.WriteAllText(azCommand, "")
+            File.SetUnixFileMode(
+                azCommand,
+                UnixFileMode.UserRead ||| UnixFileMode.UserWrite ||| UnixFileMode.UserExecute)
+
+            let result =
+                resolveAzInvocation false directory ""
+
+            Assert.That(result.IsSome, Is.True)
+            Assert.That(result.Value.FileName, Is.EqualTo(azCommand))
+            Assert.That(result.Value.PrefixArguments, Is.Empty))
+
+    [<Test>]
+    [<Platform(Exclude = "Win", Reason = "Unix execute permissions are unavailable on Windows")>]
+    member _.``Unix resolution skips an earlier non-executable az command``() =
+        withTemporaryDirectory (fun directory ->
+            let earlierDirectory = Path.Combine(directory, "earlier")
+            let laterDirectory = Path.Combine(directory, "later")
+            Directory.CreateDirectory(earlierDirectory) |> ignore
+            Directory.CreateDirectory(laterDirectory) |> ignore
+
+            let nonExecutableAz = Path.Combine(earlierDirectory, "az")
+            let executableAz = Path.Combine(laterDirectory, "az")
+            File.WriteAllText(nonExecutableAz, "")
+            File.WriteAllText(executableAz, "")
+            File.SetUnixFileMode(
+                nonExecutableAz,
+                UnixFileMode.UserRead ||| UnixFileMode.UserWrite)
+            File.SetUnixFileMode(
+                executableAz,
+                UnixFileMode.UserRead ||| UnixFileMode.UserWrite ||| UnixFileMode.UserExecute)
+
+            let pathValue =
+                String.Join(Path.PathSeparator, [| earlierDirectory; laterDirectory |])
+
+            let result =
+                resolveAzInvocation false pathValue ""
+
+            Assert.That(result.IsSome, Is.True)
+            Assert.That(result.Value.FileName, Is.EqualTo(executableAz))
+            Assert.That(result.Value.PrefixArguments, Is.Empty))
 
 
 [<TestFixture>]
