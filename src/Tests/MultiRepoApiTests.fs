@@ -14,6 +14,7 @@ let private deserializeDashboard (json: string) =
 [<TestFixture>]
 [<Category("E2E")>]
 type MultiRepoApiTests() =
+    inherit ServerFixture.SharedServerFixture()
 
     let serverUrl = ServerFixture.serverUrl
 

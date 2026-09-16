@@ -5,13 +5,11 @@ open System.Diagnostics
 open System.IO
 open System.Text
 open NUnit.Framework
+open Microsoft.Playwright.NUnit
 open Server
 
 let private repoRoot =
     Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
-
-let private serverProjectPath =
-    Path.Combine(repoRoot, "src", "Server")
 
 let private fixturesPath =
     Path.Combine(repoRoot, "src", "Tests", "fixtures", "worktrees.json")
@@ -68,7 +66,7 @@ let startServer () =
         let rootArgs = worktreeRoots |> List.map (fun r -> $"\"{r}\"") |> String.concat " "
 
         let proc =
-            TestUtils.startServerProcess serverProjectPath repoRoot rootArgs apiPort canvasPort fixturesPath terminalHostStateDirectory
+            TestUtils.startServerProcess repoRoot rootArgs apiPort canvasPort fixturesPath terminalHostStateDirectory
 
         serverProcess.Value <- Some proc
         do! TestUtils.waitForUrl serverUrl 30000
@@ -123,6 +121,26 @@ let startVite () =
         do! TestUtils.waitForUrl viteUrl 15000
     }
 
+let private infrastructure =
+    lazy
+        (startServer().GetAwaiter().GetResult()
+         compileFable().GetAwaiter().GetResult()
+         startVite().GetAwaiter().GetResult()
+         TestContext.Out.WriteLine(
+             $"Server ({serverUrl}), canvas-doc ({canvasUrl}), Fable, and Vite ({viteUrl}) started successfully"))
+
+let ensureStarted () = infrastructure.Force()
+
+type SharedPageTest() =
+    inherit PageTest()
+
+    [<OneTimeSetUp>]
+    member _.StartSharedInfrastructure() = ensureStarted ()
+
+type SharedServerFixture() =
+    [<OneTimeSetUp>]
+    member _.StartSharedInfrastructure() = ensureStarted ()
+
 let private killProc procOpt =
     TestUtils.killProc procOpt
 
@@ -156,15 +174,5 @@ let stopAll () =
 
 [<SetUpFixture>]
 type GlobalSetup() =
-    [<OneTimeSetUp>]
-    member _.Setup() =
-        task {
-            do! startServer ()
-            do! compileFable ()
-            do! startVite ()
-            TestContext.Out.WriteLine(
-                $"Server ({serverUrl}), canvas-doc ({canvasUrl}), Fable, and Vite ({viteUrl}) started successfully")
-        }
-
     [<OneTimeTearDown>]
     member _.TearDown() = stopAll ()

@@ -25,14 +25,14 @@ let [<Literal>] private FixtureMultiDocBranch = "feature-multidoc"
 let [<Literal>] private FixtureSystemViewBranch = "multirepo"
 
 /// E2E tests for the canvas pane feature.
-/// Prerequisites (all started by ServerFixture.GlobalSetup on dynamically chosen free ports):
+/// Prerequisites (started lazily by ServerFixture.SharedPageTest on dynamically chosen free ports):
 ///   - API server + canvas-doc server (ServerFixture.serverUrl / ServerFixture.canvasUrl)
 ///   - Vite dev server (ServerFixture.viteUrl)
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("Canvas")>]
 type CanvasPaneTests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     let baseUrl = ServerFixture.viteUrl
     let canvasOrigin = ServerFixture.canvasUrl
