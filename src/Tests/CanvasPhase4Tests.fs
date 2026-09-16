@@ -28,7 +28,7 @@ let private clickTabsInOrder (tabs: ILocator) count =
 [<Category("E2E")>]
 [<Category("Canvas")>]
 type CanvasPhase4Tests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     let baseUrl = ServerFixture.viteUrl
 

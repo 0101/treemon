@@ -8,7 +8,6 @@ open Tests.GitTestHelpers
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type RemoveWorktreeTests() =
     let mutable tempDir = ""
 

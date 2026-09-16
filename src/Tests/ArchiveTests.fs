@@ -417,9 +417,8 @@ type NavigationArchiveTests() =
 
 [<TestFixture>]
 [<Category("E2E")>]
-[<Category("Fast")>]
 type ArchiveE2ETests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     let baseUrl = ServerFixture.viteUrl
 

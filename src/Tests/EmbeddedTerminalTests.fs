@@ -583,6 +583,7 @@ let private exactHostManagerConfig
     =
     { managerConfig host launchHost with
         StartupTimeout = TimeSpan.FromSeconds 1.0
+        ProcessExitTimeout = TimeSpan.FromMilliseconds 100.0
         ProcessIdentityResolver =
             ProcessIdentityResolver.create
                 host.ResolveProcessIdentity

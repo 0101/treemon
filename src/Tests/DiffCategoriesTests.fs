@@ -707,7 +707,6 @@ type DiffCategoriesCoverageTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type DiffCategoryReportTests() =
 
     /// A repository whose `files` are committed and whose configuration (if any) is written

@@ -74,7 +74,6 @@ let private sync (repoDir: string) = syncWithBase (syncRequest repoDir "origin")
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type BranchSyncTests() =
 
     [<Test>]
@@ -232,7 +231,6 @@ let private push (repoDir: string) (branch: string) = pushSyncedBranch repoDir b
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type BranchPushTests() =
 
     [<Test>]
@@ -365,7 +363,6 @@ type BranchPushTests() =
 /// the caller already holds; every Git step is the real one.
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 [<Category("AutoSyncVerification")>]
 type MechanicalSyncCompositionTests() =
 

@@ -141,7 +141,6 @@ type ResolveWorktreeCommandTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type ResolveBaseRefTests() =
     /// NUnit lifecycle field — reassigned per test by [<SetUp>]/[<TearDown>].
     let mutable tempDir = ""
@@ -216,7 +215,6 @@ type ResolveBaseRefTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type CreateWorktreeIntegrationTests() =
     /// NUnit lifecycle field — reassigned per test by [<SetUp>]/[<TearDown>].
     let mutable tempDir = ""
