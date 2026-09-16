@@ -237,7 +237,6 @@ type ParseCommitOutputTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type CollectWorktreeGitDataTests() =
 
     [<Test>]
@@ -476,7 +475,6 @@ type PrBranchNameTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
-[<Category("Fast")>]
 type DeletedUpstreamTests() =
 
     [<Test>]

@@ -168,8 +168,8 @@ type LogDestinationTests() =
 
 [<TestFixture>]
 [<Category("E2E")>]
-[<Category("Fast")>]
 type FixtureServerLogTests() =
+    inherit ServerFixture.SharedServerFixture()
 
     [<Test>]
     member _.``Fixture server writes startup diagnostics to its owned log directory``() =

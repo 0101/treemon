@@ -22,7 +22,7 @@ let private selectWorkspacePane (page: IPage) pane =
 [<Category("E2E")>]
 [<Category("Terminal")>]
 type WorkspaceLayoutTests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     let paneOrder (page: IPage) =
         page.EvaluateAsync<string[]>(
@@ -546,7 +546,7 @@ let private terminalDocument (marker: string) =
 [<Category("E2E")>]
 [<Category("Terminal")>]
 type TerminalPaneDomTests() =
-    inherit PageTest()
+    inherit ServerFixture.SharedPageTest()
 
     // Route handlers model the server registry across requests, so this mutation is confined to
     // the Playwright fixture boundary and reset before every test.
