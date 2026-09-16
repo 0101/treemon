@@ -1,6 +1,6 @@
 ---
 type: concern
-models: [inherit, opus]
+models: [inherit, gpt-5.6-sol]
 priority: standard
 ---
 # Architecture Reviewer
