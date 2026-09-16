@@ -1,6 +1,6 @@
 ---
 autofix: false
-model: sonnet
+model: gpt-5.6-terra
 applies-to: "src/Client/**/*.fs"
 ---
 # Elmish MVU Discipline
