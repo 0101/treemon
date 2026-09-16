@@ -1,6 +1,6 @@
 ---
 autofix: false
-model: sonnet
+model: gpt-5.6-terra
 applies-to: "**/*.fs"
 ---
 # No Unnecessary Comments

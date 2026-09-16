@@ -1,6 +1,6 @@
 ---
 type: concern
-models: [opus]
+models: [gpt-5.6-sol]
 priority: high
 ---
 # Security Reviewer

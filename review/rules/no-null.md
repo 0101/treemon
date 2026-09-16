@@ -1,6 +1,6 @@
 ---
 autofix: false
-model: haiku
+model: gpt-5.6-luna
 applies-to: ["src/Cli/**/*.fs", "src/Client/**/*.fs", "src/Extension/**/*.fs", "src/Server/**/*.fs", "src/Shared/**/*.fs"]
 ---
 # No Null
