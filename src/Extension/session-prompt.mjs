@@ -1,5 +1,13 @@
+import { isSystemViewFilename } from "./canvas-doc-kinds.mjs";
+import { isValidCanvasFilename } from "./canvas-filename.mjs";
+
 /** @typedef {"canvas" | "agent-prompt"} SessionPromptKind */
 export const MAX_CANVAS_MESSAGE_CHARS = 64000;
+
+const CANVAS_EDIT_REMINDER =
+  "Keep this edit concise and in the canvas. Preserve the intended audience, reading length, and essential facts or caveats. " +
+  "Replace stale or repeated prose rather than appending a recap. Show requested explanations in <details open> with a short summary; leave unrelated sections alone. " +
+  "Use direct, concrete language and explain unfamiliar terms. For another audience, follow the canvas skill's audience.md. Use saved profiles only when explicitly selected by the user.";
 
 /**
  * @typedef SessionPrompt
@@ -42,7 +50,7 @@ export function promptForSession(body) {
 
   switch (transport.kind) {
     case "canvas":
-      return { kind: transport.kind, prompt: `[canvas] ${transport.prompt}` };
+      return promptForCanvasMessage(transport.prompt);
     case "agent-prompt":
       return { kind: transport.kind, prompt: transport.prompt };
     default:
@@ -51,8 +59,8 @@ export function promptForSession(body) {
 }
 
 /**
- * Validates a browser canvas message and converts it to the same queued session transport used by
- * `/inject`.
+ * Validates a canvas message from either host and reinforces writing guidance for doc edits
+ * inside the existing JSON payload, without scheduling another turn.
  *
  * @param {string} body
  * @returns {SessionPrompt}
@@ -71,7 +79,19 @@ export function promptForCanvasMessage(body) {
     throw new Error("payload too large");
   }
 
-  return { kind: "canvas", prompt: `[canvas] ${serialized}` };
+  const isEdit =
+    (message.action === "expand-section" &&
+      typeof message.section === "string" && message.section.trim().length > 0) ||
+    (message.action === "canvas-selection" &&
+      typeof message.intent === "string" && ["explain", "remove", "comment"].includes(message.intent) &&
+      typeof message.request === "string" && message.request.trim().length > 0);
+  const remind =
+    isEdit && isValidCanvasFilename(message.doc) && !isSystemViewFilename(message.doc);
+  const prompt = remind
+    ? JSON.stringify({ ...message, authoringReminder: CANVAS_EDIT_REMINDER })
+    : serialized;
+
+  return { kind: "canvas", prompt: `[canvas] ${prompt}` };
 }
 
 /**
