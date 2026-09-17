@@ -334,8 +334,8 @@ type BuildInjectionTests() =
 
         Assert.That(extension, Does.Contain("canvas-send.js"))
         Assert.That(extension, Does.Contain("canvas-selection-context.js"))
-        Assert.That(extension, Does.Contain("canvas-doc-kinds.json"))
-        Assert.That(extension, Does.Contain("SYSTEM_VIEW_FILENAMES.has(filename.toLowerCase())"))
+        Assert.That(extension, Does.Contain("from \"./canvas-doc-kinds.mjs\""))
+        Assert.That(extension, Does.Contain("isSystemViewFilename(filename)"))
         Assert.That(extension, Does.Contain("window.__canvasTopLevelTransportAvailable = true"))
         Assert.That(extension, Does.Contain("injectScripts(content, port, canvasRoute.filename)"))
         Assert.That(extension, Does.Contain("\"Content-Security-Policy\": \"frame-ancestors 'none'\""))
