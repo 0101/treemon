@@ -14,6 +14,8 @@ type UserMessageFormattingTests() =
     [<TestCase("[canvas] {\"topic\":\"recommendation\",\"text\":\"Use the simpler parser\"}", "Canvas", "Use the simpler parser")>]
     [<TestCase("[canvas] {\"action\":\"decision\",\"topic\":\"cli-parity\",\"choice\":\"dashboard-only\"}", "Canvas", "CLI parity: Dashboard only")>]
     [<TestCase("[canvas] {\"action\":\"expand-section\",\"section\":\"data-flow\",\"doc\":\"investigation.html\"}", "Canvas", "Expand data flow")>]
+    [<TestCase("[canvas] {\"action\":\"expand-section\",\"section\":\"evidence\",\"doc\":\"review.html\",\"authoringReminder\":\"Keep this edit concise.\"}", "Canvas", "Expand evidence")>]
+    [<TestCase("[canvas] {\"action\":\"canvas-selection\",\"intent\":\"comment\",\"doc\":\"review.html\",\"request\":\"User commented: too long\",\"authoringReminder\":\"Keep this edit concise.\"}", "Canvas", "User commented: too long")>]
     [<TestCase("[canvas] {\"action\":\"custom-action\",\"text\":\"Use SQLite\"}", "Canvas", "Use SQLite")>]
     [<TestCase("[canvas] {\"action\":\"custom-action\",\"payload\":{\"value\":42}}", "Canvas", "action: custom-action, payload: value: 42")>]
     [<TestCase("[canvas] {\"topic\":\"recommendation\"}", "Canvas", "topic: recommendation")>]

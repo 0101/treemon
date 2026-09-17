@@ -77,6 +77,22 @@ in-place morphing. A doc-side error is attributed to the emitting worktree and f
 as a dismissible banner only while that document is focused. Static shared exports receive the base
 theme and an inert `canvasSend` so author controls remain harmless outside Treemon.
 
+### Authoring guidance
+
+The canonical skill lives in `src/Extension/skill/`. Treemon installs the complete directory,
+including progressive-disclosure references, under the active Copilot config root
+(`COPILOT_HOME` or `~/.copilot`) and any existing `~/.claude` config root.
+Its writing rules apply to both creation and later edits: lead with the reader's need, keep
+essential evidence and caveats visible, replace stale or repeated prose, and disclose supporting
+detail on demand. Requested expansions and selected-text explanations use native `<details open>`
+with a short summary, so the answer is visible immediately and can be collapsed later; unrelated
+sections stay untouched. The optional audience reference guides documents for readers other than
+the direct user. Reusable profiles live in `~/.copilot/canvas-audience-profiles/` (under
+`COPILOT_HOME` when set), shared across repositories and worktrees rather than copied into a
+repository or the installed skill bundle. The user explicitly selects a saved profile for a doc;
+without that selection, authoring uses the current brief and context, not automatic profile
+matching. Profiles distinguish confirmed knowledge from assumptions and never enter shared HTML.
+
 ### Doc Lifecycle
 
 - Agents create or update contract-valid `.html` files in `.agents/canvas/`.
@@ -166,7 +182,16 @@ theme and an inert `canvasSend` so author controls remain harmless outside Treem
 - The Elmish client accepts only messages from `http://127.0.0.1:5002`, validates the payload shape, and turns it into Elmish messages.
 - The client forwards valid payloads through Fable.Remoting with `sendCanvasMessage`.
 - The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
-- `SessionBridge` wraps the payload in a typed `{kind:"canvas",prompt}` envelope; the extension maps that kind to the unchanged `[canvas] {payload}` session prompt and sends it through its serialized `enqueueSend` chain. Identical sends already queued but not started are coalesced; once `session.send` starts, the same payload may be queued again.
+- `SessionBridge` wraps the payload in a typed `{kind:"canvas",prompt}` envelope. Both bridge
+  endpoints validate the canvas JSON and its 64,000 UTF-16-code-unit input limit, then forward a
+  `[canvas] {payload}` prompt through the serialized `enqueueSend` chain. For a contract-valid
+  AgentDoc filename, `expand-section` with a nonblank section and `canvas-selection` with a known
+  intent and nonblank request receive one fixed `authoringReminder` field. It reinforces concise,
+  audience-appropriate edits without an extra turn, SDK hook, or write-triggered feedback loop.
+  The reminder replaces any supplied value of that field; all other payload fields are preserved.
+  SystemViews, missing or invalid doc identities, and other actions receive no reminder.
+  Identical session prompts already queued but not started are coalesced; once `session.send`
+  starts, the same prompt may be queued again.
 - When the reporting extension later publishes that `[canvas]` prompt as session activity, the
   dashboard collapse projects it through `UserMessageFormatting`: the first-party
   `canvas-selection` action displays its human-readable `request`, other known actions get concise
@@ -316,6 +341,7 @@ changed rows already use).
 | `src/Shared/Types.fs` | Shared canvas domain types (including `CanvasDocKind`), API methods, bridge liveness, send results, workspace width, and the JSON document-identity/prompt builder used by both startup flows |
 | `src/Extension/canvas-filename-contract.json` | Authoritative cross-runtime canvas filename pattern |
 | `src/Extension/canvas-filename.mjs` | Extension-side loader and exact-match validator for the shared filename pattern |
+| `src/Extension/canvas-doc-kinds.mjs` | Shared extension-side SystemView classification for fallback rendering and edit reminders |
 | `src/Server/CanvasFilename.fs` | Server-side embedded-resource loader and exact-match validator |
 | `src/Server/CanvasDocKinds.fs` | Server classifier backed by the shared browser/server SystemView filename list |
 | `src/Client/CanvasSessionPrompt.fs` | AgentDoc replacement-session prompt using the shared JSON document identity |
@@ -343,6 +369,7 @@ changed rows already use).
 | `src/Extension/canvas-morph.js` | Live-update controller — morphs body-only changes, reloads scripts and document-shell changes, and marks the blocks a morph changed |
 | `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, `injection-request.mjs`, `session-prompt.mjs`, `send-queue.mjs` | Exact-process bridge registration, guarded local HTTP headers and prompt/shutdown endpoints, SDK session-ID compatibility, typed prompt-transport decoding, serialized send queue with pending-duplicate coalescing, heartbeat, and reconnect backoff |
 | `src/Extension/skill/SKILL.md` | Authoring contract for agent-created canvas docs |
+| `src/Extension/skill/audience.md` | Optional recipient-focused writing workflow and private reusable audience profiles |
 
 ## Decisions
 
@@ -365,7 +392,7 @@ changed rows already use).
 - **`Model`+`Msg` lifted into `AppTypes.fs`** — the Elmish `Model` and `Msg` types, plus the shared plumbing the canvas update arms need (`worktreeApi`, `findWorktree`, `saveCollapsedReposCmd`), live in `src/Client/AppTypes.fs` (compiled after `CanvasState.fs`, before `CanvasUpdate.fs`/`App.fs`). This is a pure type/value relocation that creates a compile-order seam: the canvas update arms are extracted into `CanvasUpdate.fs` (compiled between `AppTypes.fs` and `App.fs`) without a cyclic reference, while `update` remains a single function in `App.fs` (no sub-`Msg`/`Cmd.map` split). Consumers that previously reached these via `open App` (three test files) add `open AppTypes`; nothing references them by `App.`-qualified name (the activity helper once at `App.computeActivityLevel` now lives in `ActivityState.fs`).
 - **Canvas `update` arms extracted into `CanvasUpdate.fs`** — the canvas `update`-arm bodies (`ToggleCanvasPane`, `SetWorkspaceWidth`, `SelectCanvasDoc`, `OpenCanvasDoc`, `ArchiveCanvasDoc`, `ArchiveCanvasDocResult`, `CopyCanvasDocPath`, `CanvasDocPathCopyResult`, `ClearCanvasDocPathCopied`, `ShareCanvasDoc`, `ShareCanvasDocResult`, `ClipboardWriteResult`, `DismissClipboardNotice`, `NavigateCanvasDoc`, `CanvasMessageReceived`, `CanvasSendResult`, `DismissCanvasMessageError`, `LaunchCanvasSession`, `MorphActiveDoc`, `MorphComplete`), the active-doc/reveal/mounted-hash helpers, and the `messageListener` subscription glue live in `src/Client/CanvasUpdate.fs` (compiled after `AppTypes.fs`, before `App.fs`). Each canvas arm in `App.fs` delegates to this module while `update` remains one function over the flat `Msg` (no sub-`Msg`/`Cmd.map` split).
 - **Canvas model slice as a nested record** — canvas state is a nested `Canvas: CanvasState.CanvasState` record on `App.Model`. `CanvasState.fs` owns pure active-document selection, visited-LRU, rendered-AgentDoc, and loaded-hash reconciliation functions over explicit model slices; `CanvasUpdate.fs` owns the `Model`/`Msg` transitions that compose them.
-- **Exact-equality duplicate coalescing** — the extension queue compares payloads exactly on transport kind and session prompt text. There is no revision metadata and no content normalization, and a payload stops being pending the moment it is handed to `session.send` (`createSendQueue`, key deleted before the call so a rejected send leaves nothing stale). Suppression therefore only ever removes a message that would repeat an undelivered one. The server queue does not coalesce: auto-sync's durable accepted record already prevents a repeat prompt at the source.
+- **Exact-equality duplicate coalescing** — the extension queue compares the prepared prompts exactly on transport kind and session prompt text. It adds no revision metadata or further content normalization, and a payload stops being pending the moment it is handed to `session.send` (`createSendQueue`, key deleted before the call so a rejected send leaves nothing stale). Suppression therefore only ever removes a message that would repeat an undelivered one. The server queue does not coalesce: auto-sync's durable accepted record already prevents a repeat prompt at the source.
 - **Copied paths preserve the worktree separator** — the tab copy action builds the full
   `.agents/canvas/<filename>` disk path with the separator already used by the absolute worktree
   path, producing a native-looking clipboard value on Windows and Unix. This is separate from the
