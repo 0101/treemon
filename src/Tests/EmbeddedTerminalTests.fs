@@ -2431,6 +2431,79 @@ type EmbeddedTerminalUpdateTests() =
         }
 
     [<Test>]
+    member _.``staged update rejects a healthy host running another executable``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-wrong-host"
+            let stagedExecutable = host.Stage stagedVersion
+            let launches = ConcurrentQueue<string>()
+            let commands = ConcurrentQueue<string>()
+
+            let config =
+                exactHostManagerConfig
+                    host
+                    (fun startInfo ->
+                        launches.Enqueue startInfo.FileName
+                        host.Activate(
+                            host.OldExecutable,
+                            "1.0.0-stale-host"
+                        )
+                        Ok())
+                    (fun _ command ->
+                        async {
+                            commands.Enqueue command
+                            return Ok()
+                        })
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let durable = worktree host.Root "wrong-host-session"
+
+            let! started =
+                EmbeddedTerminal.start manager durable
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let snapshotSessions _ =
+                Ok [
+                    restartSession
+                        durable
+                        "copilot --experimental --yolo --session-id=wrong-host-session"
+                ]
+
+            let! result =
+                EmbeddedTerminal.updateTerminalHostWithOperations
+                    TerminalHostReplacement.defaultOperations
+                    snapshotSessions
+                    manager
+                |> Async.StartAsTask
+
+            let! state =
+                EmbeddedTerminal.getUpdateState manager
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    requireTerminalHostUpdate result,
+                    Is.EqualTo TerminalHostUpdateState.Fatal
+                )
+                Assert.That(
+                    state,
+                    Is.EqualTo TerminalHostUpdateState.Fatal
+                )
+                Assert.That(
+                    launches.ToArray(),
+                    Is.EqualTo [| stagedExecutable |]
+                )
+                Assert.That(
+                    host.CurrentExecutable,
+                    Is.EqualTo host.OldExecutable
+                )
+                Assert.That(commands, Is.Empty))
+        }
+
+    [<Test>]
     member _.``staged update restarts only the captured durable sessions once``() =
         task {
             use host = new FakeControlHost()

@@ -83,10 +83,19 @@ let private mutationFailureReason = function
     | MutationUnverified(_, reason) -> reason
 
 let private launchHost config =
-    async {
-        match startHostProcess config with
-        | Error error -> return Error error
-        | Ok() -> return! waitForHealthyHost config
+    asyncResult {
+        do! startHostProcess config
+        let! host = waitForHealthyHost config
+        let! executablePath = resolveProcessExecutable config host
+
+        do!
+            if samePath executablePath config.HostExecutablePath then
+                Ok()
+            else
+                Error
+                    "The healthy TerminalHost is not running the staged executable"
+
+        return host
     }
 
 let private restartSession
