@@ -18,9 +18,11 @@
   Terminal only for the card's explicit `>` / Enter action.
 - Apply a staged TerminalHost update only after the user clicks the plainly labelled toolbar action.
 - Acquire one global maintenance lock before snapshotting, reject every new embedded-terminal start
-  route while locked, restart only currently hosted durable sessions, and omit empty shells.
-- Complete the update as one forward-only transaction. Any first failure leaves the server process
-  permanently locked with a fatal UI that directs the user to redeploy or restart Treemon manually.
+  route while locked, restart only currently hosted durable sessions, and omit terminals without an
+  open durable session.
+- Once accepted, complete the update as one forward-only transaction. Any first failure leaves the
+  server process permanently locked with a fatal UI that directs the user to redeploy or restart
+  Treemon manually.
 - Keep development and verification isolated from production state, ports, and processes.
 
 ## Expected Behavior
@@ -216,8 +218,8 @@ When the user starts an update, Treemon intersects the current authoritative Ter
 with open exact session instances and selects at most one durable Copilot `SessionId` per terminal,
 using greatest durable activity. `Working`, `WaitingForUser`, and `Idle` sessions are all eligible:
 the labelled update action is consent to interrupt them. A terminal with no open durable identity is
-an empty shell and is omitted from the restart snapshot. Multiple live processes in one terminal are
-terminated with the host, but only the selected durable conversation is restarted.
+omitted from the restart snapshot. Multiple live processes in one terminal are terminated with the
+host, but only the selected durable conversation is restarted.
 
 Explicit terminal close, worktree delete, and worktree archive retain their user-authorized graceful
 session-shutdown and exact cleanup flow. The update transaction does not use that per-session path;
@@ -226,9 +228,8 @@ it asks TerminalHost to shut down the complete host and its owned process trees.
 ### User-requested TerminalHost updates
 
 A valid staged executable makes a neutral **Update TerminalHost (restarts sessions)** action appear
-beside Sort. There is no automatic replacement coordinator, idle wait, replacement polling timer,
-retry cooldown, or startup-reconciliation gate. The host's existing one-second staged-directory
-monitor only republishes manifest availability; it never starts an update.
+beside Sort. The host's staged-directory monitor publishes availability only; an update begins only
+from this explicit user action.
 
 The `EmbeddedTerminal` mailbox serializes the update request. Before it resumes processing other
 messages, it captures the current host, authoritative registry, and resumable-session snapshot and
@@ -236,6 +237,10 @@ enters `Updating(snapshot)`. Starts, Resume, agent actions, Canvas fallback laun
 prompt launches, cleanup reservations, and duplicate update requests all cross this mailbox and are
 rejected while it is locked. The client enters `Updating` immediately and renders a non-dismissible
 full-screen overlay.
+
+If a terminal or worktree cleanup reservation already exists when the update is requested, the
+transaction does not start. The client removes the temporary blocking overlay and exposes
+**Retry TerminalHost update** while the authoritative terminal state remains unchanged.
 
 The worker performs exactly one sequence:
 
@@ -247,8 +252,8 @@ The worker performs exactly one sequence:
 5. Apply the new authoritative registry and return to `Unlocked` only after every recreation and
    command succeeds.
 
-No optional literal `resume` prompt is sent. Shell process state, terminal scrollback, and empty
-shells do not survive the update.
+No optional literal `resume` prompt is sent. Shell process state, terminal scrollback, and terminals
+without a captured durable session do not survive the update.
 
 Any first file, process, control-API, host-start, terminal-start, or command-delivery failure enters
 `Fatal(error)`. The global terminal lock and blocking overlay remain for the life of that Treemon
@@ -264,8 +269,7 @@ graceful shutdown for every open exact instance owned by each target terminal, t
 terminal even when graceful shutdown is unavailable, rejected, or timed out. Exact survivor cleanup
 remains authoritative: after it succeeds, the activity service monotonically closes all and only
 the exact owned instances before the API returns. An unresolved survivor leaves the terminal
-registered and returns teardown failure. Automatic replacement is different: it never shuts down a
-non-idle session.
+registered and returns teardown failure.
 
 A forced process kill can leave Copilot's on-disk in-use marker behind. Treemon neither deletes nor
 overrides that marker. The next Resume may stop at Copilot's visible `Force resume?` confirmation;
@@ -429,9 +433,8 @@ the mailbox's serialized turn; the forward-only host I/O runs outside it so read
 and mutations fail immediately. Only the mailbox applies the success registry or fatal transition.
 
 `TerminalSessionActivity` queries only the exact terminal origins in the captured registry. It
-filters to open instances, chooses the greatest-activity durable session per terminal, and builds the
-provider-specific direct Resume command. Session activity no longer maintains a replacement activity
-epoch or startup-reconciliation set.
+applies the ordinary open-instance rule, chooses the greatest-activity durable session per terminal,
+and builds the provider-specific direct Resume command.
 
 The client receives `TerminalHostUpdateState` with the normal dashboard response. Elmish owns the
 button, immediate `Updating` transition, trigger command, success refresh, and permanent fatal
@@ -453,9 +456,9 @@ old host connected while reporter heartbeats disappear.
 
 ### Deliberate simplicity
 
-There is one host, one authoritative registry, one mailbox gate, and one three-case maintenance
-state. The update path has no proposal identity, eligibility policy, idle state, startup timing gate,
-retry timer, cooldown, recheck, rollback, recovery branch, or alternate host generation.
+Update coordination uses one host, one authoritative registry, one restart-session snapshot, and one
+three-case mailbox state. Success installs the new registry and unlocks the mailbox; any failure
+transitions it to `Fatal` for the rest of the server process.
 
 ## Verification
 
@@ -464,8 +467,8 @@ and dynamically allocated non-production ports. Tests never bind production port
 `treemon.ps1 deploy`, `start`, `stop`, or `restart`.
 
 - `EmbeddedTerminalUpdateTests` covers staged availability, the one-pass happy transition, omission
-  of shells outside the restart snapshot, immediate rejection of starts/cleanup/duplicates while
-  locked, and permanent fatal state after the first failure.
+  of terminals without captured durable sessions, immediate rejection of starts/cleanup/duplicates
+  while locked, cleanup-before-update rejection, and permanent fatal state after the first failure.
 - `TerminalOwnershipQueryTests` covers active and idle durable-session selection, stale-session
   exclusion, one latest conversation per terminal, and no literal agent `resume` prompt.
 - Dashboard browser tests cover the neutral toolbar action, immediate blocking overlay, success
@@ -494,17 +497,16 @@ and dynamically allocated non-production ports. Tests never bind production port
   active durable sessions; one host request closes every owned process tree and avoids partial bridge
   shutdown split-brain.
 - **Durable sessions only:** the snapshot selects one greatest-activity durable conversation per
-  current terminal. Empty shells and additional conversations remain history rather than recreated
-  processes.
+  current terminal. Terminals without an open durable session and additional conversations are not
+  recreated.
 - **Forward-only fatal failure:** the first failed operation enters permanent `Fatal`, retains the
   lock and overlay, and requires manual redeploy/restart. No retry, rollback, recovery, or second host
   generation can repeat or disguise a partial transaction.
 - **Mailbox serialization is the atomic lock:** snapshot capture completes inside the serialized
   update turn before queued starts can run; host I/O then runs asynchronously while mutations are
   rejected immediately.
-- **Current identity over replacement epochs:** current registry membership plus current open exact
-  session rows are sufficient for the user-triggered transaction; no startup-reconciliation or
-  replacement-epoch state exists.
+- **Captured current state:** current registry membership plus current open exact-session rows fully
+  define the restart set.
 - **Direct session selector:** recreated Copilot sessions use `--session-id=<id>` so the durable
   identity exists before extensions join. No free-form recovery prompt is sent.
 - **External production ownership:** deploy/restart remains forbidden from an embedded terminal
@@ -539,7 +541,7 @@ and dynamically allocated non-production ports. Tests never bind production port
 | `src/Extension/reporting/extension.mjs` | Acknowledged process presence, passive activity, heartbeat, background lifecycle, and shutdown reports |
 | `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `src/Server/SessionBridge.fs` | Shared exact registration plus capability-guarded graceful shutdown endpoint and bounded typed server control client |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
-| `src/Server/Program.fs` | Host/API lifecycle; no automatic TerminalHost update loop |
+| `src/Server/Program.fs` | Host/API lifecycle and TerminalHost restart-session query wiring |
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/AppTypes.fs` and `src/Client/App.fs` | Reconnect view generation, Elmish messages, guarded load completion, and focus effect |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |

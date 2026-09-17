@@ -150,12 +150,11 @@ shared state; no session-log parsing remains.
   the direct `--session-id=<id>` selector.
 - A user-requested TerminalHost update is narrower in a different way: it intersects only the
   current host registry with currently open exact-origin instances, selects one greatest-activity
-  durable session per terminal, and restarts both active and idle sessions. Empty shells and stale
-  durable history are omitted.
+  durable session per terminal, and restarts both active and idle sessions. Terminals without an
+  open durable session and stale durable history are omitted.
 - On server start, durable conversations and recently observed instances load from SQLite and are
   immediately projected through their ordinary liveness windows. Surviving extensions retry
-  acknowledged `session_present`; there is no separate startup-reconciliation set or replacement
-  timing policy.
+  acknowledged `session_present`.
 - Background-agent clocks remain process-instance-local and durable within retention. Restart
   restores unfinished background work for each exact identity, so an Idle parent remains
   effectively Working until its matching terminal event or stale-gap cleanup.
@@ -393,7 +392,7 @@ into lifecycle status.
 | Representative ordering | Use `(UpdatedAt, SessionId, ProcessIdentity)`; heartbeat-only `LastSeen` never replaces lifecycle ordering. |
 | Multiple instances | Preserve concurrent CLI processes and sequential sessions within one process as separate full fold rows. |
 | Ownership boundary | Session activity owns exact-instance state, liveness, origin, and monotonic closure; embedded-terminal orchestration owns host and terminal lifecycle. |
-| No startup reconciliation policy | Restored rows use the ordinary open window and surviving extensions re-present. No separate pending set, process probe, activity epoch, or update gate remains. |
+| Restart startup | Restore rows through the ordinary open window; surviving extensions re-present through the normal presence path. |
 | Background agents | Persist per-tool start/finish clocks on each exact instance; WaitingForUser outranks background Working. |
 | Footer | Decouple from the status dot and merge the SQL-ranked greatest durable exact instance per worktree. |
 | Activity | Use freshest source-tagged intent/title; bootstrap title from metadata, never infer intent. |

@@ -20,9 +20,11 @@
 - Loading skeleton on cold start until first worktree list completes
 - Fixed header bar with system metrics and deploy branch badge
 - A staged TerminalHost update adds one neutral
-  **Update TerminalHost (restarts sessions)** action beside Sort. Clicking it blocks the complete UI
-  until the forward-only terminal maintenance transaction succeeds or enters its permanent fatal
-  state; see `docs/spec/embedded-terminal.md`.
+  **Update TerminalHost (restarts sessions)** action beside Sort. Clicking it immediately blocks
+  dashboard interaction while the request starts. If terminal cleanup is already reserved, no
+  transaction starts and the control becomes **Retry TerminalHost update**; otherwise the blocking
+  overlay remains until the forward-only transaction succeeds or enters its permanent fatal state.
+  See `docs/spec/embedded-terminal.md`.
 - Header workspace ratios follow the fixed `Terminal | Canvas | Dashboard` order: `1:1:1`,
   `1:2:1`, and `2:2:1`. With either Terminal or Canvas hidden, the controls become `1:1` and `2:1`
   for the remaining pane and Dashboard; both wide modes use `2:1` and retain their three-pane
