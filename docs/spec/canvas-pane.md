@@ -87,7 +87,7 @@ essential evidence and caveats visible, replace stale or repeated prose, and dis
 detail on demand. Requested expansions and selected-text explanations use native `<details open>`
 with a short summary, so the answer is visible immediately and can be collapsed later; unrelated
 sections stay untouched. The optional audience reference guides documents for readers other than
-the direct user. Reusable profiles live in `~\.copilot\canvas-audience-profiles\` (under
+the direct user. Reusable profiles live in `~/.copilot/canvas-audience-profiles/` (under
 `COPILOT_HOME` when set), shared across repositories and worktrees rather than copied into a
 repository or the installed skill bundle. The user explicitly selects a saved profile for a doc;
 without that selection, authoring uses the current brief and context, not automatic profile

@@ -64,9 +64,9 @@ Preparing a draft for another audience does not authorize publishing or sending 
 ## Reuse and improve a user-level profile
 
 When reuse is likely or the user asks, save a small Markdown profile at
-`~\.copilot\canvas-audience-profiles\<audience-slug>.md`. When `COPILOT_HOME` is set, use
-`$COPILOT_HOME\canvas-audience-profiles\<audience-slug>.md` instead. These are per-user records shared
-across repositories and worktrees, not repository files or part of the installed `skills\canvas`
+`~/.copilot/canvas-audience-profiles/<audience-slug>.md`. When `COPILOT_HOME` is set, use
+`$COPILOT_HOME/canvas-audience-profiles/<audience-slug>.md` instead. These are per-user records shared
+across repositories and worktrees, not repository files or part of the installed `skills/canvas`
 bundle. Use this same store from Copilot or Claude; do not create per-repository copies.
 
 Keep separate audiences in separate files; do not create one for every one-off draft.
