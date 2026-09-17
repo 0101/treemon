@@ -650,6 +650,24 @@ let private requireError result =
         Assert.Fail("Expected an error")
         ""
 
+let private requireTerminalHostUpdate result =
+    match result with
+    | Ok state -> state
+    | Error error ->
+        Assert.Fail(
+            $"Expected an update state, got rejection %A{error}"
+        )
+        TerminalHostUpdateState.Unavailable
+
+let private requireTerminalHostUpdateError result =
+    match result with
+    | Error error -> error
+    | Ok state ->
+        Assert.Fail(
+            $"Expected an update rejection, got state %A{state}"
+        )
+        TerminalHostUpdateRequestError.CleanupInProgress
+
 let private closeManagedTerminal manager terminalId =
     WorktreeCleanup.closeEmbeddedTerminalWith
         WorktreeCleanup.noSessionClose
@@ -2364,6 +2382,55 @@ let private restartSession path command:
 [<Category("Fast")>]
 type EmbeddedTerminalUpdateTests() =
     [<Test>]
+    member _.``availability failure is logged once and reported unavailable``() =
+        task {
+            use host = new FakeControlHost()
+            host.Stage "2.0.0-unreadable-current-host" |> ignore
+            let marker =
+                $"availability-{Guid.NewGuid():N}"
+
+            let config =
+                { exactHostManagerConfig
+                    host
+                    noLaunch
+                    noTerminalCommand with
+                    ResolveProcessExecutable =
+                        fun _ _ -> Error marker }
+
+            let manager =
+                EmbeddedTerminal.createWithConfig config
+
+            let! _ =
+                EmbeddedTerminal.get manager
+                |> Async.StartAsTask
+
+            let! first =
+                EmbeddedTerminal.getUpdateState manager
+                |> Async.StartAsTask
+
+            let! second =
+                EmbeddedTerminal.getUpdateState manager
+                |> Async.StartAsTask
+
+            let occurrences =
+                File.ReadAllText(Log.currentPath())
+                    .Split(
+                        [| marker |],
+                        StringSplitOptions.None
+                    )
+                    .Length
+                - 1
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    first,
+                    Is.EqualTo TerminalHostUpdateState.Unavailable
+                )
+                Assert.That(second, Is.EqualTo first)
+                Assert.That(occurrences, Is.EqualTo 1))
+        }
+
+    [<Test>]
     member _.``staged update restarts only the captured durable sessions once``() =
         task {
             use host = new FakeControlHost()
@@ -2436,7 +2503,7 @@ type EmbeddedTerminalUpdateTests() =
                     Is.EqualTo TerminalHostUpdateState.Available
                 )
                 Assert.That(
-                    result,
+                    requireTerminalHostUpdate result,
                     Is.EqualTo TerminalHostUpdateState.Unavailable
                 )
                 Assert.That(
@@ -2558,15 +2625,83 @@ type EmbeddedTerminalUpdateTests() =
                     Does.Contain("update is in progress")
                 )
                 Assert.That(
-                    duplicateUpdate,
+                    requireTerminalHostUpdate duplicateUpdate,
                     Is.EqualTo TerminalHostUpdateState.Updating
                 )
                 Assert.That(
-                    completed,
+                    requireTerminalHostUpdate completed,
                     Is.EqualTo TerminalHostUpdateState.Unavailable
                 )
                 Assert.That(host.ShutdownRequestCount, Is.EqualTo 1)
                 Assert.That(launches.Count, Is.EqualTo 1))
+        }
+
+    [<Test>]
+    member _.``cleanup reservation rejects update without starting the transaction``() =
+        task {
+            use host = new FakeControlHost()
+            host.Stage "2.0.0-cleanup-held" |> ignore
+
+            let manager =
+                EmbeddedTerminal.createWithConfig
+                    (exactHostManagerConfig
+                        host
+                        noLaunch
+                        noTerminalCommand)
+
+            let running = worktree host.Root "cleanup-held"
+
+            let! started =
+                EmbeddedTerminal.start manager running
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let! reserved =
+                EmbeddedTerminal.reserveCleanup
+                    manager
+                    (EmbeddedTerminal.WorktreeTerminals running)
+                    None
+                |> Async.StartAsTask
+
+            let lease =
+                match requireOk reserved with
+                | Some value -> value
+                | None ->
+                    Assert.Fail(
+                        "Expected the running terminal to reserve cleanup"
+                    )
+                    Unchecked.defaultof<_>
+
+            try
+                let! result =
+                    EmbeddedTerminal.updateTerminalHostWithOperations
+                        TerminalHostReplacement.defaultOperations
+                        (fun _ -> Ok [])
+                        manager
+                    |> Async.StartAsTask
+
+                let! state =
+                    EmbeddedTerminal.getUpdateState manager
+                    |> Async.StartAsTask
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        requireTerminalHostUpdateError result,
+                        Is.EqualTo(
+                            TerminalHostUpdateRequestError.CleanupInProgress
+                        )
+                    )
+                    Assert.That(
+                        state,
+                        Is.EqualTo TerminalHostUpdateState.Available
+                    )
+                    Assert.That(
+                        host.ShutdownRequestCount,
+                        Is.Zero
+                    ))
+            finally
+                EmbeddedTerminal.releaseCleanup manager lease
         }
 
     [<Test>]
@@ -2627,29 +2762,28 @@ type EmbeddedTerminalUpdateTests() =
                     manager
                 |> Async.StartAsTask
 
-            let fatalMessage =
-                match failed with
-                | TerminalHostUpdateState.Fatal error -> error
-                | state ->
-                    Assert.Fail($"Expected fatal update state, got {state}")
-                    ""
+            let fatalState =
+                requireTerminalHostUpdate failed
+            let rejectedStartMessage = requireError rejectedStart
+            let rejectedCleanupMessage =
+                requireError rejectedCleanup
 
             Assert.Multiple(fun () ->
                 Assert.That(
-                    fatalMessage,
-                    Does.Contain("simulated command delivery failure")
+                    fatalState,
+                    Is.EqualTo TerminalHostUpdateState.Fatal
                 )
                 Assert.That(
-                    fatalMessage,
+                    rejectedStartMessage,
                     Does.Contain("Redeploy or restart Treemon manually")
                 )
                 Assert.That(
-                    requireError rejectedStart,
-                    Is.EqualTo fatalMessage
+                    rejectedStartMessage,
+                    Does.Not.Contain("simulated command delivery failure")
                 )
                 Assert.That(
-                    requireError rejectedCleanup,
-                    Is.EqualTo fatalMessage
+                    rejectedCleanupMessage,
+                    Is.EqualTo rejectedStartMessage
                 )
                 Assert.That(
                     duplicate,

@@ -238,7 +238,11 @@ type TerminalHostUpdateState =
     | Unavailable
     | Available
     | Updating
-    | Fatal of error: string
+    | Fatal
+
+[<RequireQualifiedAccess>]
+type TerminalHostUpdateRequestError =
+    | CleanupInProgress
 
 type EmbeddedTerminalStartResult =
     { Snapshot: EmbeddedTerminalSnapshot

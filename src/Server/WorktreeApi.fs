@@ -60,7 +60,8 @@ let readOnlyApi
       updateTerminalHost =
         fun () ->
             async {
-                return TerminalHostUpdateState.Unavailable
+                return
+                    Ok TerminalHostUpdateState.Unavailable
             }
       openEditor = fun _ -> async { return () }
       toggleAutoSync = fun _ _ -> async { return Error $"Auto-sync is not available in {modeName}" }
@@ -895,7 +896,7 @@ let internal worktreeApiWithLaunch
                 | None ->
                     async {
                         return
-                            TerminalHostUpdateState.Unavailable
+                            Ok TerminalHostUpdateState.Unavailable
                     }
           openEditor = openEditor validatePath
           toggleAutoSync = fun wtPath enabled ->

@@ -23,6 +23,7 @@ type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
       LastHost: DiscoveryManifest option
       Maintenance: MaintenanceState
+      LastUpdateAvailabilityError: string option
       CleanupReservations: Map<string, System.Guid> }
 
 type internal CloseTarget = OneTerminal of EmbeddedTerminalId | WorktreeTerminals of WorktreePath
@@ -41,6 +42,9 @@ type internal CleanupCompletion =
       ClosedTerminalIds: Set<EmbeddedTerminalId>
       Interruption: string option }
 
+type private TerminalHostUpdateResult =
+    Result<TerminalHostUpdateState, TerminalHostUpdateRequestError>
+
 type private Message =
     | Start of WorktreePath * command: string option * AsyncReplyChannel<Result<EmbeddedTerminalStartResult, string>>
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
@@ -52,10 +56,10 @@ type private Message =
     | UpdateTerminalHost of
         RestartSessionQuery *
         Operations *
-        AsyncReplyChannel<TerminalHostUpdateState>
+        AsyncReplyChannel<TerminalHostUpdateResult>
     | FinishTerminalHostUpdate of
         Result<DiscoveryManifest * RegistrySnapshot, string> *
-        AsyncReplyChannel<TerminalHostUpdateState>
+        AsyncReplyChannel<TerminalHostUpdateResult>
 
 type Manager = private | Manager of Config * MailboxProcessor<Message>
 
@@ -281,27 +285,48 @@ let private startTerminal config (state: ManagerState) worktreePath command =
 let private updateInProgressError =
     "TerminalHost update is in progress; terminal actions remain locked until it completes."
 
-let private fatalUpdateMessage error =
-    $"TerminalHost update failed: {error}. Terminal actions remain locked. Redeploy or restart Treemon manually from an external PowerShell window."
+let private fatalUpdateMessage =
+    "TerminalHost update failed. Terminal actions remain locked. Redeploy or restart Treemon manually from an external PowerShell window."
 
 let private cleanupInProgressError = "Terminal cleanup is in progress for this worktree; try again when it completes."
 
 let private terminalHostUpdateState config (state: ManagerState) =
     match state.Maintenance with
     | MaintenanceState.Updating _ ->
-        TerminalHostUpdateState.Updating
-    | MaintenanceState.Fatal error ->
-        TerminalHostUpdateState.Fatal error
+        state, TerminalHostUpdateState.Updating
+    | MaintenanceState.Fatal _ ->
+        state, TerminalHostUpdateState.Fatal
     | MaintenanceState.Unlocked ->
         match state.LastHost with
-        | Some host
-            when TerminalHostReplacement.updateAvailable
-                     config
-                     host ->
-            TerminalHostUpdateState.Available
-        | Some _
         | None ->
+            { state with
+                LastUpdateAvailabilityError = None },
             TerminalHostUpdateState.Unavailable
+        | Some host ->
+            match
+                TerminalHostReplacement.updateAvailable
+                    config
+                    host
+            with
+            | Ok available ->
+                { state with
+                    LastUpdateAvailabilityError = None },
+                if available then
+                    TerminalHostUpdateState.Available
+                else
+                    TerminalHostUpdateState.Unavailable
+            | Error error ->
+                if
+                    state.LastUpdateAvailabilityError
+                    <> Some error
+                then
+                    Log.log
+                        "TerminalHost"
+                        $"Could not determine update availability: {error}"
+
+                { state with
+                    LastUpdateAvailabilityError = Some error },
+                TerminalHostUpdateState.Unavailable
 
 let private terminalMutationLockError (state: ManagerState) =
     match state.Maintenance with
@@ -312,15 +337,14 @@ let private terminalMutationLockError (state: ManagerState) =
         Some error
 
 let private enterFatalUpdate error (state: ManagerState) =
-    let message = fatalUpdateMessage error
-
     Log.log
         "TerminalHost"
         $"Update entered a permanent fatal state: {error}"
 
-    { withHostFailure message state with
-        Maintenance = MaintenanceState.Fatal message },
-    TerminalHostUpdateState.Fatal message
+    { withHostFailure fatalUpdateMessage state with
+        Maintenance =
+            MaintenanceState.Fatal fatalUpdateMessage },
+    TerminalHostUpdateState.Fatal
 
 let private prepareUpdate
     config
@@ -517,28 +541,35 @@ let internal createWithConfig config =
 
                         return! loop { state with CleanupReservations = reservations }
                     | GetUpdateState reply ->
+                        let next, update =
+                            terminalHostUpdateState
+                                config
+                                state
+
                         return!
-                            state
-                            |> terminalHostUpdateState config
-                            |> fun update ->
-                                respond reply update state
+                            next
+                            |> respond reply update
                             |> loop
                     | UpdateTerminalHost(_, _, reply)
                         when state.Maintenance
                              <> MaintenanceState.Unlocked ->
+                        let next, update =
+                            terminalHostUpdateState
+                                config
+                                state
+
                         return!
-                            state
-                            |> terminalHostUpdateState config
-                            |> fun update ->
-                                respond reply update state
+                            next
+                            |> respond reply (Ok update)
                             |> loop
                     | UpdateTerminalHost(_, _, reply)
                         when not state.CleanupReservations.IsEmpty ->
                         return!
                             state
-                            |> terminalHostUpdateState config
-                            |> fun update ->
-                                respond reply update state
+                            |> respond
+                                reply
+                                (Error
+                                    TerminalHostUpdateRequestError.CleanupInProgress)
                             |> loop
                     | UpdateTerminalHost(
                         queryRestartSessions,
@@ -558,14 +589,15 @@ let internal createWithConfig config =
 
                             return!
                                 fatal
-                                |> respond reply update
+                                |> respond reply (Ok update)
                                 |> loop
                         | Ok None ->
                             return!
                                 current
                                 |> respond
                                     reply
-                                    TerminalHostUpdateState.Unavailable
+                                    (Ok
+                                        TerminalHostUpdateState.Unavailable)
                                 |> loop
                         | Ok(
                             Some(
@@ -623,7 +655,8 @@ let internal createWithConfig config =
                                     MaintenanceState.Unlocked }
                             |> respond
                                 reply
-                                TerminalHostUpdateState.Unavailable
+                                (Ok
+                                    TerminalHostUpdateState.Unavailable)
                             |> loop
                     | FinishTerminalHostUpdate(Error error, reply) ->
                         let fatal, update =
@@ -631,13 +664,14 @@ let internal createWithConfig config =
 
                         return!
                             fatal
-                            |> respond reply update
+                            |> respond reply (Ok update)
                             |> loop
                 }
 
             loop
                 { LastSnapshot = EmbeddedTerminalSnapshot.empty; LastHost = None
                   Maintenance = MaintenanceState.Unlocked
+                  LastUpdateAvailabilityError = None
                   CleanupReservations = Map.empty })
 
     Manager(config, agent)

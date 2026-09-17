@@ -454,7 +454,7 @@ let private focusModel : Model =
       IsLoading = false
       HasError = false
       SortMode = ByActivity
-      TerminalHostUpdate = TerminalHostUpdateState.Unavailable
+      TerminalHostUpdate = TerminalHostUpdateModel.initial
       IsCompact = false
       SchedulerEvents = []
       LatestByCategory = Map.empty
@@ -497,6 +497,116 @@ let private focusModel : Model =
       OverviewHistoryRequestInFlight = None
       WorktreeSearch = WorktreeSearch.initial
       EmbeddedTerminalPollInFlight = false }
+
+let private dashboardResponse terminalHostUpdate =
+    { Repos = []
+      SchedulerEvents = []
+      LatestByCategory = Map.empty
+      AppVersion = "test"
+      DeployBranch = None
+      SystemMetrics = None
+      EditorName = "VS Code"
+      WorktreeSkills = []
+      CollapsedRepos = Set.empty
+      TerminalPaneOpen = false
+      CanvasPaneOpen = false
+      OverviewPanelOpen = false
+      WorkspaceWidth = WorkspaceWidth.EqualThirds
+      TerminalHostUpdate = terminalHostUpdate }
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type TerminalHostUpdateStateTests() =
+
+    [<Test>]
+    member _.``Stale unavailable refresh cannot settle a locally requested update``() =
+        let ready =
+            { focusModel with
+                TerminalHostUpdate =
+                    TerminalHostUpdateModel.Observed
+                        TerminalHostUpdateState.Available }
+
+        let started, _ =
+            App.update UpdateTerminalHost ready
+
+        let refreshed, _ =
+            App.update
+                (DataLoaded(
+                    dashboardResponse
+                        TerminalHostUpdateState.Unavailable,
+                    DateTimeOffset.UtcNow
+                ))
+                started
+
+        Assert.That(
+            refreshed.TerminalHostUpdate,
+            Is.EqualTo(
+                TerminalHostUpdateModel.RequestInFlight
+            )
+        )
+
+    [<Test>]
+    member _.``Server-observed update settles from an unavailable refresh``() =
+        let updating =
+            { focusModel with
+                TerminalHostUpdate =
+                    TerminalHostUpdateModel.Observed
+                        TerminalHostUpdateState.Updating }
+
+        let refreshed, _ =
+            App.update
+                (DataLoaded(
+                    dashboardResponse
+                        TerminalHostUpdateState.Unavailable,
+                    DateTimeOffset.UtcNow
+                ))
+                updating
+
+        Assert.That(
+            refreshed.TerminalHostUpdate,
+            Is.EqualTo TerminalHostUpdateModel.initial
+        )
+
+    [<Test>]
+    member _.``Cleanup rejection remains retryable across available refreshes``() =
+        let rejected, _ =
+            App.update
+                (TerminalHostUpdateCompleted(
+                    Error
+                        TerminalHostUpdateRequestError.CleanupInProgress
+                ))
+                { focusModel with
+                    TerminalHostUpdate =
+                        TerminalHostUpdateModel.RequestInFlight }
+
+        let refreshed, _ =
+            App.update
+                (DataLoaded(
+                    dashboardResponse
+                        TerminalHostUpdateState.Available,
+                    DateTimeOffset.UtcNow
+                ))
+                rejected
+
+        let retrying, command =
+            App.update UpdateTerminalHost refreshed
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                refreshed.TerminalHostUpdate,
+                Is.EqualTo(
+                    TerminalHostUpdateModel.RequestRejected
+                        TerminalHostUpdateRequestError.CleanupInProgress
+                )
+            )
+            Assert.That(
+                retrying.TerminalHostUpdate,
+                Is.EqualTo(
+                    TerminalHostUpdateModel.RequestInFlight
+                )
+            )
+            Assert.That(command, Is.Not.Empty))
 
 [<TestFixture>]
 [<Category("Unit")>]

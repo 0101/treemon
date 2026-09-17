@@ -35,11 +35,7 @@ let updateTerminalHost () =
             worktreeApi.Value.updateTerminalHost ())
         ()
         TerminalHostUpdateCompleted
-        (fun _ ->
-            TerminalHostUpdateCompleted(
-                TerminalHostUpdateState.Fatal
-                    "The TerminalHost update request failed. Terminal actions remain blocked in this browser. Redeploy or restart Treemon manually from an external PowerShell window."
-            ))
+        TerminalHostUpdateRequestFailed
 
 let fetchSyncStatus () =
     Cmd.OfAsync.perform (fun () -> worktreeApi.Value.getSyncStatus ()) () SyncStatusUpdate
@@ -100,8 +96,7 @@ let init () =
       IsLoading = true
       HasError = false
       SortMode = ByActivity
-      TerminalHostUpdate =
-        TerminalHostUpdateState.Unavailable
+      TerminalHostUpdate = TerminalHostUpdateModel.initial
       IsCompact = false
       SchedulerEvents = []
       LatestByCategory = Map.empty
@@ -446,10 +441,37 @@ type private ActiveOverlay =
     | Confirmation
     | CreateWorktree
 
+let private effectiveTerminalHostUpdateState =
+    function
+    | TerminalHostUpdateModel.Observed state -> state
+    | TerminalHostUpdateModel.RequestInFlight ->
+        TerminalHostUpdateState.Updating
+    | TerminalHostUpdateModel.RequestRejected
+        TerminalHostUpdateRequestError.CleanupInProgress ->
+        TerminalHostUpdateState.Available
+
+let private observedTerminalHostUpdate =
+    function
+    | TerminalHostUpdateState.Unavailable ->
+        TerminalHostUpdateModel.Observed
+            TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available ->
+        TerminalHostUpdateModel.Observed
+            TerminalHostUpdateState.Available
+    | TerminalHostUpdateState.Updating ->
+        TerminalHostUpdateModel.Observed
+            TerminalHostUpdateState.Updating
+    | TerminalHostUpdateState.Fatal ->
+        TerminalHostUpdateModel.Observed
+            TerminalHostUpdateState.Fatal
+
 let private activeOverlay model =
-    match model.TerminalHostUpdate with
+    match
+        model.TerminalHostUpdate
+        |> effectiveTerminalHostUpdateState
+    with
     | TerminalHostUpdateState.Updating
-    | TerminalHostUpdateState.Fatal _ ->
+    | TerminalHostUpdateState.Fatal ->
         Some ActiveOverlay.TerminalHostUpdate
     | TerminalHostUpdateState.Unavailable
     | TerminalHostUpdateState.Available
@@ -468,30 +490,75 @@ let private activeOverlay model =
         None
 
 let private mergeTerminalHostUpdate current reported =
-    match current, reported with
-    | TerminalHostUpdateState.Updating,
-      TerminalHostUpdateState.Available ->
+    match current with
+    | TerminalHostUpdateModel.RequestInFlight ->
+        match reported with
+        | TerminalHostUpdateState.Fatal ->
+            observedTerminalHostUpdate
+                TerminalHostUpdateState.Fatal
+        | TerminalHostUpdateState.Unavailable
+        | TerminalHostUpdateState.Available
+        | TerminalHostUpdateState.Updating ->
+            current
+    | TerminalHostUpdateModel.RequestRejected
+        TerminalHostUpdateRequestError.CleanupInProgress ->
+        match reported with
+        | TerminalHostUpdateState.Updating ->
+            observedTerminalHostUpdate
+                TerminalHostUpdateState.Updating
+        | TerminalHostUpdateState.Fatal ->
+            observedTerminalHostUpdate
+                TerminalHostUpdateState.Fatal
+        | TerminalHostUpdateState.Unavailable
+        | TerminalHostUpdateState.Available ->
+            current
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Fatal ->
         current
-    | TerminalHostUpdateState.Fatal _,
-      TerminalHostUpdateState.Fatal error ->
-        TerminalHostUpdateState.Fatal error
-    | TerminalHostUpdateState.Fatal _,
-      (TerminalHostUpdateState.Unavailable
-      | TerminalHostUpdateState.Available
-      | TerminalHostUpdateState.Updating) ->
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Available
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Updating ->
+        observedTerminalHostUpdate reported
+
+let private canRequestTerminalHostUpdate =
+    function
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Available
+    | TerminalHostUpdateModel.RequestRejected
+        TerminalHostUpdateRequestError.CleanupInProgress ->
+        true
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Updating
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Fatal
+    | TerminalHostUpdateModel.RequestInFlight ->
+        false
+
+let private completeTerminalHostUpdate current result =
+    match current with
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Fatal ->
         current
-    | (TerminalHostUpdateState.Unavailable
-      | TerminalHostUpdateState.Available
-      | TerminalHostUpdateState.Updating),
-      ((TerminalHostUpdateState.Unavailable
-      | TerminalHostUpdateState.Available
-      | TerminalHostUpdateState.Updating) as next) ->
-        next
-    | (TerminalHostUpdateState.Unavailable
-      | TerminalHostUpdateState.Available
-      | TerminalHostUpdateState.Updating),
-      TerminalHostUpdateState.Fatal error ->
-        TerminalHostUpdateState.Fatal error
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Available
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Updating
+    | TerminalHostUpdateModel.RequestInFlight
+    | TerminalHostUpdateModel.RequestRejected
+        TerminalHostUpdateRequestError.CleanupInProgress ->
+        match result with
+        | Ok state -> observedTerminalHostUpdate state
+        | Error
+            TerminalHostUpdateRequestError.CleanupInProgress ->
+            TerminalHostUpdateModel.RequestRejected
+                TerminalHostUpdateRequestError.CleanupInProgress
 
 let private canOpenOverlay model =
     activeOverlay model |> Option.isNone
@@ -679,28 +746,47 @@ let update msg model =
         Cmd.none
 
     | UpdateTerminalHost
-        when model.TerminalHostUpdate
-             <> TerminalHostUpdateState.Available ->
+        when not (
+            canRequestTerminalHostUpdate
+                model.TerminalHostUpdate
+        ) ->
         model, Cmd.none
 
     | UpdateTerminalHost ->
         { model with
             TerminalHostUpdate =
-                TerminalHostUpdateState.Updating },
+                TerminalHostUpdateModel.RequestInFlight },
         updateTerminalHost ()
 
-    | TerminalHostUpdateCompleted update ->
-        { model with TerminalHostUpdate = update },
-        match update with
-        | TerminalHostUpdateState.Unavailable ->
+    | TerminalHostUpdateCompleted result ->
+        { model with
+            TerminalHostUpdate =
+                completeTerminalHostUpdate
+                    model.TerminalHostUpdate
+                    result },
+        match result with
+        | Ok TerminalHostUpdateState.Unavailable ->
             Cmd.batch [
                 fetchWorktrees ()
                 fetchEmbeddedTerminals worktreeApi
             ]
-        | TerminalHostUpdateState.Available
-        | TerminalHostUpdateState.Updating
-        | TerminalHostUpdateState.Fatal _ ->
+        | Ok TerminalHostUpdateState.Available
+        | Ok TerminalHostUpdateState.Updating
+        | Ok TerminalHostUpdateState.Fatal
+        | Error TerminalHostUpdateRequestError.CleanupInProgress ->
             Cmd.none
+
+    | TerminalHostUpdateRequestFailed error ->
+        Fable.Core.JS.console.error (
+            "[terminal-host] update request failed",
+            error
+        )
+
+        { model with
+            TerminalHostUpdate =
+                TerminalHostUpdateModel.Observed
+                    TerminalHostUpdateState.Fatal },
+        Cmd.none
 
     | ToggleCompact ->
         { model with IsCompact = not model.IsCompact }, Cmd.none
@@ -1657,7 +1743,7 @@ let viewTerminalHostUpdateOverlay state =
                     ]
                 ]
             ]
-    | TerminalHostUpdateState.Fatal error ->
+    | TerminalHostUpdateState.Fatal ->
         ModalOverlay.modalOverlayWithClasses
             (Some "terminal-host-update-overlay")
             None
@@ -1672,7 +1758,8 @@ let viewTerminalHostUpdateOverlay state =
                     prop.children [
                         Html.div [
                             prop.className "modal-error-message"
-                            prop.text error
+                            prop.text
+                                "TerminalHost update failed. Terminal actions remain blocked. Redeploy or restart Treemon manually from an external PowerShell window."
                         ]
                     ]
                 ]
@@ -1737,10 +1824,9 @@ let viewAppHeader model dispatch =
                                 prop.onClick (fun _ -> dispatch ToggleSort)
                                 prop.text ($"Sort: {sortLabel model.SortMode}")
                             ]
-                            if
-                                model.TerminalHostUpdate
-                                = TerminalHostUpdateState.Available
-                            then
+                            match model.TerminalHostUpdate with
+                            | TerminalHostUpdateModel.Observed
+                                TerminalHostUpdateState.Available ->
                                 Html.button [
                                     prop.className "action-btn"
                                     yield! noFocusProps
@@ -1751,6 +1837,25 @@ let viewAppHeader model dispatch =
                                     prop.text
                                         "Update TerminalHost (restarts sessions)"
                                 ]
+                            | TerminalHostUpdateModel.RequestRejected
+                                TerminalHostUpdateRequestError.CleanupInProgress ->
+                                Html.button [
+                                    prop.className "action-btn"
+                                    yield! noFocusProps
+                                    prop.onClick (fun _ ->
+                                        dispatch UpdateTerminalHost)
+                                    prop.title
+                                        "Terminal cleanup is in progress. Retry the update when cleanup completes."
+                                    prop.text "Retry TerminalHost update"
+                                ]
+                            | TerminalHostUpdateModel.Observed
+                                TerminalHostUpdateState.Unavailable
+                            | TerminalHostUpdateModel.Observed
+                                TerminalHostUpdateState.Updating
+                            | TerminalHostUpdateModel.Observed
+                                TerminalHostUpdateState.Fatal
+                            | TerminalHostUpdateModel.RequestInFlight ->
+                                ()
                             Html.button [
                                 prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
                                 yield! noFocusProps
@@ -1906,7 +2011,8 @@ let view model dispatch =
                 match activeOverlay model with
                 | Some ActiveOverlay.TerminalHostUpdate ->
                     viewTerminalHostUpdateOverlay
-                        model.TerminalHostUpdate
+                        (effectiveTerminalHostUpdateState
+                            model.TerminalHostUpdate)
                 | Some ActiveOverlay.WorktreeSearch ->
                     WorktreeSearch.view
                         (WorktreeSearchMsg >> dispatch)

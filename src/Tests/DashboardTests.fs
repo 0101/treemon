@@ -75,7 +75,13 @@ type DashboardTests() =
                     TaskCreationOptions.RunContinuationsAsynchronously
                 )
             let finishUpdate =
-                TaskCompletionSource<TerminalHostUpdateState>(
+                TaskCompletionSource<
+                    Result<TerminalHostUpdateState, TerminalHostUpdateRequestError>
+                 >(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+            let refreshAfterCompletion =
+                TaskCompletionSource<unit>(
                     TaskCreationOptions.RunContinuationsAsynchronously
                 )
 
@@ -93,7 +99,14 @@ type DashboardTests() =
                                 )
                             let reportedState =
                                 if finishUpdate.Task.IsCompletedSuccessfully then
-                                    finishUpdate.Task.Result
+                                    refreshAfterCompletion.TrySetResult()
+                                    |> ignore
+
+                                    match finishUpdate.Task.Result with
+                                    | Ok state -> state
+                                    | Error
+                                        TerminalHostUpdateRequestError.CleanupInProgress ->
+                                        TerminalHostUpdateState.Available
                                 else
                                     TerminalHostUpdateState.Available
                             let body =
@@ -151,10 +164,13 @@ type DashboardTests() =
                 page.Locator(".terminal-host-update-overlay")
             do! overlay.WaitForAsync()
 
+            let completeUpdate result =
+                finishUpdate.TrySetResult result |> ignore
+
             return
                 overlay,
-                fun result ->
-                    finishUpdate.TrySetResult result |> ignore
+                completeUpdate,
+                refreshAfterCompletion.Task
         }
 
     override this.ContextOptions() =
@@ -191,7 +207,7 @@ type DashboardTests() =
     member this.``TerminalHost update action blocks immediately and clears after success``() =
         task {
             let! page = this.Context.NewPageAsync()
-            let! overlay, finishUpdate =
+            let! overlay, finishUpdate, _ =
                 startTerminalHostUpdate page
 
             Assert.That(
@@ -201,7 +217,9 @@ type DashboardTests() =
                 Is.EqualTo "Updating TerminalHost"
             )
 
-            finishUpdate TerminalHostUpdateState.Unavailable
+            finishUpdate (
+                Ok TerminalHostUpdateState.Unavailable
+            )
 
             do!
                 overlay.WaitForAsync(
@@ -225,16 +243,60 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``TerminalHost cleanup rejection exposes a retry action after refresh``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let! overlay, finishUpdate, refreshAfterCompletion =
+                startTerminalHostUpdate page
+
+            finishUpdate (
+                Error
+                    TerminalHostUpdateRequestError.CleanupInProgress
+            )
+
+            do!
+                overlay.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Detached
+                    )
+                )
+
+            do!
+                refreshAfterCompletion.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            let retry =
+                page.GetByTitle(
+                    "Terminal cleanup is in progress. Retry the update when cleanup completes."
+                )
+
+            do! retry.WaitForAsync()
+
+            Assert.That(
+                retry.TextContentAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                Is.EqualTo "Retry TerminalHost update"
+            )
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``TerminalHost fatal update keeps the blocking recovery overlay``() =
         task {
             let! page = this.Context.NewPageAsync()
-            let! overlay, finishUpdate =
+            let! overlay, finishUpdate, _ =
                 startTerminalHostUpdate page
 
             let error =
-                "TerminalHost update failed. Redeploy or restart Treemon manually from an external PowerShell window."
+                "TerminalHost update failed. Terminal actions remain blocked. Redeploy or restart Treemon manually from an external PowerShell window."
 
-            finishUpdate (TerminalHostUpdateState.Fatal error)
+            finishUpdate (
+                Ok TerminalHostUpdateState.Fatal
+            )
 
             let errorMessage =
                 overlay.Locator(".modal-error-message")

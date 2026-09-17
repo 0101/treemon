@@ -66,10 +66,8 @@ let internal tryStagedExecutable config (host: DiscoveryManifest) =
         }
 
 let internal updateAvailable config host =
-    match tryStagedExecutable config host with
-    | Ok(Some _) -> true
-    | Ok None
-    | Error _ -> false
+    tryStagedExecutable config host
+    |> Result.map Option.isSome
 
 let internal hostedTerminals records =
     records
