@@ -12,6 +12,10 @@ export const CANVAS_FILENAME_PATTERN = contract.pattern;
 
 const canvasFilenameRegex = new RegExp(CANVAS_FILENAME_PATTERN);
 
+/**
+ * @param {unknown} filename
+ * @returns {filename is string}
+ */
 export function isValidCanvasFilename(filename) {
   if (typeof filename !== "string") return false;
   const match = canvasFilenameRegex.exec(filename);

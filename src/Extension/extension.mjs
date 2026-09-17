@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { isValidCanvasFilename } from "./canvas-filename.mjs";
+import { isSystemViewFilename } from "./canvas-doc-kinds.mjs";
 import {
   canvasFilenameForClaim,
   watchCanvasWrites,
@@ -34,11 +35,6 @@ const CANVAS_SEND_SCRIPT =
   `<script>${readFileSync(new URL("./canvas-send.js", import.meta.url), "utf8")}</script>`;
 const CANVAS_SELECTION_CONTEXT_SCRIPT =
   `<script>${readFileSync(new URL("./canvas-selection-context.js", import.meta.url), "utf8")}</script>`;
-const SYSTEM_VIEW_FILENAMES = new Set(
-  JSON.parse(readFileSync(new URL("./canvas-doc-kinds.json", import.meta.url), "utf8"))
-    .map((filename) => filename.toLowerCase()),
-);
-
 const TRANSPORT_SHIM = `<script>
 if (window.parent === window) {
   window.__canvasTopLevelTransportAvailable = true;
@@ -85,7 +81,7 @@ function hashContent(content) {
 function injectScripts(html, port, filename) {
   const shim = TRANSPORT_SHIM.replaceAll("__PORT__", String(port));
   const agentDocScripts =
-    SYSTEM_VIEW_FILENAMES.has(filename.toLowerCase())
+    isSystemViewFilename(filename)
       ? ""
       : "\n" + CANVAS_SEND_SCRIPT + "\n" + CANVAS_SELECTION_CONTEXT_SCRIPT;
   const scripts = shim + agentDocScripts + "\n" + CONTENT_POLL_SCRIPT;
