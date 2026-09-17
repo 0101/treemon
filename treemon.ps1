@@ -1182,6 +1182,21 @@ function Install-CopilotExtension(
     Write-Host "$FriendlyName installed to $dest" -ForegroundColor Green
 }
 
+function Install-CanvasSkill([string]$ConfigDirectory) {
+    if (-not (Test-Path -LiteralPath $ConfigDirectory -PathType Container)) { return }
+
+    $source = Join-Path $PSScriptRoot "src" "Extension" "skill"
+    if (-not (Test-Path -LiteralPath (Join-Path $source "SKILL.md") -PathType Leaf)) {
+        throw "Canvas skill not found in $source"
+    }
+
+    $destination = Join-Path $ConfigDirectory "skills" "canvas"
+    New-Item -ItemType Directory -Path $destination -Force | Out-Null
+    Get-ChildItem -LiteralPath $source |
+        Copy-Item -Destination $destination -Recurse -Force
+    Write-Host "Canvas skill installed to $destination" -ForegroundColor Green
+}
+
 function Install-Extension {
     $src = Join-Path $PSScriptRoot "src" "Extension"
     $requiredFiles = @(
@@ -1193,29 +1208,8 @@ function Install-Extension {
     )
     Install-CopilotExtension $src "canvas-bridge" "Canvas bridge extension" $requiredFiles
 
-    # Install canvas authoring skill
-    $skillSource = Join-Path $src "skill" "SKILL.md"
-    if (Test-Path $skillSource) {
-        $installed = @()
-
-        $copilotDir = Join-Path $HOME ".copilot" "skills" "canvas"
-        if (Test-Path (Join-Path $HOME ".copilot")) {
-            if (-not (Test-Path $copilotDir)) { New-Item -ItemType Directory -Path $copilotDir | Out-Null }
-            Copy-Item $skillSource (Join-Path $copilotDir "SKILL.md") -Force
-            $installed += "GitHub Copilot CLI"
-        }
-
-        $claudeDir = Join-Path $HOME ".claude" "skills" "canvas"
-        if (Test-Path (Join-Path $HOME ".claude")) {
-            if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir | Out-Null }
-            Copy-Item $skillSource (Join-Path $claudeDir "SKILL.md") -Force
-            $installed += "Claude Code"
-        }
-
-        if ($installed.Count -gt 0) {
-            $installed | ForEach-Object { Write-Host "  Canvas skill installed for $_" -ForegroundColor Green }
-        }
-    }
+    Install-CanvasSkill (Get-CopilotConfigDirectory)
+    Install-CanvasSkill (Join-Path $HOME ".claude")
 }
 
 function Install-ReportingExtension {
