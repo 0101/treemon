@@ -39,10 +39,35 @@ type WorktreeDiffLayers =
       LocalChanges: bool
       Untracked: bool }
 
+[<RequireQualifiedAccess>]
+type internal DiffComparisonTarget =
+    private
+    | ConfiguredBase
+    | LocalBranch of string
+
+let internal configuredBaseTarget =
+    DiffComparisonTarget.ConfiguredBase
+
+let internal tryLocalBranchTarget branchName =
+    if GitWorktree.isSafeComparisonBranch branchName then
+        Some(DiffComparisonTarget.LocalBranch branchName)
+    else
+        None
+
 type internal DiffComparisonContext =
     { WorktreePath: string
       UpstreamRemote: string
       BaseBranch: string }
+
+[<RequireQualifiedAccess>]
+type internal ConfiguredDiffComparison =
+    | Remote of label: string
+    | Local of branch: string
+    | Missing of label: string
+
+type internal DiffComparisonTargets =
+    { ConfiguredBase: ConfiguredDiffComparison
+      LocalBranches: string list }
 
 type WorktreeDiffSummary =
     { BaseRef: string
@@ -51,13 +76,17 @@ type WorktreeDiffSummary =
 
 type WorktreeDiffOperation =
     | ResolveBase
+    | ResolveComparisonTarget
     | ResolveMergeBase
+    | EnumerateBranches
     | EnumerateTracked
     | EnumerateUntracked
     | LoadFile
 
 type WorktreeDiffError =
     | BaseNotFound of baseBranch: string * remoteRef: string
+    | ComparisonTargetNotFound of branch: string
+    | NoCommonAncestor of baseRef: string
     | GitStartFailed of WorktreeDiffOperation
     | GitTimedOut of WorktreeDiffOperation
     | GitFailed of WorktreeDiffOperation * exitCode: int
@@ -128,6 +157,43 @@ let private mapDiffProcessFailure
     | ProcessRunner.StartFailed _ -> GitStartFailed operation
     | ProcessRunner.TimedOut -> GitTimedOut operation
 
+let private captureDiffGit
+    (deadline: ProcessRunner.ResponseDeadline)
+    (limits: ProcessRunner.CaptureLimits)
+    (repoRoot: string)
+    (arguments: string list)
+    =
+    let gitArguments =
+        [ "-C"; repoRoot; "-c"; "core.quotepath=false" ] @ arguments
+
+    ProcessRunner.capture
+        { diffGit with
+            Limits = limits
+            Deadline = ProcessRunner.SharedDeadline deadline }
+        gitArguments
+
+let private mapDiffGitCapture
+    (operation: WorktreeDiffOperation)
+    (result:
+        Result<
+            ProcessRunner.ArgumentListOutput,
+            ProcessRunner.ArgumentListFailure
+         >)
+    : Result<byte[], WorktreeDiffError> =
+    match result with
+    | Error failure -> Error(mapDiffProcessFailure operation failure)
+    // A truncated patch is unusable here — the caller parses these bytes — so the diff
+    // viewer keeps its typed capture-limit error even though the process exited.
+    | Ok output when not output.Truncated.IsEmpty ->
+        Error(GitCaptureLimitExceeded(operation, List.head output.Truncated))
+    | Ok output when output.ExitCode <> 0 ->
+        Log.log
+            "WorktreeDiff"
+            $"Git {operation} failed with exit {output.ExitCode} and {output.Stderr.Length} stderr bytes"
+
+        Error(GitFailed(operation, output.ExitCode))
+    | Ok output -> Ok output.Stdout
+
 let private runDiffGit
     (deadline: ProcessRunner.ResponseDeadline)
     (operation: WorktreeDiffOperation)
@@ -136,30 +202,10 @@ let private runDiffGit
     (arguments: string list)
     =
     async {
-        let gitArguments =
-            [ "-C"; repoRoot; "-c"; "core.quotepath=false" ] @ arguments
-
         let! result =
-            ProcessRunner.capture
-                { diffGit with
-                    Limits = limits
-                    Deadline = ProcessRunner.SharedDeadline deadline }
-                gitArguments
+            captureDiffGit deadline limits repoRoot arguments
 
-        return
-            match result with
-            | Error failure -> Error(mapDiffProcessFailure operation failure)
-            // A truncated patch is unusable here — the caller parses these bytes — so the diff
-            // viewer keeps its typed capture-limit error even though the process exited.
-            | Ok output when not output.Truncated.IsEmpty ->
-                Error(GitCaptureLimitExceeded(operation, List.head output.Truncated))
-            | Ok output when output.ExitCode <> 0 ->
-                Log.log
-                    "WorktreeDiff"
-                    $"Git {operation} failed with exit {output.ExitCode} and {output.Stderr.Length} stderr bytes"
-
-                Error(GitFailed(operation, output.ExitCode))
-            | Ok output -> Ok output.Stdout
+        return mapDiffGitCapture operation result
     }
 
 let private decodeGitOutput
@@ -184,10 +230,36 @@ let private trimSingleLine
         | [| line |] -> Ok line
         | _ -> Error(InvalidGitOutput operation))
 
-let private runRefExists
+let private localBranchEnumerationArguments =
+    [ "for-each-ref"
+      "--format=%(refname:lstrip=2)"
+      "refs/heads" ]
+
+let private enumerateLocalBranches
+    operation
+    deadline
+    repoRoot
+    baseBranch
+    =
+    asyncResult {
+        let! bytes =
+            runDiffGit
+                deadline
+                operation
+                ProcessRunner.CaptureLimits.data
+                repoRoot
+                localBranchEnumerationArguments
+
+        return!
+            decodeGitOutput operation bytes
+            |> Result.map (GitWorktree.parseLocalBranches baseBranch)
+    }
+
+let private runRefProbe
     (deadline: ProcessRunner.ResponseDeadline)
+    (operation: WorktreeDiffOperation)
     (repoRoot: string)
-    (gitRef: string)
+    (arguments: string list)
     =
     async {
         let! result =
@@ -195,62 +267,152 @@ let private runRefExists
                 { diffGit with
                     Limits = ProcessRunner.CaptureLimits.small
                     Deadline = ProcessRunner.SharedDeadline deadline }
-                [ "-C"
-                  repoRoot
-                  "rev-parse"
-                  "--verify"
-                  "--quiet"
-                  gitRef ]
+                ("-C" :: repoRoot :: arguments)
 
         return
             match result with
-            | Error failure -> Error(mapDiffProcessFailure ResolveBase failure)
+            | Error failure -> Error(mapDiffProcessFailure operation failure)
             | Ok output when output.ExitCode = 0 -> Ok true
             | Ok output when output.ExitCode = 1 -> Ok false
             | Ok output ->
                 Log.log
                     "WorktreeDiff"
-                    $"Git {ResolveBase} failed with exit {output.ExitCode} and {output.Stderr.Length} stderr bytes"
+                    $"Git {operation} failed with exit {output.ExitCode} and {output.Stderr.Length} stderr bytes"
 
-                Error(GitFailed(ResolveBase, output.ExitCode))
+                Error(GitFailed(operation, output.ExitCode))
     }
 
-let private resolveDiffBaseRef
+let private runRefExists deadline repoRoot gitRef =
+    runRefProbe
+        deadline
+        ResolveBase
+        repoRoot
+        [ "rev-parse"; "--verify"; "--quiet"; gitRef ]
+
+let private resolveConfiguredBase
     (deadline: ProcessRunner.ResponseDeadline)
-    (repoRoot: string)
-    (upstreamRemote: string)
-    (baseBranch: string)
+    (context: DiffComparisonContext)
+    (knownLocalBranches: string list option)
     =
-    async {
-        let remoteRef = GitWorktree.mainRef upstreamRemote baseBranch
+    asyncResult {
+        let remoteRef =
+            GitWorktree.mainRef
+                context.UpstreamRemote
+                context.BaseBranch
+
         let! remoteExists =
             runRefExists
                 deadline
-                repoRoot
+                context.WorktreePath
                 $"refs/remotes/{remoteRef}"
 
-        match remoteExists with
-        | Error error -> return Error error
-        | Ok remoteExists ->
-            let! localResult =
-                if remoteExists then
-                    async.Return(Ok false)
-                else
-                    runRefExists
+        if remoteExists then
+            return
+                Some(
+                    GitWorktree.BaseRefSelection.Remote(
+                        remoteRef,
+                        $"refs/remotes/{remoteRef}"
+                    )
+                )
+        else
+            let! localBranches =
+                match knownLocalBranches with
+                | Some branches -> async.Return(Ok branches)
+                | None ->
+                    enumerateLocalBranches
+                        ResolveBase
                         deadline
-                        repoRoot
-                        $"refs/heads/{baseBranch}"
+                        context.WorktreePath
+                        context.BaseBranch
 
             return
-                match localResult with
-                | Error error -> Error error
-                | Ok localExists ->
-                    GitWorktree.selectBaseRef
-                        upstreamRemote
-                        baseBranch
-                        remoteExists
-                        localExists
-                    |> Result.requireSome (BaseNotFound(baseBranch, remoteRef))
+                GitWorktree.canonicalLocalBranchName
+                    context.BaseBranch
+                    localBranches
+                |> Option.map (fun branch ->
+                    GitWorktree.BaseRefSelection.Local(
+                        branch,
+                        $"refs/heads/{branch}"
+                    ))
+    }
+
+let private resolveDiffBaseRef deadline context =
+    asyncResult {
+        let remoteRef =
+            GitWorktree.mainRef
+                context.UpstreamRemote
+                context.BaseBranch
+
+        let! resolved =
+            resolveConfiguredBase
+                deadline
+                context
+                None
+
+        return!
+            resolved
+            |> Option.map (function
+                | GitWorktree.BaseRefSelection.Remote (label, gitRef)
+                | GitWorktree.BaseRefSelection.Local (label, gitRef) ->
+                    label, gitRef)
+            |> Result.requireSome (
+                BaseNotFound(context.BaseBranch, remoteRef)
+            )
+    }
+
+let private resolveComparisonRef
+    (deadline: ProcessRunner.ResponseDeadline)
+    (context: DiffComparisonContext)
+    (target: DiffComparisonTarget)
+    =
+    match target with
+    | DiffComparisonTarget.ConfiguredBase ->
+        resolveDiffBaseRef
+            deadline
+            context
+    | DiffComparisonTarget.LocalBranch branch ->
+        asyncResult {
+            let! localBranches =
+                enumerateLocalBranches
+                    ResolveComparisonTarget
+                    deadline
+                    context.WorktreePath
+                    context.BaseBranch
+
+            let! canonicalBranch =
+                localBranches
+                |> List.tryFind ((=) branch)
+                |> Result.requireSome (ComparisonTargetNotFound branch)
+
+            return
+                canonicalBranch,
+                $"refs/heads/{canonicalBranch}"
+        }
+
+let private resolveMergeBase
+    (deadline: ProcessRunner.ResponseDeadline)
+    (repoRoot: string)
+    (comparisonRef: string)
+    =
+    async {
+        let! result =
+            captureDiffGit
+                deadline
+                ProcessRunner.CaptureLimits.small
+                repoRoot
+                [ "merge-base"; "HEAD"; comparisonRef ]
+
+        return
+            match result with
+            | Ok output
+                when
+                    output.Truncated.IsEmpty
+                    && output.ExitCode = 1 ->
+                Error(NoCommonAncestor comparisonRef)
+            | other ->
+                other
+                |> mapDiffGitCapture ResolveMergeBase
+                |> Result.bind (trimSingleLine ResolveMergeBase)
     }
 
 let private parseNulTokens
@@ -544,6 +706,67 @@ let private untrackedEnumerationArguments =
 
 let private trackedFileEnumerationArguments = [ "ls-files"; "-z"; "--" ]
 
+let private resolveConfiguredComparison
+    (deadline: ProcessRunner.ResponseDeadline)
+    (context: DiffComparisonContext)
+    localBranches
+    =
+    async {
+        let remoteRef =
+            GitWorktree.mainRef
+                context.UpstreamRemote
+                context.BaseBranch
+
+        let! result =
+            resolveConfiguredBase
+                deadline
+                context
+                (Some localBranches)
+
+        return
+            match result with
+            | Ok(Some(GitWorktree.BaseRefSelection.Remote (label, _))) ->
+                Ok(ConfiguredDiffComparison.Remote label)
+            | Ok(Some(GitWorktree.BaseRefSelection.Local (configuredName, _))) ->
+                Ok(ConfiguredDiffComparison.Local configuredName)
+            | Ok None ->
+                Ok(ConfiguredDiffComparison.Missing remoteRef)
+            | Error error -> Error error
+    }
+
+let internal getDiffComparisonTargetsWithinDeadline
+    (deadline: ProcessRunner.ResponseDeadline)
+    (context: DiffComparisonContext)
+    : Async<Result<DiffComparisonTargets, WorktreeDiffError>> =
+    asyncResult {
+        let! localBranches =
+            enumerateLocalBranches
+                EnumerateBranches
+                deadline
+                context.WorktreePath
+                context.BaseBranch
+
+        let! configuredBase =
+            resolveConfiguredComparison deadline context localBranches
+
+        let selectableLocalBranches =
+            match configuredBase with
+            | ConfiguredDiffComparison.Local branch ->
+                localBranches
+                |> List.filter ((<>) branch)
+            | _ -> localBranches
+
+        return
+            { ConfiguredBase = configuredBase
+              LocalBranches = selectableLocalBranches }
+    }
+
+let internal getDiffComparisonTargets (context: DiffComparisonContext) =
+    getDiffComparisonTargetsWithinDeadline
+        (ProcessRunner.createResponseDeadline
+            ProcessRunner.argumentListResponseDeadlineMs)
+        context
+
 /// Every path Git tracks in the repository, independent of any comparison. This is the file set a
 /// repository's categorization is measured against, so coverage does not depend on there being an
 /// interesting diff to classify.
@@ -566,6 +789,7 @@ let internal listTrackedFiles (repoRoot: string) : Async<Result<string list, Wor
 let private resolveComparison
     (deadline: ProcessRunner.ResponseDeadline)
     (context: DiffComparisonContext)
+    (target: DiffComparisonTarget)
     (layers: WorktreeDiffLayers)
     =
     asyncResult {
@@ -576,22 +800,15 @@ let private resolveComparison
                 else
                     "working tree", "HEAD"
         else
-            let! baseRef =
-                resolveDiffBaseRef
+            let! baseRef, comparisonRef =
+                resolveComparisonRef deadline context target
+
+            let! mergeBase =
+                resolveMergeBase
                     deadline
                     context.WorktreePath
-                    context.UpstreamRemote
-                    context.BaseBranch
+                    comparisonRef
 
-            let! mergeBaseBytes =
-                runDiffGit
-                    deadline
-                    ResolveMergeBase
-                    ProcessRunner.CaptureLimits.small
-                    context.WorktreePath
-                    [ "merge-base"; "HEAD"; baseRef ]
-
-            let! mergeBase = trimSingleLine ResolveMergeBase mergeBaseBytes
             return baseRef, mergeBase
     }
 
@@ -988,13 +1205,15 @@ let internal collectUntrackedLineCounts
 
     collect [] entries
 
-let internal getWorktreeDiffSummaryWithinDeadline
+let internal getWorktreeDiffSummaryForTargetWithinDeadline
     (deadline: ProcessRunner.ResponseDeadline)
     (context: DiffComparisonContext)
+    (target: DiffComparisonTarget)
     (layers: WorktreeDiffLayers)
     : Async<Result<WorktreeDiffSummary, WorktreeDiffError>> =
     asyncResult {
-        let! baseRef, mergeBase = resolveComparison deadline context layers
+        let! baseRef, mergeBase =
+            resolveComparison deadline context target layers
 
         let tracked =
             match trackedDiffArguments mergeBase layers with
@@ -1069,25 +1288,39 @@ let internal getWorktreeDiffSummaryWithinDeadline
     }
 
 let internal getWorktreeDiffSummary (context: DiffComparisonContext) =
-    getWorktreeDiffSummaryWithinDeadline
+    getWorktreeDiffSummaryForTargetWithinDeadline
         (ProcessRunner.createResponseDeadline
             ProcessRunner.argumentListResponseDeadlineMs)
         context
+        configuredBaseTarget
+        allWorktreeDiffLayers
+
+let internal getWorktreeDiffSummaryForTarget
+    (context: DiffComparisonContext)
+    target
+    =
+    getWorktreeDiffSummaryForTargetWithinDeadline
+        (ProcessRunner.createResponseDeadline
+            ProcessRunner.argumentListResponseDeadlineMs)
+        context
+        target
         allWorktreeDiffLayers
 
 let internal getFilteredWorktreeDiffSummary
     (context: DiffComparisonContext)
     (layers: WorktreeDiffLayers)
     =
-    getWorktreeDiffSummaryWithinDeadline
+    getWorktreeDiffSummaryForTargetWithinDeadline
         (ProcessRunner.createResponseDeadline
             ProcessRunner.argumentListResponseDeadlineMs)
         context
+        configuredBaseTarget
         layers
 
-let private countLayer deadline context layers =
+let private countLayer deadline context target layers =
     asyncResult {
-        let! _, mergeBase = resolveComparison deadline context layers
+        let! _, mergeBase =
+            resolveComparison deadline context target layers
 
         let! tracked =
             match trackedDiffArguments mergeBase layers with
@@ -1128,9 +1361,10 @@ let private countLayer deadline context layers =
         return composeTrackedAndUntracked tracked untracked |> List.length
     }
 
-let internal getWorktreeDiffLayerCountsWithinDeadline
+let internal getWorktreeDiffLayerCountsForTargetWithinDeadline
     (deadline: ProcessRunner.ResponseDeadline)
     (context: DiffComparisonContext)
+    (target: DiffComparisonTarget)
     =
     async {
         let! counts =
@@ -1143,7 +1377,7 @@ let internal getWorktreeDiffLayerCountsWithinDeadline
                { AlreadyCommitted = false
                  LocalChanges = false
                  Untracked = true } |]
-            |> Array.map (countLayer deadline context)
+            |> Array.map (countLayer deadline context target)
             |> Async.Parallel
 
         return

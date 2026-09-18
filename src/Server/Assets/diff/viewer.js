@@ -1,6 +1,7 @@
 var VIEW_KEY = 'treemon.diff.view';
 var SELECTION_KEY = 'treemon.diff.selection:' + location.pathname.replace(/\/diff\.html$/, '');
 var FILTER_KEY = 'treemon.diff.layers:' + location.pathname.replace(/\/diff\.html$/, '');
+var TARGET_KEY = 'treemon.diff.target:' + location.pathname.replace(/\/diff\.html$/, '');
 var HIGHLIGHTER_URL = '/assets/diff2html/3.4.52/diff2html-ui-slim.min.js';
 var OTHER_CATEGORY = 'Other';
 // Joins the names of a flattened single-child chain into one label, matching how `tm categories`
@@ -44,14 +45,24 @@ var CONFIGURE_PENDING_LABEL = 'Configuring diff groups — waiting for the agent
 var VIEWER_ID = crypto.randomUUID();
 var state = {
     summary: null,
+    summaryBaseRef: null,
     selected: null,
     currentResult: null,
     currentPatch: null,
     view: readViewPreference(),
     filters: readFilterPreference(),
+    targetBranch: readStorage(TARGET_KEY),
+    comparisonReady: false,
+    comparisonRequest: 0,
+    comparisonWarning: '',
+    comparisonWarningKind: null,
+    comparisonStatus: '',
+    refreshPromise: null,
+    comparisonTimer: null,
     fileRequest: 0,
     fileAbort: null,
     summaryRequest: 0,
+    summaryAbort: null,
     selectedButton: null,
     panel: null,
     // Explicit expand/collapse choices for this page instance only, keyed by a JSON-serialized
@@ -112,12 +123,253 @@ function updateFilterInputs() {
     document.getElementById('filter-untracked').checked = state.filters.untracked;
 }
 
+function setComparisonStatus(message) {
+    state.comparisonStatus = message || '';
+    document.getElementById('comparison-status').textContent =
+        [state.comparisonWarning, state.comparisonStatus]
+            .filter(Boolean)
+            .join(' · ');
+}
+
+function setComparisonWarning(message, kind) {
+    state.comparisonWarning = message || '';
+    state.comparisonWarningKind = message ? kind : null;
+    setComparisonStatus(state.comparisonStatus);
+}
+
+function comparisonScopeStatus() {
+    if (state.filters.committed) return '';
+    if (state.filters.local) return 'Local changes from HEAD';
+    if (state.filters.untracked) return 'Untracked files';
+    return 'All change layers hidden';
+}
+
+function updateComparisonControl() {
+    var select = document.getElementById('comparison-target');
+    select.disabled = !state.comparisonReady || !state.filters.committed;
+
+    if (!state.comparisonReady) {
+        select.title = 'Local branches are unavailable.';
+    } else if (!state.filters.committed) {
+        select.title = 'Select Already committed to compare with a branch.';
+    } else {
+        select.title = 'Branch used for committed changes.';
+    }
+}
+
+function comparisonOption(value, label) {
+    var option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    return option;
+}
+
+function showComparisonLoading() {
+    var select = document.getElementById('comparison-target');
+    select.setAttribute('aria-busy', 'true');
+
+    if (!state.comparisonReady) {
+        select.replaceChildren(comparisonOption('', 'Loading branches…'));
+    }
+
+    select.disabled = true;
+    if (!state.comparisonStatus) {
+        setComparisonStatus(state.comparisonReady ? 'Refreshing branches…' : '');
+    }
+}
+
+function showComparisonUnavailable(reason) {
+    var select = document.getElementById('comparison-target');
+    var keepsCurrent = state.comparisonReady || Boolean(state.targetBranch);
+    select.removeAttribute('aria-busy');
+
+    if (!state.comparisonReady) {
+        var currentLabel =
+            state.targetBranch ||
+            (state.filters.committed && state.summaryBaseRef) ||
+            'Configured base';
+        select.replaceChildren(
+            comparisonOption(
+                state.targetBranch || '',
+                currentLabel
+            )
+        );
+        select.value = state.targetBranch || '';
+    }
+
+    setComparisonWarning(reason + (
+        keepsCurrent
+            ? '; keeping the current comparison.'
+            : '; using configured base.'
+    ), 'refresh');
+    updateComparisonControl();
+}
+
+function isComparisonMetadata(metadata) {
+    return Boolean(
+        metadata &&
+        metadata.status === 'ready' &&
+        metadata.configuredBase &&
+        typeof metadata.configuredBase.label === 'string' &&
+        typeof metadata.configuredBase.available === 'boolean' &&
+        (
+            metadata.configuredBase.localBranch === null ||
+            typeof metadata.configuredBase.localBranch === 'string'
+        ) &&
+        Array.isArray(metadata.localBranches) &&
+        metadata.localBranches.every(function(branch) {
+            return typeof branch === 'string' && branch.length > 0;
+        })
+    );
+}
+
+function showComparisonTargets(metadata, preferred) {
+    var select = document.getElementById('comparison-target');
+    var preferredUsesBase =
+        preferred &&
+        metadata.configuredBase.localBranch === preferred;
+    var hasPreferred =
+        preferredUsesBase ||
+        (preferred && metadata.localBranches.includes(preferred));
+    var baseLabel =
+        !preferred &&
+        state.filters.committed &&
+        state.summaryBaseRef
+            ? state.summaryBaseRef
+            : metadata.configuredBase.label;
+    var base = comparisonOption(
+        preferredUsesBase ? preferred : '',
+        baseLabel
+    );
+
+    if (!metadata.configuredBase.available) {
+        base.title = 'Configured base is unavailable.';
+    }
+
+    select.replaceChildren(base);
+
+    if (metadata.localBranches.length) {
+        var group = document.createElement('optgroup');
+        group.label = 'Local branches';
+        metadata.localBranches.forEach(function(branch) {
+            group.appendChild(
+                comparisonOption(
+                    branch,
+                    branch === metadata.configuredBase.label
+                        ? branch + ' (local)'
+                        : branch
+                )
+            );
+        });
+        select.appendChild(group);
+    }
+
+    state.targetBranch = hasPreferred ? preferred : null;
+    var fallbackNotice = preferred && !hasPreferred
+        ? 'Saved branch no longer exists; using configured base.'
+        : '';
+
+    if (preferred && !hasPreferred) removeStorage(TARGET_KEY);
+
+    select.value = state.targetBranch || '';
+    select.removeAttribute('aria-busy');
+    state.comparisonReady = true;
+    setComparisonWarning(fallbackNotice, fallbackNotice ? 'fallback' : null);
+    updateComparisonControl();
+}
+
+async function loadComparisons(preferred) {
+    var request = ++state.comparisonRequest;
+    showComparisonLoading();
+
+    try {
+        var metadata = await fetchJson('diff-comparisons', { cache: 'no-store' });
+        if (request !== state.comparisonRequest) return false;
+
+        if (isComparisonMetadata(metadata)) {
+            showComparisonTargets(metadata, preferred);
+        } else {
+            showComparisonUnavailable(
+                metadata && metadata.status === 'timeout'
+                    ? 'Branch refresh timed out'
+                    : 'Branch list unavailable'
+            );
+        }
+    } catch (_) {
+        if (request !== state.comparisonRequest) return false;
+        showComparisonUnavailable('Branch list unavailable');
+    }
+
+    return true;
+}
+
+async function refreshComparisonsAndSummary() {
+    if (state.refreshPromise) return state.refreshPromise;
+
+    var refresh = document.getElementById('refresh');
+    var requestedTarget = state.targetBranch;
+
+    if (state.comparisonTimer) {
+        clearTimeout(state.comparisonTimer);
+        state.comparisonTimer = null;
+    }
+
+    refresh.disabled = true;
+    refresh.setAttribute('aria-busy', 'true');
+
+    var summaryPromise = loadSummary(requestedTarget);
+    var comparisonPromise =
+        loadComparisons(requestedTarget).then(function(current) {
+            if (
+                current &&
+                requestedTarget &&
+                state.targetBranch !== requestedTarget
+            ) {
+                return loadSummary(null);
+            }
+        });
+    var operation = Promise.all([comparisonPromise, summaryPromise]);
+
+    state.refreshPromise = operation.finally(function() {
+        state.refreshPromise = null;
+        refresh.disabled = false;
+        refresh.removeAttribute('aria-busy');
+    });
+
+    return state.refreshPromise;
+}
+
+function comparisonChanged() {
+    var branch = document.getElementById('comparison-target').value;
+    state.targetBranch = branch || null;
+
+    if (state.targetBranch) writeStorage(TARGET_KEY, state.targetBranch);
+    else removeStorage(TARGET_KEY);
+
+    if (state.comparisonWarningKind === 'fallback') {
+        setComparisonWarning('', null);
+    }
+
+    if (state.comparisonTimer) clearTimeout(state.comparisonTimer);
+
+    state.comparisonTimer = setTimeout(function() {
+        state.comparisonTimer = null;
+        loadSummary(state.targetBranch);
+    }, 120);
+}
+
 function layerCountPresentation(result) {
     if (!result || result.status === 'git-error') {
         return { text: 'unavailable', title: 'File count unavailable because Git failed.' };
     }
     if (result.status === 'base-error') {
         return { text: 'unavailable', title: 'File count unavailable because the comparison base could not be resolved.' };
+    }
+    if (result.status === 'target-missing') {
+        return { text: 'unavailable', title: 'File count unavailable because the selected branch no longer exists.' };
+    }
+    if (result.status === 'no-common-ancestor') {
+        return { text: 'unavailable', title: 'File count unavailable because the selected branch does not share history with HEAD.' };
     }
     if (result.status === 'timeout') {
         return { text: 'unavailable', title: 'File count unavailable because Git timed out.' };
@@ -144,12 +396,15 @@ function applyLayerCounts(counts) {
     applyLayerCount('untracked', counts.untracked);
 }
 
-function summaryUrl() {
+function summaryUrl(targetBranch) {
     var query = new URLSearchParams({
         committed: String(state.filters.committed),
         local: String(state.filters.local),
         untracked: String(state.filters.untracked)
     });
+
+    if (targetBranch) query.set('branch', targetBranch);
+
     return 'diff-summary?' + query.toString();
 }
 
@@ -160,7 +415,12 @@ function filtersChanged() {
         untracked: document.getElementById('filter-untracked').checked
     };
     writeStorage(FILTER_KEY, JSON.stringify(state.filters));
-    loadSummary();
+    updateComparisonControl();
+    if (state.comparisonTimer) {
+        clearTimeout(state.comparisonTimer);
+        state.comparisonTimer = null;
+    }
+    loadSummary(state.targetBranch);
 }
 
 function fileSelectionKey(file) {
@@ -1095,17 +1355,19 @@ async function loadFile(file) {
     }
 }
 
-function comparisonLabel(baseRef) {
-    if (state.filters.committed) return 'Compared with ' + baseRef;
-    if (state.filters.local) return 'Local changes from HEAD';
-    return 'Untracked files';
+function updateFallbackBaseLabel(baseRef) {
+    if (!baseRef || !state.filters.committed || state.targetBranch) return;
+    var option = document.getElementById('comparison-target').options[0];
+    if (option) option.textContent = baseRef;
 }
 
 function renderSummaryState(summary) {
     clearNavigator();
     switch (summary.status) {
         case 'clean':
-            document.getElementById('base-label').textContent = comparisonLabel(summary.baseRef);
+            state.summaryBaseRef = summary.baseRef || null;
+            updateFallbackBaseLabel(summary.baseRef);
+            setComparisonStatus(comparisonScopeStatus());
             renderState(
                 'clean',
                 'No changes',
@@ -1116,7 +1378,7 @@ function renderSummaryState(summary) {
             );
             break;
         case 'filtered-empty':
-            document.getElementById('base-label').textContent = 'All change layers hidden';
+            setComparisonStatus('All change layers hidden');
             renderState(
                 'filtered-empty',
                 'No change layers selected',
@@ -1125,15 +1387,38 @@ function renderSummaryState(summary) {
             );
             break;
         case 'stale':
-            document.getElementById('base-label').textContent = 'Comparison superseded';
+            setComparisonStatus('Comparison superseded');
             renderState('stale', 'Newer comparison available', 'A newer refresh replaced this summary.', false);
             break;
         case 'base-error':
-            document.getElementById('base-label').textContent = 'Comparison unavailable';
-            renderState('base-error', 'Comparison base unavailable', 'Treemon could not resolve the configured base branch.', false);
+            setComparisonStatus('Comparison unavailable');
+            renderState(
+                'base-error',
+                'Comparison base unavailable',
+                'Treemon could not resolve the configured base branch.',
+                false
+            );
+            break;
+        case 'target-missing':
+            setComparisonStatus('Comparison unavailable');
+            renderState(
+                'target-missing',
+                'Selected branch unavailable',
+                'The selected local branch no longer exists. Use Refresh or choose another branch.',
+                false
+            );
+            break;
+        case 'no-common-ancestor':
+            setComparisonStatus('No shared history');
+            renderState(
+                'no-common-ancestor',
+                'Branches do not share history',
+                'Choose a comparison branch that shares history with HEAD.',
+                false
+            );
             break;
         case 'too-many-files':
-            document.getElementById('base-label').textContent = 'Comparison stopped';
+            setComparisonStatus('Comparison stopped');
             renderState(
                 'too-many-files',
                 'Too many changed files',
@@ -1142,7 +1427,7 @@ function renderSummaryState(summary) {
             );
             break;
         case 'timeout':
-            document.getElementById('base-label').textContent = 'Comparison timed out';
+            setComparisonStatus('Comparison timed out');
             renderState(
                 'timeout',
                 'Diff timed out',
@@ -1152,7 +1437,7 @@ function renderSummaryState(summary) {
             break;
         case 'git-error':
         default:
-            document.getElementById('base-label').textContent = 'Comparison failed';
+            setComparisonStatus('Comparison failed');
             renderState('git-error', 'Diff unavailable', 'Git could not produce a worktree summary.', false);
             break;
     }
@@ -1167,29 +1452,42 @@ function renderReadySummary(summary) {
 
     clearNavigator();
     state.summary = summary;
-    document.getElementById('base-label').textContent = comparisonLabel(summary.baseRef);
+    state.summaryBaseRef = summary.baseRef || null;
+    updateFallbackBaseLabel(summary.baseRef);
+    setComparisonStatus(comparisonScopeStatus());
     renderChangeSummary(files);
     renderCategorizedFiles(files, summary.categorization);
     restoreFileSelection(files);
 }
 
-async function loadSummary() {
+async function loadSummary(targetBranch) {
+    if (targetBranch === undefined) targetBranch = state.targetBranch;
     if (state.fileAbort) state.fileAbort.abort();
     state.fileAbort = null;
     state.fileRequest += 1;
+    if (state.summaryAbort) state.summaryAbort.abort();
     var request = ++state.summaryRequest;
+    var controller = new AbortController();
+    state.summaryAbort = controller;
+    state.summaryBaseRef = null;
     clearNavigator();
-    document.getElementById('base-label').textContent = 'Loading comparison…';
+    setComparisonStatus('Loading comparison…');
     renderState('loading-summary', 'Loading changed files…', '', true);
 
     try {
-        var summary = await fetchJson(summaryUrl(), { cache: 'no-store' });
+        var summary = await fetchJson(
+            summaryUrl(targetBranch),
+            { cache: 'no-store', signal: controller.signal }
+        );
         if (request !== state.summaryRequest) return;
+        state.summaryAbort = null;
         applyLayerCounts(summary.layerCounts);
         if (summary.status === 'ready') renderReadySummary(summary);
         else renderSummaryState(summary);
-    } catch (_) {
+    } catch (error) {
+        if (error && error.name === 'AbortError') return;
         if (request !== state.summaryRequest) return;
+        state.summaryAbort = null;
         renderSummaryState({ status: 'git-error' });
     }
 }
@@ -1239,7 +1537,8 @@ window.canvasSelectionMetadata = function(selectionContext) {
 
 document.getElementById('unified-view').addEventListener('click', function() { setView('unified'); });
 document.getElementById('split-view').addEventListener('click', function() { setView('split'); });
-document.getElementById('refresh').addEventListener('click', loadSummary);
+document.getElementById('refresh').addEventListener('click', refreshComparisonsAndSummary);
+document.getElementById('comparison-target').addEventListener('change', comparisonChanged);
 if (canvasTransportAvailable()) {
     document
         .querySelector('.toolbar')
@@ -1250,4 +1549,4 @@ document.getElementById('filter-local').addEventListener('change', filtersChange
 document.getElementById('filter-untracked').addEventListener('change', filtersChanged);
 updateViewButtons();
 updateFilterInputs();
-loadSummary();
+refreshComparisonsAndSummary();
