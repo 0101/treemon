@@ -650,23 +650,29 @@ let private requireError result =
         Assert.Fail("Expected an error")
         ""
 
-let private requireTerminalHostUpdate result =
-    match result with
-    | Ok state -> state
-    | Error error ->
-        Assert.Fail(
-            $"Expected an update state, got rejection %A{error}"
-        )
-        TerminalHostUpdateState.Unavailable
+let private waitForTerminalHostUpdateState manager expected =
+    let deadline = Stopwatch.StartNew()
 
-let private requireTerminalHostUpdateError result =
-    match result with
-    | Error error -> error
-    | Ok state ->
-        Assert.Fail(
-            $"Expected an update rejection, got state %A{state}"
-        )
-        TerminalHostUpdateRequestError.CleanupInProgress
+    let rec wait () =
+        task {
+            let! state =
+                EmbeddedTerminal.getUpdateState manager
+                |> Async.StartAsTask
+
+            if state = expected then
+                return state
+            elif deadline.Elapsed >= TimeSpan.FromSeconds 5.0 then
+                Assert.Fail(
+                    $"TerminalHost update did not reach {expected}; last state was {state}"
+                )
+
+                return state
+            else
+                do! Task.Delay 10
+                return! wait ()
+        }
+
+    wait ()
 
 let private closeManagedTerminal manager terminalId =
     WorktreeCleanup.closeEmbeddedTerminalWith
@@ -751,6 +757,26 @@ let private withClosingHost onTerminalClosing name terminalCount scenario =
 
 let private withCleanupScenario name terminalCount scenario =
     withClosingHost ignore name terminalCount scenario
+
+let private withUpdateAfterCleanupScenario name scenario =
+    let stagedVersion = $"2.0.0-{name}"
+    let launches = ConcurrentQueue<string>()
+
+    withHostScenario
+        ignore
+        (fun host ->
+            host.EnableLogicalReplacement()
+            host.Stage stagedVersion |> ignore
+
+            activatingUpdateConfig
+                host
+                stagedVersion
+                launches
+                noTerminalCommand)
+        name
+        1
+        (fun host manager target ->
+            scenario host manager target launches)
 
 /// The same scenario under the exact-host config, whose process-identity resolver
 /// makes recorded-host liveness observable.
@@ -2472,7 +2498,7 @@ type EmbeddedTerminalUpdateTests() =
                         "copilot --experimental --yolo --session-id=wrong-host-session"
                 ]
 
-            let! result =
+            let! accepted =
                 EmbeddedTerminal.updateTerminalHostWithOperations
                     TerminalHostReplacement.defaultOperations
                     snapshotSessions
@@ -2480,13 +2506,14 @@ type EmbeddedTerminalUpdateTests() =
                 |> Async.StartAsTask
 
             let! state =
-                EmbeddedTerminal.getUpdateState manager
-                |> Async.StartAsTask
+                waitForTerminalHostUpdateState
+                    manager
+                    TerminalHostUpdateState.Fatal
 
             Assert.Multiple(fun () ->
                 Assert.That(
-                    requireTerminalHostUpdate result,
-                    Is.EqualTo TerminalHostUpdateState.Fatal
+                    accepted,
+                    Is.EqualTo TerminalHostUpdateState.Updating
                 )
                 Assert.That(
                     state,
@@ -2555,19 +2582,20 @@ type EmbeddedTerminalUpdateTests() =
 
                 Ok [ restartSession durable resumeCommand ]
 
-            let! result =
+            let! accepted =
                 EmbeddedTerminal.updateTerminalHostWithOperations
                     TerminalHostReplacement.defaultOperations
                     snapshotSessions
                     manager
                 |> Async.StartAsTask
 
+            let! status =
+                waitForTerminalHostUpdateState
+                    manager
+                    TerminalHostUpdateState.Unavailable
+
             let! snapshot =
                 EmbeddedTerminal.getCached manager
-                |> Async.StartAsTask
-
-            let! status =
-                EmbeddedTerminal.getUpdateState manager
                 |> Async.StartAsTask
 
             Assert.Multiple(fun () ->
@@ -2576,8 +2604,8 @@ type EmbeddedTerminalUpdateTests() =
                     Is.EqualTo TerminalHostUpdateState.Available
                 )
                 Assert.That(
-                    requireTerminalHostUpdate result,
-                    Is.EqualTo TerminalHostUpdateState.Unavailable
+                    accepted,
+                    Is.EqualTo TerminalHostUpdateState.Updating
                 )
                 Assert.That(
                     status,
@@ -2647,7 +2675,7 @@ type EmbeddedTerminalUpdateTests() =
 
             let snapshotSessions _ = Ok []
 
-            let update =
+            let! accepted =
                 EmbeddedTerminal.updateTerminalHostWithOperations
                     operations
                     snapshotSessions
@@ -2682,9 +2710,16 @@ type EmbeddedTerminalUpdateTests() =
                 |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
 
             releaseStop.TrySetResult() |> ignore
-            let! completed = update.WaitAsync(TimeSpan.FromSeconds 5.0)
+            let! completed =
+                waitForTerminalHostUpdateState
+                    manager
+                    TerminalHostUpdateState.Unavailable
 
             Assert.Multiple(fun () ->
+                Assert.That(
+                    accepted,
+                    Is.EqualTo TerminalHostUpdateState.Updating
+                )
                 Assert.That(
                     updateState,
                     Is.EqualTo TerminalHostUpdateState.Updating
@@ -2698,11 +2733,11 @@ type EmbeddedTerminalUpdateTests() =
                     Does.Contain("update is in progress")
                 )
                 Assert.That(
-                    requireTerminalHostUpdate duplicateUpdate,
+                    duplicateUpdate,
                     Is.EqualTo TerminalHostUpdateState.Updating
                 )
                 Assert.That(
-                    requireTerminalHostUpdate completed,
+                    completed,
                     Is.EqualTo TerminalHostUpdateState.Unavailable
                 )
                 Assert.That(host.ShutdownRequestCount, Is.EqualTo 1)
@@ -2710,71 +2745,315 @@ type EmbeddedTerminalUpdateTests() =
         }
 
     [<Test>]
-    member _.``cleanup reservation rejects update without starting the transaction``() =
-        task {
-            use host = new FakeControlHost()
-            host.Stage "2.0.0-cleanup-held" |> ignore
+    member _.``held cleanup queues one locked update that starts after acknowledged release``() =
+        withUpdateAfterCleanupScenario "cleanup-held" (fun host manager running launches ->
+            task {
+                let logBefore =
+                    File.ReadAllText(Log.currentPath())
 
-            let manager =
-                EmbeddedTerminal.createWithConfig
-                    (exactHostManagerConfig
-                        host
-                        noLaunch
-                        noTerminalCommand)
+                let! reserved =
+                    EmbeddedTerminal.reserveCleanup
+                        manager
+                        (EmbeddedTerminal.WorktreeTerminals running)
+                        None
+                    |> Async.StartAsTask
 
-            let running = worktree host.Root "cleanup-held"
+                let lease =
+                    match requireOk reserved with
+                    | Some value -> value
+                    | None ->
+                        Assert.Fail(
+                            "Expected the running terminal to reserve cleanup"
+                        )
+                        Unchecked.defaultof<_>
 
-            let! started =
-                EmbeddedTerminal.start manager running
-                |> Async.StartAsTask
+                let leaseCorrelation =
+                    lease.Token.ToString("N")[..7]
 
-            requireOk started |> ignore
+                let stopEntered = signal ()
+                let releaseStop = signal ()
+                let defaults =
+                    TerminalHostReplacement.defaultOperations
 
-            let! reserved =
-                EmbeddedTerminal.reserveCleanup
-                    manager
-                    (EmbeddedTerminal.WorktreeTerminals running)
-                    None
-                |> Async.StartAsTask
+                let operations =
+                    { defaults with
+                        StopHost =
+                            fun updateConfig hostManifest ->
+                                async {
+                                    stopEntered.TrySetResult()
+                                    |> ignore
 
-            let lease =
-                match requireOk reserved with
-                | Some value -> value
-                | None ->
-                    Assert.Fail(
-                        "Expected the running terminal to reserve cleanup"
-                    )
-                    Unchecked.defaultof<_>
+                                    do!
+                                        releaseStop.Task
+                                        |> Async.AwaitTask
 
-            try
-                let! result =
+                                    return!
+                                        defaults.StopHost
+                                            updateConfig
+                                            hostManifest
+                                } }
+
+                let! accepted =
                     EmbeddedTerminal.updateTerminalHostWithOperations
-                        TerminalHostReplacement.defaultOperations
+                        operations
                         (fun _ -> Ok [])
                         manager
                     |> Async.StartAsTask
 
-                let! state =
+                let! waitingState =
                     EmbeddedTerminal.getUpdateState manager
+                    |> Async.StartAsTask
+
+                let blockedStartPath =
+                    worktree host.Root "cleanup-queued-blocked"
+
+                let! blockedStart =
+                    EmbeddedTerminal.start
+                        manager
+                        blockedStartPath
+                    |> Async.StartAsTask
+
+                let! blockedCleanup =
+                    EmbeddedTerminal.reserveCleanup
+                        manager
+                        (EmbeddedTerminal.WorktreeTerminals
+                            running)
+                        None
+                    |> Async.StartAsTask
+
+                let terminalActionEntered = signal ()
+
+                let! blockedTerminalAction =
+                    EmbeddedTerminal.runTerminalAction
+                        manager
+                        (fun () ->
+                            async {
+                                terminalActionEntered.TrySetResult()
+                                |> ignore
+
+                                return Ok()
+                            })
+                    |> Async.StartAsTask
+
+                let! duplicate =
+                    EmbeddedTerminal.updateTerminalHostWithOperations
+                        operations
+                        (fun _ -> Ok [])
+                        manager
                     |> Async.StartAsTask
 
                 Assert.Multiple(fun () ->
                     Assert.That(
-                        requireTerminalHostUpdateError result,
-                        Is.EqualTo(
-                            TerminalHostUpdateRequestError.CleanupInProgress
+                        accepted,
+                        Is.EqualTo TerminalHostUpdateState.Updating
+                    )
+                    Assert.That(
+                        waitingState,
+                        Is.EqualTo TerminalHostUpdateState.Updating
+                    )
+                    Assert.That(stopEntered.Task.IsCompleted, Is.False)
+                    Assert.That(host.ShutdownRequestCount, Is.Zero)
+                    Assert.That(launches, Is.Empty)
+                    Assert.That(
+                        requireError blockedStart,
+                        Does.Contain("update is in progress")
+                    )
+                    Assert.That(
+                        requireError blockedCleanup,
+                        Does.Contain("update is in progress")
+                    )
+                    Assert.That(
+                        requireError blockedTerminalAction,
+                        Does.Contain("update is in progress")
+                    )
+                    Assert.That(
+                        terminalActionEntered.Task.IsCompleted,
+                        Is.False
+                    )
+                    Assert.That(
+                        duplicate,
+                        Is.EqualTo TerminalHostUpdateState.Updating
+                    ))
+
+                EmbeddedTerminal.releaseCleanup manager lease
+
+                do!
+                    stopEntered.Task.WaitAsync(
+                        TimeSpan.FromSeconds 5.0
+                    )
+
+                releaseStop.TrySetResult() |> ignore
+
+                let! completed =
+                    waitForTerminalHostUpdateState
+                        manager
+                        TerminalHostUpdateState.Unavailable
+
+                let lifecycleLog =
+                    File.ReadAllText(Log.currentPath())[
+                        logBefore.Length..
+                    ]
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        completed,
+                        Is.EqualTo TerminalHostUpdateState.Unavailable
+                    )
+                    Assert.That(host.ShutdownRequestCount, Is.EqualTo 1)
+                    Assert.That(launches.Count, Is.EqualTo 1)
+                    Assert.That(
+                        lifecycleLog,
+                        Does.Contain(
+                            $"Cleanup reservation acquired lease={leaseCorrelation} target=worktree cachedTerminals=1 reservations=1"
                         )
                     )
                     Assert.That(
-                        state,
-                        Is.EqualTo TerminalHostUpdateState.Available
+                        lifecycleLog,
+                        Does.Contain(
+                            $"User-requested update queued behind cleanup reservations=1 leases={leaseCorrelation}:"
+                        )
                     )
                     Assert.That(
-                        host.ShutdownRequestCount,
-                        Is.Zero
+                        lifecycleLog,
+                        Does.Contain(
+                            $"Cleanup reservation release requested lease={leaseCorrelation} target=worktree"
+                        )
+                    )
+                    Assert.That(
+                        lifecycleLog,
+                        Does.Contain(
+                            $"Cleanup reservation release applied lease={leaseCorrelation} ageMs="
+                        )
+                    )
+                    Assert.That(
+                        lifecycleLog,
+                        Does.Contain(
+                            "Cleanup reservations drained for queued update waitedMs="
+                        )
+                    )
+                    Assert.That(
+                        lifecycleLog,
+                        Does.Contain(
+                            "User-requested update entering transaction waitMs="
+                        )
+                    )
+                    Assert.That(
+                        lifecycleLog,
+                        Does.Contain(
+                            "Duplicate user-requested update ignored state=waiting-for-cleanup"
+                        )
+                    )
+                    Assert.That(
+                        lifecycleLog,
+                        Does.Not.Contain(WorktreePath.value running)
                     ))
-            finally
-                EmbeddedTerminal.releaseCleanup manager lease
+            })
+
+    [<Test>]
+    member _.``queued update waits for every existing cleanup reservation``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-multiple-cleanups"
+            host.Stage stagedVersion |> ignore
+            let launches = ConcurrentQueue<string>()
+
+            let manager =
+                activatingUpdateConfig
+                    host
+                    stagedVersion
+                    launches
+                    noTerminalCommand
+                |> EmbeddedTerminal.createWithConfig
+
+            let first = worktree host.Root "cleanup-first"
+            let second = worktree host.Root "cleanup-second"
+
+            for path in [ first; second ] do
+                let! started =
+                    EmbeddedTerminal.start manager path
+                    |> Async.StartAsTask
+
+                requireOk started |> ignore
+
+            let! firstReservation =
+                EmbeddedTerminal.reserveCleanup
+                    manager
+                    (EmbeddedTerminal.WorktreeTerminals first)
+                    None
+                |> Async.StartAsTask
+
+            let! secondReservation =
+                EmbeddedTerminal.reserveCleanup
+                    manager
+                    (EmbeddedTerminal.WorktreeTerminals second)
+                    None
+                |> Async.StartAsTask
+
+            let lease = function
+                | Ok(Some value) -> value
+                | result ->
+                    Assert.Fail($"Expected cleanup reservation, got %A{result}")
+                    Unchecked.defaultof<_>
+
+            let firstLease = lease firstReservation
+            let secondLease = lease secondReservation
+            let stopEntered = signal ()
+            let releaseStop = signal ()
+            let defaults = TerminalHostReplacement.defaultOperations
+
+            let operations =
+                { defaults with
+                    StopHost =
+                        fun updateConfig hostManifest ->
+                            async {
+                                stopEntered.TrySetResult() |> ignore
+                                do! releaseStop.Task |> Async.AwaitTask
+                                return!
+                                    defaults.StopHost
+                                        updateConfig
+                                        hostManifest
+                            } }
+
+            let! accepted =
+                EmbeddedTerminal.updateTerminalHostWithOperations
+                    operations
+                    (fun _ -> Ok [])
+                    manager
+                |> Async.StartAsTask
+
+            EmbeddedTerminal.releaseCleanup manager firstLease
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    accepted,
+                    Is.EqualTo TerminalHostUpdateState.Updating
+                )
+                Assert.That(stopEntered.Task.IsCompleted, Is.False)
+                Assert.That(host.ShutdownRequestCount, Is.Zero)
+                Assert.That(launches, Is.Empty))
+
+            EmbeddedTerminal.releaseCleanup manager secondLease
+
+            do!
+                stopEntered.Task.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            releaseStop.TrySetResult() |> ignore
+
+            let! completed =
+                waitForTerminalHostUpdateState
+                    manager
+                    TerminalHostUpdateState.Unavailable
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    completed,
+                    Is.EqualTo TerminalHostUpdateState.Unavailable
+                )
+                Assert.That(host.ShutdownRequestCount, Is.EqualTo 1)
+                Assert.That(launches.Count, Is.EqualTo 1))
         }
 
     [<Test>]
@@ -2808,12 +3087,17 @@ type EmbeddedTerminalUpdateTests() =
             let snapshotSessions _ =
                 Ok [ restartSession durable "copilot --experimental --yolo --session-id=fatal-session" ]
 
-            let! failed =
+            let! accepted =
                 EmbeddedTerminal.updateTerminalHostWithOperations
                     TerminalHostReplacement.defaultOperations
                     snapshotSessions
                     manager
                 |> Async.StartAsTask
+
+            let! failed =
+                waitForTerminalHostUpdateState
+                    manager
+                    TerminalHostUpdateState.Fatal
 
             let! rejectedStart =
                 EmbeddedTerminal.start
@@ -2835,15 +3119,17 @@ type EmbeddedTerminalUpdateTests() =
                     manager
                 |> Async.StartAsTask
 
-            let fatalState =
-                requireTerminalHostUpdate failed
             let rejectedStartMessage = requireError rejectedStart
             let rejectedCleanupMessage =
                 requireError rejectedCleanup
 
             Assert.Multiple(fun () ->
                 Assert.That(
-                    fatalState,
+                    accepted,
+                    Is.EqualTo TerminalHostUpdateState.Updating
+                )
+                Assert.That(
+                    failed,
                     Is.EqualTo TerminalHostUpdateState.Fatal
                 )
                 Assert.That(
@@ -2860,7 +3146,7 @@ type EmbeddedTerminalUpdateTests() =
                 )
                 Assert.That(
                     duplicate,
-                    Is.EqualTo failed
+                    Is.EqualTo TerminalHostUpdateState.Fatal
                 )
                 Assert.That(host.ShutdownRequestCount, Is.EqualTo 1)
                 Assert.That(launches.Count, Is.EqualTo 1))
@@ -3076,7 +3362,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
 
     [<Test>]
     member _.``cancelled cleanup releases its canonical path reservation``() =
-        withCleanupScenario "cancelled-cleanup" 1 (fun _ manager target ->
+        withUpdateAfterCleanupScenario "cancelled-cleanup" (fun host manager target launches ->
             task {
                 let operationEntered = signal ()
 
@@ -3107,12 +3393,90 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 with :? OperationCanceledException ->
                     ()
 
-                let! restarted =
-                    EmbeddedTerminal.start manager target
+                let! accepted =
+                    EmbeddedTerminal.updateTerminalHostWithOperations
+                        TerminalHostReplacement.defaultOperations
+                        (fun _ -> Ok [])
+                        manager
                     |> Async.StartAsTask
-                    |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
 
-                requireOk restarted |> ignore
+                let! completed =
+                    waitForTerminalHostUpdateState
+                        manager
+                        TerminalHostUpdateState.Unavailable
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        accepted,
+                        Is.EqualTo TerminalHostUpdateState.Updating
+                    )
+                    Assert.That(
+                        completed,
+                        Is.EqualTo TerminalHostUpdateState.Unavailable
+                    )
+                    Assert.That(host.ShutdownRequestCount, Is.EqualTo 1)
+                    Assert.That(launches.Count, Is.EqualTo 1))
+            })
+
+    [<Test>]
+    member _.``exceptional cleanup releases its reservation before preserving the exception``() =
+        withUpdateAfterCleanupScenario "exceptional-cleanup" (fun host manager target launches ->
+            task {
+                let marker = "simulated mutation exception"
+
+                let cleanup =
+                    withManagedTerminalCleanup
+                        manager
+                        target
+                        (fun () ->
+                            async {
+                                return
+                                    (raise (InvalidOperationException marker)
+                                     : Result<unit, string>)
+                            })
+                    |> Async.StartAsTask
+
+                try
+                    let! result = cleanup
+                    Assert.Fail($"Expected cleanup exception, got {result}")
+                with :? AggregateException as error ->
+                    Assert.Multiple(fun () ->
+                        Assert.That(
+                            error.InnerExceptions,
+                            Has.Count.EqualTo 1
+                        )
+                        Assert.That(
+                            error.InnerException,
+                            Is.TypeOf<InvalidOperationException>()
+                        )
+                        Assert.That(
+                            error.InnerException.Message,
+                            Is.EqualTo marker
+                        ))
+
+                let! accepted =
+                    EmbeddedTerminal.updateTerminalHostWithOperations
+                        TerminalHostReplacement.defaultOperations
+                        (fun _ -> Ok [])
+                        manager
+                    |> Async.StartAsTask
+
+                let! completed =
+                    waitForTerminalHostUpdateState
+                        manager
+                        TerminalHostUpdateState.Unavailable
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        accepted,
+                        Is.EqualTo TerminalHostUpdateState.Updating
+                    )
+                    Assert.That(
+                        completed,
+                        Is.EqualTo TerminalHostUpdateState.Unavailable
+                    )
+                    Assert.That(host.ShutdownRequestCount, Is.EqualTo 1)
+                    Assert.That(launches.Count, Is.EqualTo 1))
             })
 
     /// Every owned terminal is still attempted, but one surviving close failure withholds the

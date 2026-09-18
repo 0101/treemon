@@ -28,7 +28,6 @@ type InstalledOverviewHistory =
 type TerminalHostUpdateModel =
     | Observed of TerminalHostUpdateState
     | RequestInFlight
-    | RequestRejected of TerminalHostUpdateRequestError
 
 module TerminalHostUpdateModel =
     let initial = TerminalHostUpdateModel.Observed TerminalHostUpdateState.Unavailable
@@ -84,7 +83,7 @@ type Msg =
     | DataFailed of exn
     | ToggleSort
     | UpdateTerminalHost
-    | TerminalHostUpdateCompleted of Result<TerminalHostUpdateState, TerminalHostUpdateRequestError>
+    | TerminalHostUpdateCompleted of TerminalHostUpdateState
     | TerminalHostUpdateRequestFailed of exn
     | ToggleCompact
     | ToggleCollapse of repoId: RepoId

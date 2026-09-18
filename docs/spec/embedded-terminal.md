@@ -20,6 +20,8 @@
 - Acquire one global maintenance lock before snapshotting, reject every new embedded-terminal start
   route while locked, restart only currently hosted durable sessions, and omit terminals without an
   open durable session.
+- Release each path-scoped cleanup reservation through a bounded, uncancelled mailbox
+  acknowledgement, and log when acknowledgement cannot be obtained.
 - Once accepted, complete the update as one forward-only transaction. Any first failure leaves the
   server process permanently locked with a fatal UI that directs the user to redeploy or restart
   Treemon manually.
@@ -227,20 +229,21 @@ it asks TerminalHost to shut down the complete host and its owned process trees.
 
 ### User-requested TerminalHost updates
 
-A valid staged executable makes a neutral **Update TerminalHost (restarts sessions)** action appear
-beside Sort. The host's staged-directory monitor publishes availability only; an update begins only
-from this explicit user action.
+A valid staged executable makes exactly one standard header button, **Apply TerminalHost update**,
+appear immediately left of Sort. Its tooltip states that hosted durable sessions will be
+interrupted and restarted; `Unavailable` renders no action.
 
-The `EmbeddedTerminal` mailbox serializes the update request. Before it resumes processing other
-messages, it captures the current host, authoritative registry, and resumable-session snapshot and
-enters `Updating(snapshot)`. Starts, Resume, agent actions, Canvas fallback launches, create-worktree
-prompt launches, cleanup reservations, and duplicate update requests all cross this mailbox and are
-rejected while it is locked. The client enters `Updating` immediately and renders a non-dismissible
-full-screen overlay.
+Clicking the action immediately removes it and shows a focused, non-dismissible overlay with a
+visible progress spinner. Client terminal messages and shortcuts become no-ops, while the
+`EmbeddedTerminal` mailbox enters `WaitingForCleanup` before acknowledging `Updating`; all new
+embedded or native terminal mutations and cleanup reservations are therefore locked at the server
+boundary too.
 
-If a terminal or worktree cleanup reservation already exists when the update is requested, the
-transaction does not start. The client removes the temporary blocking overlay and exposes
-**Retry TerminalHost update** while the authoritative terminal state remains unchanged.
+Cleanup already in progress is a sequencing dependency, not a rejection. Its apply and acknowledged
+release messages remain processable while the global lock is held. The update request returns
+`Updating` immediately, waits for every existing reservation to release, and then starts the
+host-wide transaction exactly once without another click. With no existing cleanup it starts
+immediately. Reservations have no blind expiry because they may still protect running teardown.
 
 The worker performs exactly one sequence:
 
@@ -284,10 +287,20 @@ The lifecycle mailbox holds a short-lived in-memory reservation for the canonica
 from before its terminal closes through the delete/archive mutation. Another cleanup, terminal
 start for that path receives a retryable busy error, while unrelated worktrees remain available;
 the reservation is acquired only when the cleanup workflow starts and is released after both
-successful and failed mutations. Constructing an async close or cleanup workflow is inert.
+successful and failed mutations. Its `finally` performs a bounded, uncancelled request/reply so
+normal completion, typed failure, exception, and caller cancellation all attempt acknowledged
+removal before returning. Acquisition timeout makes the same release attempt because the mailbox
+may already have granted the lease. A failed acknowledgement is logged rather than hidden, and no
+blind expiry can clear cleanup that may still be active. Constructing an async close or cleanup
+workflow is inert.
 An attempt made during terminal maintenance fails without mutating the worktree or archive state.
-In a successful update the action is available again after unlock; in a fatal update the blocking
+After a successful update terminal actions are available again; after a fatal update the blocking
 overlay remains until Treemon is manually restarted.
+
+Reservation and update telemetry correlates acquisition, release, queued waiting, transaction
+start, duplicate requests, and acknowledgement failures with bounded opaque lease IDs, ages, kinds,
+and counts. It excludes worktree paths, terminal content, commands, prompts, capabilities, and
+bearer values.
 
 If the host crashes, closing its Job Object handles kills every owned ttyd tree. Treemon keeps the
 affected tabs visible as interrupted, reports the loss, and can start fresh terminals. It does not
@@ -425,20 +438,29 @@ separate origin, so the dashboard cannot apply this styling itself.
 `TerminalLaunch` is the sole product-level start boundary. Native card actions use `SessionManager`;
 every agent-bearing or embedded launch uses `EmbeddedTerminal`, so the maintenance lock covers normal
 start, agent start, Resume, contextual actions, Canvas launches, AutoSync fallback, create-worktree
-prompts, and `tm launch` without route-specific checks.
+prompts, and `tm launch` without route-specific checks. When TerminalHost replacement is configured,
+the Worktree API also serializes native open/focus/kill operations through the same mailbox before
+calling `SessionManager`; an action ordered before the update may finish, while one ordered after the
+lock is installed returns without executing.
 
 `EmbeddedTerminal` owns the authoritative cached snapshot, cleanup reservations, and the maintenance
-state `Unlocked | Updating of RestartSession list | Fatal of string`. Snapshot preparation runs in
-the mailbox's serialized turn; the forward-only host I/O runs outside it so reads remain responsive
-and mutations fail immediately. Only the mailbox applies the success registry or fatal transition.
+state `Unlocked | WaitingForCleanup of PendingUpdate | Updating of RestartSession list | Fatal of
+string`. Installing `WaitingForCleanup` is the atomic global lock and immediately acknowledges
+`Updating`. The last acknowledged release posts one internal begin message; snapshot preparation
+then runs in the mailbox's serialized turn, and forward-only host I/O runs outside it. Only the
+mailbox installs the success registry or fatal transition, and no HTTP reply channel is retained
+across cleanup or replacement.
 
 `TerminalSessionActivity` queries only the exact terminal origins in the captured registry. It
 applies the ordinary open-instance rule, chooses the greatest-activity durable session per terminal,
 and builds the provider-specific direct Resume command.
 
 The client receives `TerminalHostUpdateState` with the normal dashboard response. Elmish owns the
-button, immediate `Updating` transition, trigger command, success refresh, and permanent fatal
-overlay. The view dispatches messages only; it performs no direct API or DOM mutation.
+single Available button, immediate `Updating` transition, terminal-interaction gate, trigger command,
+success refresh, animated progress overlay, and permanent fatal overlay. Polling keeps the overlay
+installed through queued cleanup and replacement. If the acknowledgement transport fails, the
+client remains locked in `Updating` until an authoritative dashboard response reports the actual
+state instead of inventing a local fatal result.
 
 `treemon.ps1` still publishes the host and stages a changed complete host bundle in a versioned
 directory. Deployment compatibility preflight remains separate: an incompatible live host with
@@ -457,8 +479,9 @@ old host connected while reporter heartbeats disappear.
 ### Deliberate simplicity
 
 Update coordination uses one host, one authoritative registry, one restart-session snapshot, and one
-three-case mailbox state. Success installs the new registry and unlocks the mailbox; any failure
-transitions it to `Fatal` for the rest of the server process.
+four-case mailbox state. `WaitingForCleanup` adds sequencing without another worker or retry path.
+Success installs the new registry and unlocks the mailbox; any failure transitions it to `Fatal` for
+the rest of the server process.
 
 ## Verification
 
@@ -466,13 +489,18 @@ All lifecycle verification uses isolated temporary worktrees, TerminalHost state
 and dynamically allocated non-production ports. Tests never bind production port 5000 or invoke
 `treemon.ps1 deploy`, `start`, `stop`, or `restart`.
 
-- `EmbeddedTerminalUpdateTests` covers staged availability, the one-pass happy transition, omission
-  of terminals without captured durable sessions, immediate rejection of starts/cleanup/duplicates
-  while locked, cleanup-before-update rejection, and permanent fatal state after the first failure.
+- `EmbeddedTerminalUpdateTests` covers staged availability, immediate `Updating` acknowledgement,
+  the one-pass happy transition, omission of terminals without captured durable sessions, rejection
+  of new starts/cleanup and idempotent duplicates while locked, cleanup-held queueing, automatic
+  single transaction after acknowledged release, safe queue/age/correlation logs, and permanent
+  fatal state after the first failure.
 - `TerminalOwnershipQueryTests` covers active and idle durable-session selection, stale-session
   exclusion, one latest conversation per terminal, and no literal agent `resume` prompt.
-- Dashboard browser tests cover the neutral toolbar action, immediate blocking overlay, success
-  removal, and non-dismissible fatal recovery overlay.
+- Dashboard browser tests cover the exact one-button copy and position immediately before Sort,
+  hidden Unavailable state, immediate `Updating` acknowledgement, uninterrupted polling-driven
+  blocking overlay, visible spinner animation, success removal, and non-dismissible fatal recovery
+  overlay. Elmish tests cover every terminal action/shortcut message, subscription suppression, late
+  focus, and queued-launch suppression while locked.
 - Existing launch-routing tests prove every embedded and agent-bearing API route reaches the shared
   `TerminalLaunch`/`EmbeddedTerminal` boundary.
 - Run the focused tests first, then `dotnet test src/Tests/Tests.fsproj --filter "Category=Fast"`.
@@ -491,8 +519,10 @@ and dynamically allocated non-production ports. Tests never bind production port
   refused while the old host owns terminals.
 - **Typed launch routing:** every product-level embedded start crosses `TerminalLaunch` and the one
   `EmbeddedTerminal` mailbox gate.
-- **User action over automatic eligibility:** staged availability produces a plainly labelled neutral
-  toolbar action. Treemon never waits for an idle window or surprises the user with replacement.
+- **User action over automatic eligibility:** staged availability produces one standard header
+  **Apply TerminalHost update** button immediately before Sort, with interruption detail in its
+  tooltip rather than another status label. Treemon never waits for an idle window or surprises the
+  user with replacement.
 - **Host-wide shutdown over per-session orchestration:** clicking the action consents to interrupting
   active durable sessions; one host request closes every owned process tree and avoids partial bridge
   shutdown split-brain.
@@ -502,9 +532,10 @@ and dynamically allocated non-production ports. Tests never bind production port
 - **Forward-only fatal failure:** the first failed operation enters permanent `Fatal`, retains the
   lock and overlay, and requires manual redeploy/restart. No retry, rollback, recovery, or second host
   generation can repeat or disguise a partial transaction.
-- **Mailbox serialization is the atomic lock:** snapshot capture completes inside the serialized
-  update turn before queued starts can run; host I/O then runs asynchronously while mutations are
-  rejected immediately.
+- **Mailbox serialization is the atomic lock:** `WaitingForCleanup` is installed before the request
+  is acknowledged, so later mutations are rejected while earlier cleanup completion/release messages
+  drain. Snapshot capture starts in one serialized turn after the reservations reach zero; host I/O
+  then runs asynchronously under `Updating`.
 - **Captured current state:** current registry membership plus current open exact-session rows fully
   define the restart set.
 - **Direct session selector:** recreated Copilot sessions use `--session-id=<id>` so the durable
@@ -519,8 +550,11 @@ and dynamically allocated non-production ports. Tests never bind production port
   an update, but a changed host assembly or runtime file does.
 - **Native-only card session state:** embedded terminals do not change `HasActiveSession`; coding-tool
   activity remains the agent indicator.
-- **Exact cleanup exclusion:** delete/archive retains its canonical-path reservation, while global
-  maintenance rejects new reservations until the update succeeds or the process is restarted.
+- **Cleanup sequencing before host-wide replacement:** delete/archive retains its canonical-path
+  reservation until mailbox-acknowledged release. An accepted update locks all new terminal
+  mutations immediately, waits for those existing reservations, then starts the complete-host
+  replacement once. Cleanup is a sequencing dependency, not a rejection reason, and no lease TTL
+  can clear work that may still be running.
 
 ## Key Files
 

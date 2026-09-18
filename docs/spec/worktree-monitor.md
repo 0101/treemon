@@ -19,12 +19,12 @@
 - Scheduler footer: one row per refresh category, persistent status (never reverts to "pending")
 - Loading skeleton on cold start until first worktree list completes
 - Fixed header bar with system metrics and deploy branch badge
-- A staged TerminalHost update adds one neutral
-  **Update TerminalHost (restarts sessions)** action beside Sort. Clicking it immediately blocks
-  dashboard interaction while the request starts. If terminal cleanup is already reserved, no
-  transaction starts and the control becomes **Retry TerminalHost update**; otherwise the blocking
-  overlay remains until the forward-only transaction succeeds or enters its permanent fatal state.
-  See `docs/spec/embedded-terminal.md`.
+- A staged TerminalHost update adds exactly one **Apply TerminalHost update** button immediately
+  left of Sort; `Unavailable` renders nothing. Clicking it immediately locks terminal interaction
+  and shows a non-dismissible animated overlay. Existing terminal cleanup finishes under its
+  reservation, then the queued host-wide update starts exactly once without another click; new
+  terminal mutations remain blocked throughout. Normal polling removes the overlay on success or
+  replaces it with the permanent fatal state. See `docs/spec/embedded-terminal.md`.
 - Header workspace ratios follow the fixed `Terminal | Canvas | Dashboard` order: `1:1:1`,
   `1:2:1`, and `2:2:1`. With either Terminal or Canvas hidden, the controls become `1:1` and `2:1`
   for the remaining pane and Dashboard; both wide modes use `2:1` and retain their three-pane

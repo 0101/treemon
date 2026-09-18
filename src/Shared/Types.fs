@@ -240,10 +240,6 @@ type TerminalHostUpdateState =
     | Updating
     | Fatal
 
-[<RequireQualifiedAccess>]
-type TerminalHostUpdateRequestError =
-    | CleanupInProgress
-
 type EmbeddedTerminalStartResult =
     { Snapshot: EmbeddedTerminalSnapshot
       TerminalId: EmbeddedTerminalId }

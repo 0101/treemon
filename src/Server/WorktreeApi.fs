@@ -60,8 +60,7 @@ let readOnlyApi
       updateTerminalHost =
         fun () ->
             async {
-                return
-                    Ok TerminalHostUpdateState.Unavailable
+                return TerminalHostUpdateState.Unavailable
             }
       openEditor = fun _ -> async { return () }
       toggleAutoSync = fun _ _ -> async { return Error $"Auto-sync is not available in {modeName}" }
@@ -794,6 +793,14 @@ let internal worktreeApiWithLaunch
                 return! action ()
         }
 
+    let serializedTerminalAction operation =
+        match terminalHostRestartSessions with
+        | Some _ ->
+            EmbeddedTerminal.runTerminalAction
+                embeddedTerminal
+                operation
+        | None -> operation ()
+
     let withTerminalActivity snapshot =
         async {
             let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
@@ -881,7 +888,13 @@ let internal worktreeApiWithLaunch
                     rootPaths
                     appVersion
                     deployBranch
-          openTerminal = openTerminal validatePath terminalLaunch.OpenNativeTerminal
+          openTerminal =
+            openTerminal
+                validatePath
+                (fun wtPath ->
+                    serializedTerminalAction (fun () ->
+                        terminalLaunch.OpenNativeTerminal
+                            wtPath))
           startEmbeddedTerminal = startEmbeddedTerminal
           startAgent = startAgent
           getEmbeddedTerminals = getEmbeddedTerminals
@@ -895,8 +908,7 @@ let internal worktreeApiWithLaunch
                         snapshot
                 | None ->
                     async {
-                        return
-                            Ok TerminalHostUpdateState.Unavailable
+                        return TerminalHostUpdateState.Unavailable
                     }
           openEditor = openEditor validatePath
           toggleAutoSync = fun wtPath enabled ->
@@ -995,10 +1007,16 @@ let internal worktreeApiWithLaunch
                   })
           focusSession = fun wtPath ->
               withValidatedPath wtPath "focusSession" (fun () ->
-                  SessionManager.focusSession sessionAgent wtPath)
+                  serializedTerminalAction (fun () ->
+                      SessionManager.focusSession
+                          sessionAgent
+                          wtPath))
           killSession = fun wtPath ->
               withValidatedPath wtPath "killSession" (fun () ->
-                  SessionManager.killSession sessionAgent wtPath)
+                  serializedTerminalAction (fun () ->
+                      SessionManager.killSession
+                          sessionAgent
+                          wtPath))
           archiveWorktree =
               updateArchivedBranchesWith
                   agent

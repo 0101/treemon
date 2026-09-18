@@ -67,20 +67,23 @@ type DashboardTests() =
         page.EvaluateAsync<bool>(
             "() => { const event = new KeyboardEvent('keydown',{key:'p',ctrlKey:true,bubbles:true,cancelable:true}); document.activeElement.dispatchEvent(event); return event.defaultPrevented; }")
 
-    let startTerminalHostUpdate (page: IPage) =
+    let prepareTerminalHostUpdate (page: IPage) =
         task {
             let converter = Fable.Remoting.Json.FableJsonConverter()
+
             let updateStarted =
                 TaskCompletionSource<unit>(
                     TaskCreationOptions.RunContinuationsAsynchronously
                 )
-            let finishUpdate =
-                TaskCompletionSource<
-                    Result<TerminalHostUpdateState, TerminalHostUpdateRequestError>
-                 >(
+            let finalState =
+                TaskCompletionSource<TerminalHostUpdateState>(
                     TaskCreationOptions.RunContinuationsAsynchronously
                 )
-            let refreshAfterCompletion =
+            let updatingRefresh =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+            let finalRefresh =
                 TaskCompletionSource<unit>(
                     TaskCreationOptions.RunContinuationsAsynchronously
                 )
@@ -98,15 +101,16 @@ type DashboardTests() =
                                     converter
                                 )
                             let reportedState =
-                                if finishUpdate.Task.IsCompletedSuccessfully then
-                                    refreshAfterCompletion.TrySetResult()
+                                if finalState.Task.IsCompletedSuccessfully then
+                                    finalRefresh.TrySetResult()
                                     |> ignore
 
-                                    match finishUpdate.Task.Result with
-                                    | Ok state -> state
-                                    | Error
-                                        TerminalHostUpdateRequestError.CleanupInProgress ->
-                                        TerminalHostUpdateState.Available
+                                    finalState.Task.Result
+                                elif updateStarted.Task.IsCompletedSuccessfully then
+                                    updatingRefresh.TrySetResult()
+                                    |> ignore
+
+                                    TerminalHostUpdateState.Updating
                                 else
                                     TerminalHostUpdateState.Available
                             let body =
@@ -132,7 +136,6 @@ type DashboardTests() =
                     routeHandler (fun route ->
                         task {
                             updateStarted.TrySetResult() |> ignore
-                            let! result = finishUpdate.Task
 
                             do!
                                 route.FulfillAsync(
@@ -140,7 +143,7 @@ type DashboardTests() =
                                         ContentType = "application/json",
                                         Body =
                                             JsonConvert.SerializeObject(
-                                                result,
+                                                TerminalHostUpdateState.Updating,
                                                 converter
                                             )
                                     )
@@ -150,13 +153,29 @@ type DashboardTests() =
 
             let! _ = page.GotoAsync(baseUrl)
             let action =
-                page.GetByTitle(
-                    "Update TerminalHost (restarts sessions)"
+                page.Locator(
+                    ".header-controls > .ctrl-btn",
+                    PageLocatorOptions(
+                        HasText = "Apply TerminalHost update"
+                    )
                 )
             do! action.WaitForAsync()
-            do! action.ClickAsync()
+            return
+                {| Action = action
+                   UpdateStarted = updateStarted.Task
+                   UpdatingRefresh = updatingRefresh.Task
+                   Complete =
+                    fun state ->
+                        finalState.TrySetResult state |> ignore
+                   FinalRefresh = finalRefresh.Task |}
+        }
+
+    let startTerminalHostUpdate (page: IPage) =
+        task {
+            let! prepared = prepareTerminalHostUpdate page
+            do! prepared.Action.ClickAsync()
             do!
-                updateStarted.Task.WaitAsync(
+                prepared.UpdateStarted.WaitAsync(
                     TimeSpan.FromSeconds 5.0
                 )
 
@@ -164,13 +183,11 @@ type DashboardTests() =
                 page.Locator(".terminal-host-update-overlay")
             do! overlay.WaitForAsync()
 
-            let completeUpdate result =
-                finishUpdate.TrySetResult result |> ignore
-
             return
-                overlay,
-                completeUpdate,
-                refreshAfterCompletion.Task
+                {| Overlay = overlay
+                   UpdatingRefresh = prepared.UpdatingRefresh
+                   Complete = prepared.Complete
+                   FinalRefresh = prepared.FinalRefresh |}
         }
 
     override this.ContextOptions() =
@@ -204,33 +221,127 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``TerminalHost update action blocks immediately and clears after success``() =
+    member this.``TerminalHost available is one standard header button immediately before Sort``() =
         task {
             let! page = this.Context.NewPageAsync()
-            let! overlay, finishUpdate, _ =
-                startTerminalHostUpdate page
+            let! prepared = prepareTerminalHostUpdate page
+            let! directlyBeforeSort =
+                prepared.Action.EvaluateAsync<bool>(
+                    "button => button.nextElementSibling?.textContent?.startsWith('Sort:') === true"
+                )
 
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    prepared.Action.TextContentAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.EqualTo "Apply TerminalHost update"
+                )
+                Assert.That(
+                    prepared.Action.GetAttributeAsync("class")
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.EqualTo "ctrl-btn"
+                )
+                Assert.That(
+                    prepared.Action.GetAttributeAsync("title")
+                        .GetAwaiter()
+                        .GetResult(),
+                    Does.Contain("interrupted and restarted")
+                )
+                Assert.That(
+                    prepared.Action.IsEnabledAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.True
+                )
+                Assert.That(
+                    directlyBeforeSort,
+                    Is.True
+                )
+                Assert.That(
+                    page.Locator(
+                        ".header-controls > .ctrl-btn",
+                        PageLocatorOptions(
+                            HasText = "Apply TerminalHost update"
+                        )
+                    )
+                        .CountAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.EqualTo 1
+                ))
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``TerminalHost unavailable renders no status or action``() =
+        task {
             Assert.That(
-                (overlay.Locator(".modal-header").TextContentAsync())
+                this.Page.GetByText(
+                    "Apply TerminalHost update",
+                    PageGetByTextOptions(Exact = true)
+                )
+                    .CountAsync()
                     .GetAwaiter()
                     .GetResult(),
-                Is.EqualTo "Updating TerminalHost"
+                Is.Zero
             )
+        }
 
-            finishUpdate (
-                Ok TerminalHostUpdateState.Unavailable
-            )
-
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``TerminalHost update spinner ignores reduced motion and clears after success``() =
+        task {
+            let! page = this.Context.NewPageAsync()
             do!
-                overlay.WaitForAsync(
-                    LocatorWaitForOptions(
-                        State = WaitForSelectorState.Detached
+                page.EmulateMediaAsync(
+                    PageEmulateMediaOptions(
+                        ReducedMotion = ReducedMotion.Reduce
                     )
                 )
 
+            let! update =
+                startTerminalHostUpdate page
+
             Assert.That(
-                page.GetByTitle(
-                    "Update TerminalHost (restarts sessions)"
+                update.Overlay.Locator(".modal-header")
+                    .TextContentAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                Is.EqualTo "Updating TerminalHost")
+
+            let spinner =
+                update.Overlay.Locator(
+                    ".terminal-host-update-spinner"
+                )
+            do! spinner.WaitForAsync()
+            let! animationName =
+                computedStyle "animationName" spinner
+
+            let! _ =
+                page.WaitForFunctionAsync(
+                    "() => { const overlay = document.querySelector('.terminal-host-update-overlay'); return overlay?.contains(document.activeElement) === true; }"
+                )
+
+            do! page.Keyboard.PressAsync("Tab")
+
+            let! focusStayedLocked =
+                page.EvaluateAsync<bool>(
+                    "() => document.querySelector('.terminal-host-update-overlay')?.contains(document.activeElement) === true"
+                )
+
+            do!
+                update.UpdatingRefresh.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            Assert.That(
+                page.GetByText(
+                    "Apply TerminalHost update",
+                    PageGetByTextOptions(Exact = true)
                 )
                     .CountAsync()
                     .GetAwaiter()
@@ -238,47 +349,39 @@ type DashboardTests() =
                 Is.Zero
             )
 
-            do! page.CloseAsync()
-        }
-
-    [<Test>]
-    [<Category("Fast")>]
-    member this.``TerminalHost cleanup rejection exposes a retry action after refresh``() =
-        task {
-            let! page = this.Context.NewPageAsync()
-            let! overlay, finishUpdate, refreshAfterCompletion =
-                startTerminalHostUpdate page
-
-            finishUpdate (
-                Error
-                    TerminalHostUpdateRequestError.CleanupInProgress
-            )
+            update.Complete TerminalHostUpdateState.Unavailable
 
             do!
-                overlay.WaitForAsync(
+                update.FinalRefresh.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            do!
+                update.Overlay.WaitForAsync(
                     LocatorWaitForOptions(
                         State = WaitForSelectorState.Detached
                     )
                 )
 
-            do!
-                refreshAfterCompletion.WaitAsync(
-                    TimeSpan.FromSeconds 5.0
-                )
-
-            let retry =
-                page.GetByTitle(
-                    "Terminal cleanup is in progress. Retry the update when cleanup completes."
-                )
-
-            do! retry.WaitForAsync()
-
             Assert.That(
-                retry.TextContentAsync()
+                spinner.CountAsync()
                     .GetAwaiter()
                     .GetResult(),
-                Is.EqualTo "Retry TerminalHost update"
-            )
+                Is.Zero)
+            Assert.That(
+                animationName,
+                Is.EqualTo "sync-spin",
+                "progress must remain visibly animated under reduced motion")
+            Assert.That(focusStayedLocked, Is.True)
+            Assert.That(
+                page.GetByText(
+                    "Apply TerminalHost update",
+                    PageGetByTextOptions(Exact = true)
+                )
+                    .CountAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                Is.Zero)
 
             do! page.CloseAsync()
         }
@@ -288,18 +391,21 @@ type DashboardTests() =
     member this.``TerminalHost fatal update keeps the blocking recovery overlay``() =
         task {
             let! page = this.Context.NewPageAsync()
-            let! overlay, finishUpdate, _ =
+            let! update =
                 startTerminalHostUpdate page
 
             let error =
                 "TerminalHost update failed. Terminal actions remain blocked. Redeploy or restart Treemon manually from an external PowerShell window."
 
-            finishUpdate (
-                Ok TerminalHostUpdateState.Fatal
-            )
+            update.Complete TerminalHostUpdateState.Fatal
+
+            do!
+                update.FinalRefresh.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
 
             let errorMessage =
-                overlay.Locator(".modal-error-message")
+                update.Overlay.Locator(".modal-error-message")
             do! errorMessage.WaitForAsync()
             do! page.Keyboard.PressAsync("Escape")
 
@@ -311,14 +417,15 @@ type DashboardTests() =
                     Is.EqualTo error
                 )
                 Assert.That(
-                    overlay.CountAsync()
+                    update.Overlay.CountAsync()
                         .GetAwaiter()
                         .GetResult(),
                     Is.EqualTo 1
                 )
                 Assert.That(
-                    page.GetByTitle(
-                        "Update TerminalHost (restarts sessions)"
+                    page.GetByText(
+                        "Apply TerminalHost update",
+                        PageGetByTextOptions(Exact = true)
                     )
                         .CountAsync()
                         .GetAwaiter()
