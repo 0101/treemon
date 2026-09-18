@@ -34,8 +34,8 @@ usage timestamps never decide the target, preserving the rule that `LastSeen` is
 state, not SystemView ownership or affinity. The client receives a polled snapshot, while delivery
 reruns the same selection at send time.
 
-Because a SystemView target is computed rather than stored, it cannot go stale, be raced by
-concurrent activity, or need pruning. A SystemView's owner is likewise absent from
+Because the routing target is recomputed for each interaction rather than stored, it cannot go
+stale, be raced by concurrent activity, or need pruning. A SystemView's owner is likewise absent from
 `CanvasDoc.OwnerSessionId`, so liveness, Start session, archive, share, awareness, heartbeat, and
 morph behavior continue to depend only on `CanvasDoc.Kind`.
 
