@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   MAX_CANVAS_MESSAGE_CHARS,
-  promptForBrowserFallback,
   promptForCanvasMessage,
   promptForSession,
 } from "../../Extension/session-prompt.mjs";
@@ -177,39 +176,17 @@ test("browser messages enforce the pane's serialized UTF-16 cap", () => {
   );
 });
 
-test("browser fallback stays silent for an explicitly unmonitored worktree", () => {
-  assert.equal(
-    promptForBrowserFallback(
-      { reachable: true, monitored: false },
-      "review.html",
-      "http://127.0.0.1:1234/canvas/review.html",
-    ),
-    undefined,
-  );
-});
-
-test("browser fallback posts its URL when Treemon is unreachable", () => {
-  assert.deepEqual(
-    promptForBrowserFallback(
-      { reachable: false, monitored: false },
-      "review.html",
-      "http://127.0.0.1:1234/canvas/review.html",
-    ),
-    {
-      kind: "agent-prompt",
-      prompt:
-        'Canvas doc "review.html" is served in browser-fallback mode at http://127.0.0.1:1234/canvas/review.html because Treemon is unreachable. ' +
-        "Share this ctrl+clickable URL with the user (or open it) to view the doc; it auto-reloads on changes and interactions are forwarded back to this session.",
-    },
-  );
-});
-
-test("inject delivery uses the existing serialized enqueueSend path", () => {
+test("inject delivery uses the serialized queue while browser writes stay session-silent", () => {
   const extension =
     readFileSync(new URL("../../Extension/extension.mjs", import.meta.url), "utf8");
   assert.match(extension, /promptForSession\(body\)/);
   assert.match(extension, /enqueueSend\(session, kind, prompt\)/);
   assert.match(extension, /promptForCanvasMessage\(body\)/);
   assert.match(extension, /enqueueSend\(session, transport\.kind, transport\.prompt\)/);
-  assert.match(extension, /promptForBrowserFallback\(registration, filename, url\)/);
+
+  const writeHandlerStart = extension.indexOf("async function handleCanvasWrite");
+  const writeHandlerEnd = extension.indexOf("const worktreePath", writeHandlerStart);
+  assert.notEqual(writeHandlerStart, -1, "expected the canvas write handler");
+  assert.notEqual(writeHandlerEnd, -1, "expected the canvas write handler boundary");
+  assert.doesNotMatch(extension.slice(writeHandlerStart, writeHandlerEnd), /enqueueSend\(/);
 });
