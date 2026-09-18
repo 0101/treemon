@@ -173,8 +173,11 @@ try {
     $candidateServer = Publish-ServerCandidate
     Assert-True ($candidateServer -is [string]) "Server candidate path was not scalar"
     $candidateHost = Join-Path $candidateServer "terminal-host"
+    Assert-True (
+        -not (Test-Path -LiteralPath (Join-Path $candidateHost "Shared.dll") -PathType Leaf)
+    ) "Published TerminalHost bundle still contained Shared.dll"
     $revisionStampedHostAssemblies = @(
-        @("TerminalHost.exe", "TerminalHost.dll", "Shared.dll", "TerminalHostLayout.dll") |
+        @("TerminalHost.exe", "TerminalHost.dll", "TerminalHostLayout.dll") |
             Where-Object {
                 $version = [Diagnostics.FileVersionInfo]::GetVersionInfo(
                     (Join-Path $candidateHost $_)
@@ -190,6 +193,10 @@ try {
     Publish-TestProject (
         Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
     ) $baseline "1.0.0-deployment-test"
+    Assert-True (
+        -not (Test-Path -LiteralPath (Join-Path $baseline "Shared.dll") -PathType Leaf)
+    ) "Direct TerminalHost publish still contained Shared.dll"
+    Write-Host "PASS: TerminalHost publish excludes Shared.dll"
 
     $env:TREEMON_TERMINAL_HOST_STATE_DIR = $emptyState
     $layoutProbe = Test-TerminalHostDeployment $candidateServer
@@ -210,6 +217,17 @@ try {
         [IO.Path]::GetFullPath($emptyState)
     ) "PowerShell did not consume the candidate's state-directory authority"
     Write-Host "PASS: candidate layout owns the non-default state and staging paths"
+
+    $repeatCandidateServer = Publish-ServerCandidate
+    $repeatCandidateHost = Join-Path $repeatCandidateServer "terminal-host"
+    Assert-True (
+        -not (Test-Path -LiteralPath (Join-Path $repeatCandidateHost "Shared.dll") -PathType Leaf)
+    ) "Repeated TerminalHost publish contained Shared.dll"
+    Assert-True (
+        (Get-TerminalHostBundleDigest $candidateHost $layoutProbe.Layout) -ceq
+        (Get-TerminalHostBundleDigest $repeatCandidateHost $layoutProbe.Layout)
+    ) "Repeated identical nested TerminalHost publications produced different bundle digests"
+    Write-Host "PASS: identical nested TerminalHost publications have a stable bundle digest"
 
     $fingerprintDirectory = Join-Path $root "fingerprints"
     $fingerprintNestedDirectory = Join-Path $fingerprintDirectory "nested"

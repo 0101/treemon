@@ -12,6 +12,7 @@ open System.Text
 open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
+open System.Xml.Linq
 open NUnit.Framework
 open TerminalHost
 open Tests.GitTestHelpers
@@ -366,6 +367,24 @@ type TerminalRuntimeBudgetTests() =
             name.StartsWith("durable-terminal-", StringComparison.Ordinal)
             || name.StartsWith("terminal-", StringComparison.Ordinal))
 
+    let projectItemPaths (itemName: string) (projectPath: string) =
+        let projectDirectory =
+            projectPath
+            |> Path.GetDirectoryName
+            |> Option.ofObj
+            |> Option.defaultWith (fun () ->
+                invalidOp $"Project path has no directory: {projectPath}")
+
+        XDocument.Load(projectPath).Descendants(XName.Get itemName)
+        |> Seq.choose (fun (item: XElement) ->
+            item.Attribute(XName.Get "Include")
+            |> Option.ofObj
+            |> Option.map (fun includeAttribute ->
+                Path.GetFullPath(
+                    Path.Combine(projectDirectory, includeAttribute.Value)
+                )))
+        |> Set.ofSeq
+
     [<Test>]
     member _.``complete terminal runtime stays within its simplicity budget``() =
         let root = findRepositoryRoot AppContext.BaseDirectory
@@ -374,6 +393,7 @@ type TerminalRuntimeBudgetTests() =
             seq {
                 yield! sourceFiles root "src/TerminalHost" "*.fs"
                 yield! sourceFiles root "src/TerminalHostLayout" "*.fs"
+                yield Path.Combine(root, "src/Shared/TerminalPageMessage.fs")
                 yield! sourceFiles root "src/Server" "TerminalHost*.fs"
                 yield Path.Combine(root, "src/Server/TerminalSessionActivity.fs")
                 yield Path.Combine(root, "src/Server/EmbeddedTerminal.fs")
@@ -393,6 +413,39 @@ type TerminalRuntimeBudgetTests() =
             |> String.concat Environment.NewLine
 
         Assert.That(total, Is.LessThanOrEqualTo(5_200), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
+
+    [<Test>]
+    member _.``TerminalHost shares only the terminal page protocol source with Shared``() =
+        let root = findRepositoryRoot AppContext.BaseDirectory
+        let sharedProject = Path.Combine(root, "src/Shared/Shared.fsproj")
+        let terminalHostProject =
+            Path.Combine(root, "src/TerminalHost/TerminalHost.fsproj")
+        let terminalPageProtocol =
+            Path.GetFullPath(
+                Path.Combine(root, "src/Shared/TerminalPageMessage.fs")
+            )
+
+        let sharedSources =
+            projectItemPaths "Compile" sharedProject
+
+        let terminalHostSources =
+            projectItemPaths "Compile" terminalHostProject
+
+        let terminalHostReferences =
+            projectItemPaths "ProjectReference" terminalHostProject
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                Set.intersect sharedSources terminalHostSources,
+                Is.EqualTo(set [ terminalPageProtocol ]),
+                "Dashboard-only Shared sources must not enter TerminalHost compilation"
+            )
+
+            Assert.That(
+                terminalHostReferences,
+                Does.Not.Contain(Path.GetFullPath sharedProject),
+                "TerminalHost must not carry the Shared runtime assembly"
+            ))
 
 [<TestFixture>]
 [<Category("Unit")>]
