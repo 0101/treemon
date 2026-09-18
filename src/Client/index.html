@@ -691,6 +691,15 @@
             gap: 4px; padding: 28px 18px; color: #a6adc8;
         }
         .modal-loading { color: #a6adc8; text-align: center; padding: 18px 0; }
+        .terminal-host-update-lock { outline: none; }
+        .terminal-host-update-progress {
+            display: flex; align-items: center; justify-content: center; gap: 8px;
+        }
+        .terminal-host-update-spinner {
+            width: 16px; height: 16px; flex-shrink: 0;
+            border: 2px solid #89b4fa; border-top-color: transparent; border-radius: 50%;
+            animation: sync-spin 0.7s linear infinite;
+        }
         .modal-input, .modal-textarea {
             background: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;
             padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: var(--fs-lg);

@@ -648,13 +648,6 @@ ORDER BY updated_at DESC, session_id DESC, process_id DESC, process_start_ticks 
 LIMIT 1;
 """
 
-let private retainedTerminalSessionIdsSql =
-    """
-SELECT DISTINCT terminal_session_id
-FROM session_instances
-WHERE terminal_session_id IS NOT NULL;
-"""
-
 let private pruneSql =
     """
 DELETE FROM activity_events
@@ -1029,21 +1022,6 @@ type SessionActivityStore
             |> persistedValue
         else
             None
-
-    member internal _.RetainedTerminalSessionIds() =
-        use connection = openConnection ()
-        use command = connection.CreateCommand()
-        command.CommandText <- retainedTerminalSessionIdsSql
-        use reader = command.ExecuteReader()
-
-        readPersistedRows
-            reader
-            (fun row ->
-                row.GetString 0
-                |> persistedTerminalSessionId)
-            []
-        |> persistedValue
-        |> Set.ofList
 
     member _.PruneOld(cutoff: DateTimeOffset) =
         use connection = openConnection ()

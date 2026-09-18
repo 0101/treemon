@@ -794,17 +794,17 @@ let private verify () =
                 (recovered[fixtureB.Identity].LastSeen > afterReuse[fixtureB.Identity].LastSeen)
                 "The surviving exact identity did not refresh its liveness after the restart"
 
-            let _, terminalInstances, pending =
-                secondRuntime.Service.QueryTerminalActivityAt(DateTimeOffset.UtcNow, Set.singleton terminalB)
+            let terminalInstances =
+                secondRuntime.Service.QueryTerminalActivity(Set.singleton terminalB)
                 |> Result.defaultWith invalidOp
 
             ensure
-                (pending.IsEmpty
-                 && terminalInstances |> List.exists (fun instance -> instance.ProcessIdentity = fixtureB.Identity))
-                "Acknowledged presence did not clear restart reconciliation"
+                (terminalInstances
+                 |> List.exists (fun instance -> instance.ProcessIdentity = fixtureB.Identity))
+                "Acknowledged presence did not restore terminal activity"
 
             printfn
-                $"STEP4 PASS reusedPid={reusedPid} distinctStartTicks={priorStartTicks}/{ProcessIdentity.processStartTimeUtcTicks reusedIdentity} heartbeatBeforePresenceCreated=false restartPort={secondRuntime.Port} restartPresenceAttempts={restartAttempts} pendingAfterPresence={pending.Count} activeStateRecovered=true"
+                $"STEP4 PASS reusedPid={reusedPid} distinctStartTicks={priorStartTicks}/{ProcessIdentity.processStartTimeUtcTicks reusedIdentity} heartbeatBeforePresenceCreated=false restartPort={secondRuntime.Port} restartPresenceAttempts={restartAttempts} activeStateRecovered=true"
 
             closeProcess secondRuntime fixtureB.Identity
             let exactIdentities = [ fixtureA.Identity; reusedIdentity; fixtureB.Identity ]

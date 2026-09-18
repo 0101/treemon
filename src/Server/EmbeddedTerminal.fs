@@ -7,8 +7,18 @@ open Server.TerminalHostManifest
 open Server.TerminalHostProcess
 open Server.TerminalHostReplacement
 
+[<NoEquality; NoComparison>]
+type private PendingTerminalHostUpdate =
+    { QueryRestartSessions: RestartSessionQuery
+      Operations: Operations
+      RequestedAtTick: int64 }
+
 [<RequireQualifiedAccess>]
-type private ManagerPhase = Steady | Replacing
+type private MaintenanceState =
+    | Unlocked
+    | WaitingForCleanup of PendingTerminalHostUpdate
+    | Updating of RestartSession list
+    | Fatal of error: string
 
 [<RequireQualifiedAccess>]
 type private ReconciliationMode =
@@ -16,11 +26,16 @@ type private ReconciliationMode =
     | RebindAfterHostChange
     | PreserveDuringCleanup
 
+type private CleanupReservation =
+    { Token: Guid
+      AcquiredAtTick: int64 }
+
 type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
       LastHost: DiscoveryManifest option
-      Phase: ManagerPhase
-      CleanupReservations: Map<string, System.Guid> }
+      Maintenance: MaintenanceState
+      LastUpdateAvailabilityError: string option
+      CleanupReservations: Map<string, CleanupReservation> }
 
 type internal CloseTarget = OneTerminal of EmbeddedTerminalId | WorktreeTerminals of WorktreePath
 
@@ -40,17 +55,22 @@ type internal CleanupCompletion =
 
 type private Message =
     | Start of WorktreePath * command: string option * AsyncReplyChannel<Result<EmbeddedTerminalStartResult, string>>
+    | RunTerminalAction of
+        (unit -> Async<Result<unit, string>>) *
+        AsyncReplyChannel<Result<unit, string>>
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | GetCached of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | ReserveCleanup of CloseTarget * WorktreePath option * Guid * AsyncReplyChannel<Result<CleanupLease option, string>>
     | ApplyCleanup of CleanupCompletion * AsyncReplyChannel<EmbeddedTerminalSnapshot>
-    | ReleaseCleanup of Guid
-    | BeginReplacement of
-        ReplacementPlan *
-        ReplacementPolicyQuery *
-        ReplacementOperations *
-        AsyncReplyChannel<ReplacementOutcome>
-    | FinishReplacement of ReplacementResolution * AsyncReplyChannel<ReplacementOutcome>
+    | ReleaseCleanup of Guid * AsyncReplyChannel<unit>
+    | GetUpdateState of AsyncReplyChannel<TerminalHostUpdateState>
+    | BeginTerminalHostUpdate
+    | UpdateTerminalHost of
+        RestartSessionQuery *
+        Operations *
+        AsyncReplyChannel<TerminalHostUpdateState>
+    | FinishTerminalHostUpdate of
+        Result<DiscoveryManifest * RegistrySnapshot, string>
 
 type Manager = private | Manager of Config * MailboxProcessor<Message>
 
@@ -273,31 +293,182 @@ let private startTerminal config (state: ManagerState) worktreePath command =
                                 return! fail current error
     }
 
-let private applyReplacementResolution (state: ManagerState) = function
-    | ReplacementResolution.KeepState outcome ->
-        state, outcome
-    | ReplacementResolution.ApplyRegistry(manifest, registry, outcome) ->
-        applyRegistryWith
-            ReconciliationMode.RebindAfterHostChange
-            state
-            manifest
-            registry,
-        outcome
-    | ReplacementResolution.InterruptWithHost(
-        manifest,
-        message,
-        outcome
-      ) ->
-        { withHostFailure message state with
-            LastHost = Some manifest },
-        outcome
-    | ReplacementResolution.InterruptWithoutHost(message, outcome) ->
-        { withHostFailure message state with
-            LastHost = None },
-        outcome
+let private updateInProgressError =
+    "TerminalHost update is in progress; terminal actions remain locked until it completes."
 
-let private replacementInProgressError = "TerminalHost replacement is in progress; try again when it completes."
+let private fatalUpdateMessage =
+    "TerminalHost update failed. Terminal actions remain locked. Redeploy or restart Treemon manually from an external PowerShell window."
+
 let private cleanupInProgressError = "Terminal cleanup is in progress for this worktree; try again when it completes."
+
+let private terminalHostUpdateState config (state: ManagerState) =
+    match state.Maintenance with
+    | MaintenanceState.WaitingForCleanup _
+    | MaintenanceState.Updating _ ->
+        state, TerminalHostUpdateState.Updating
+    | MaintenanceState.Fatal _ ->
+        state, TerminalHostUpdateState.Fatal
+    | MaintenanceState.Unlocked ->
+        match state.LastHost with
+        | None ->
+            { state with
+                LastUpdateAvailabilityError = None },
+            TerminalHostUpdateState.Unavailable
+        | Some host ->
+            match
+                TerminalHostReplacement.updateAvailable
+                    config
+                    host
+            with
+            | Ok available ->
+                { state with
+                    LastUpdateAvailabilityError = None },
+                if available then
+                    TerminalHostUpdateState.Available
+                else
+                    TerminalHostUpdateState.Unavailable
+            | Error error ->
+                if
+                    state.LastUpdateAvailabilityError
+                    <> Some error
+                then
+                    Log.log
+                        "TerminalHost"
+                        $"Could not determine update availability: {error}"
+
+                { state with
+                    LastUpdateAvailabilityError = Some error },
+                TerminalHostUpdateState.Unavailable
+
+let private terminalMutationLockError (state: ManagerState) =
+    match state.Maintenance with
+    | MaintenanceState.Unlocked -> None
+    | MaintenanceState.WaitingForCleanup _
+    | MaintenanceState.Updating _ ->
+        Some updateInProgressError
+    | MaintenanceState.Fatal error ->
+        Some error
+
+let private maintenanceKind =
+    function
+    | MaintenanceState.Unlocked -> "unlocked"
+    | MaintenanceState.WaitingForCleanup _ -> "waiting-for-cleanup"
+    | MaintenanceState.Updating _ -> "updating"
+    | MaintenanceState.Fatal _ -> "fatal"
+
+let private enterFatalUpdate error (state: ManagerState) =
+    Log.log
+        "TerminalHost"
+        $"Update entered a permanent fatal state: {error}"
+
+    { withHostFailure fatalUpdateMessage state with
+        Maintenance =
+            MaintenanceState.Fatal fatalUpdateMessage },
+    TerminalHostUpdateState.Fatal
+
+let private prepareUpdate
+    config
+    (state: ManagerState)
+    (queryRestartSessions: RestartSessionQuery)
+    =
+    async {
+        try
+            match! discoverHost config with
+            | HealthyHost host ->
+                match
+                    TerminalHostReplacement.tryStagedExecutable
+                        config
+                        host
+                with
+                | Error error ->
+                    return state, Error error
+                | Ok None ->
+                    return
+                        { state with LastHost = Some host },
+                        Ok None
+                | Ok(Some stagedExecutable) ->
+                    match! listTerminals config host with
+                    | Error error ->
+                        return
+                            state,
+                            Error
+                                $"Could not capture the hosted terminals: {error}"
+                    | Ok registry ->
+                        let current =
+                            applyRegistry
+                                state
+                                host
+                                registry
+
+                        match
+                            TerminalHostReplacement.hostedTerminals
+                                registry.Terminals
+                        with
+                        | Error error ->
+                            return current, Error error
+                        | Ok terminals ->
+                            match queryRestartSessions terminals with
+                            | Error error ->
+                                return
+                                    current,
+                                    Error
+                                        $"Could not capture hosted sessions: {error}"
+                            | Ok sessions ->
+                                return
+                                    current,
+                                    Ok(
+                                        Some(
+                                            host,
+                                            stagedExecutable,
+                                            sessions
+                                        )
+                                    )
+            | MissingHost ->
+                return
+                    state,
+                    Error "TerminalHost is not running"
+            | DeadHost error
+            | UnusableHost error
+            | IncompatibleHost(_, error) ->
+                return state, Error error
+        with error ->
+            Log.logException
+                "TerminalHost"
+                "Could not prepare the TerminalHost update"
+                error
+
+            return
+                state,
+                Error
+                    "An unexpected error occurred while preparing the TerminalHost update"
+    }
+
+let private runUpdate
+    operations
+    config
+    host
+    stagedExecutable
+    sessions
+    =
+    async {
+        try
+            return!
+                TerminalHostReplacement.runWithOperations
+                    operations
+                    config
+                    host
+                    stagedExecutable
+                    sessions
+        with error ->
+            Log.logException
+                "TerminalHost"
+                "TerminalHost update transaction crashed"
+                error
+
+            return
+                Error
+                    "An unexpected error occurred during the TerminalHost update"
+    }
 
 let private cleanupPathKey worktreePath =
     let path = worktreePath |> WorktreePath.value |> Option.ofObj |> Option.defaultValue ""
@@ -306,6 +477,30 @@ let private cleanupPathKey worktreePath =
         path |> PathUtils.normalizePath |> pathKey
     with _ ->
         pathKey path
+
+let private cleanupLeaseCorrelation (token: Guid) =
+    token.ToString("N")[..7]
+
+let private elapsedMilliseconds startedAtTick =
+    max 0L (Environment.TickCount64 - startedAtTick)
+
+let private cleanupLeaseSummaries
+    (reservations: Map<string, CleanupReservation>)
+    =
+    reservations
+    |> Map.toSeq
+    |> Seq.map snd
+    |> Seq.sortBy (fun (reservation: CleanupReservation) ->
+        cleanupLeaseCorrelation reservation.Token)
+    |> Seq.truncate 4
+    |> Seq.map (fun (reservation: CleanupReservation) ->
+        $"{cleanupLeaseCorrelation reservation.Token}:{elapsedMilliseconds reservation.AcquiredAtTick}ms")
+    |> String.concat ","
+
+let private cleanupTargetKind =
+    function
+    | OneTerminal _ -> "terminal"
+    | WorktreeTerminals _ -> "worktree"
 
 let private respond (channel: AsyncReplyChannel<'value>) value state = channel.Reply value; state
 
@@ -320,15 +515,47 @@ let internal createWithConfig config =
                     let! message = inbox.Receive()
 
                     match message with
-                    | Get reply when state.Phase = ManagerPhase.Replacing ->
+                    | Get reply
+                        when terminalMutationLockError state
+                             |> Option.isSome ->
                         return! loop (respond reply state.LastSnapshot state)
                     | Get reply ->
                         let! next = getTerminals config state
                         return! loop (respond reply next.LastSnapshot next)
                     | GetCached reply ->
                         return! loop (respond reply state.LastSnapshot state)
-                    | Start(_, _, reply) when state.Phase = ManagerPhase.Replacing ->
-                        return! loop (respond reply (Error replacementInProgressError) state)
+                    | RunTerminalAction(_, reply)
+                        when terminalMutationLockError state
+                             |> Option.isSome ->
+                        let error =
+                            terminalMutationLockError state
+                            |> Option.get
+
+                        return! loop (respond reply (Error error) state)
+                    | RunTerminalAction(operation, reply) ->
+                        let! outcome =
+                            operation ()
+                            |> Async.Catch
+
+                        let result =
+                            match outcome with
+                            | Choice1Of2 result -> result
+                            | Choice2Of2 error ->
+                                Log.log
+                                    "TerminalHost"
+                                    $"Terminal action crashed errorType={error.GetType().Name}"
+
+                                Error "Terminal action failed"
+
+                        return! loop (respond reply result state)
+                    | Start(_, _, reply)
+                        when terminalMutationLockError state
+                             |> Option.isSome ->
+                        let error =
+                            terminalMutationLockError state
+                            |> Option.get
+
+                        return! loop (respond reply (Error error) state)
                     | Start(worktreePath, _, reply)
                         when cleanupReserved state worktreePath ->
                         return! loop (respond reply (Error cleanupInProgressError) state)
@@ -337,8 +564,14 @@ let internal createWithConfig config =
                             startTerminal config state worktreePath command
 
                         return! loop (respond reply result next)
-                    | ReserveCleanup(_, _, _, reply) when state.Phase = ManagerPhase.Replacing ->
-                        return! loop (respond reply (Error replacementInProgressError) state)
+                    | ReserveCleanup(_, _, _, reply)
+                        when terminalMutationLockError state
+                             |> Option.isSome ->
+                        let error =
+                            terminalMutationLockError state
+                            |> Option.get
+
+                        return! loop (respond reply (Error error) state)
                     | ReserveCleanup(OneTerminal terminalId, _, _, reply)
                         when not (validSessionId (EmbeddedTerminalId.value terminalId)) ->
                         return! loop (respond reply (Error "Invalid embedded terminal ID") state)
@@ -360,59 +593,235 @@ let internal createWithConfig config =
                                       LastHost = state.LastHost }
 
                                 let next =
+                                    let reservation =
+                                        { Token = token
+                                          AcquiredAtTick =
+                                            Environment.TickCount64 }
+
                                     { state with
                                         CleanupReservations =
                                             state.CleanupReservations
-                                            |> Map.add key token }
+                                            |> Map.add key reservation }
+
+                                Log.log
+                                    "TerminalHost"
+                                    $"Cleanup reservation acquired lease={cleanupLeaseCorrelation token} target={cleanupTargetKind target} cachedTerminals={lease.CachedTerminalIds.Count} reservations={next.CleanupReservations.Count}"
 
                                 return! loop (respond reply (Ok(Some lease)) next)
                     | ApplyCleanup(completion, reply) ->
                         let next = applyCleanupCompletion state completion
                         return! loop (respond reply next.LastSnapshot next)
-                    | ReleaseCleanup token ->
+                    | ReleaseCleanup(token, reply) ->
+                        let released =
+                            state.CleanupReservations
+                            |> Map.toSeq
+                            |> Seq.map snd
+                            |> Seq.tryFind (fun reservation ->
+                                reservation.Token = token)
+
                         let reservations =
                             state.CleanupReservations
-                            |> Map.filter (fun _ current -> current <> token)
+                            |> Map.filter (fun _ reservation ->
+                                reservation.Token <> token)
 
-                        return! loop { state with CleanupReservations = reservations }
-                    | BeginReplacement(_, _, _, reply)
-                        when state.Phase = ManagerPhase.Replacing
-                             || not state.CleanupReservations.IsEmpty ->
-                        return! loop (respond reply ReplacementOutcome.RaceLost state)
-                    | BeginReplacement(plan, query, operations, reply) ->
-                        async {
-                            let! resolution =
-                                commitReplacementWith
-                                    operations
-                                    config
-                                    plan
-                                    query
+                        let removed =
+                            state.CleanupReservations.Count
+                            - reservations.Count
 
-                            inbox.Post(
-                                FinishReplacement(
-                                    resolution,
-                                    reply
-                                )
-                            )
-                        }
-                        |> Async.Start
+                        let age =
+                            released
+                            |> Option.map (fun reservation ->
+                                string (
+                                    elapsedMilliseconds
+                                        reservation.AcquiredAtTick
+                                ))
+                            |> Option.defaultValue "unknown"
 
-                        return! loop { state with Phase = ManagerPhase.Replacing }
-                    | FinishReplacement(resolution, reply) ->
-                        let next, outcome =
-                            applyReplacementResolution
-                                state
-                                resolution
+                        Log.log
+                            "TerminalHost"
+                            $"Cleanup reservation release applied lease={cleanupLeaseCorrelation token} ageMs={age} removed={removed} reservations={reservations.Count}"
+
+                        let next =
+                            { state with
+                                CleanupReservations = reservations }
+
+                        if
+                            removed > 0
+                            && reservations.IsEmpty
+                        then
+                            match state.Maintenance with
+                            | MaintenanceState.WaitingForCleanup queued ->
+                                Log.log
+                                    "TerminalHost"
+                                    $"Cleanup reservations drained for queued update waitedMs={elapsedMilliseconds queued.RequestedAtTick}"
+
+                                inbox.Post BeginTerminalHostUpdate
+                            | MaintenanceState.Unlocked
+                            | MaintenanceState.Updating _
+                            | MaintenanceState.Fatal _ ->
+                                ()
 
                         return!
-                            { next with Phase = ManagerPhase.Steady }
-                            |> respond reply outcome
+                            next
+                            |> respond reply ()
                             |> loop
+                    | GetUpdateState reply ->
+                        let next, update =
+                            terminalHostUpdateState
+                                config
+                                state
+
+                        return!
+                            next
+                            |> respond reply update
+                            |> loop
+                    | BeginTerminalHostUpdate ->
+                        match state.Maintenance with
+                        | MaintenanceState.WaitingForCleanup queued
+                            when state.CleanupReservations.IsEmpty ->
+                            let! current, prepared =
+                                prepareUpdate
+                                    config
+                                    state
+                                    queued.QueryRestartSessions
+
+                            match prepared with
+                            | Error error ->
+                                let fatal, _ =
+                                    enterFatalUpdate error current
+
+                                return! loop fatal
+                            | Ok None ->
+                                Log.log
+                                    "TerminalHost"
+                                    "User-requested update found no staged candidate"
+
+                                return!
+                                    loop
+                                        { current with
+                                            Maintenance =
+                                                MaintenanceState.Unlocked }
+                            | Ok(
+                                Some(
+                                    host,
+                                    stagedExecutable,
+                                    sessions
+                                )
+                              ) ->
+                                Log.log
+                                    "TerminalHost"
+                                    $"User-requested update entering transaction waitMs={elapsedMilliseconds queued.RequestedAtTick} resumableSessions={sessions.Length}"
+
+                                async {
+                                    let! result =
+                                        runUpdate
+                                            queued.Operations
+                                            config
+                                            host
+                                            stagedExecutable
+                                            sessions
+
+                                    inbox.Post(
+                                        FinishTerminalHostUpdate
+                                            result
+                                    )
+                                }
+                                |> Async.Start
+
+                                return!
+                                    loop
+                                        { current with
+                                            Maintenance =
+                                                MaintenanceState.Updating
+                                                    sessions }
+                        | MaintenanceState.WaitingForCleanup _
+                        | MaintenanceState.Unlocked
+                        | MaintenanceState.Updating _
+                        | MaintenanceState.Fatal _ ->
+                            return! loop state
+                    | UpdateTerminalHost(
+                        queryRestartSessions,
+                        operations,
+                        reply
+                      ) ->
+                        match state.Maintenance with
+                        | MaintenanceState.Unlocked ->
+                            let waitingForCleanup =
+                                not state.CleanupReservations.IsEmpty
+
+                            let queued =
+                                { QueryRestartSessions =
+                                    queryRestartSessions
+                                  Operations = operations
+                                  RequestedAtTick =
+                                    Environment.TickCount64 }
+
+                            let next =
+                                { state with
+                                    Maintenance =
+                                        MaintenanceState.WaitingForCleanup
+                                            queued }
+
+                            if waitingForCleanup then
+                                Log.log
+                                    "TerminalHost"
+                                    $"User-requested update queued behind cleanup reservations={state.CleanupReservations.Count} leases={cleanupLeaseSummaries state.CleanupReservations}"
+                            else
+                                inbox.Post BeginTerminalHostUpdate
+
+                            return!
+                                next
+                                |> respond
+                                    reply
+                                    TerminalHostUpdateState.Updating
+                                |> loop
+                        | MaintenanceState.WaitingForCleanup _
+                        | MaintenanceState.Updating _
+                        | MaintenanceState.Fatal _ ->
+                            let next, update =
+                                terminalHostUpdateState
+                                    config
+                                    state
+
+                            Log.log
+                                "TerminalHost"
+                                $"Duplicate user-requested update ignored state={maintenanceKind state.Maintenance}"
+
+                            return!
+                                next
+                                |> respond reply update
+                                |> loop
+                    | FinishTerminalHostUpdate(
+                        Ok(host, registry)
+                      ) ->
+                        Log.log
+                            "TerminalHost"
+                            "User-requested update completed"
+
+                        let next =
+                            applyRegistryWith
+                                ReconciliationMode.RebindAfterHostChange
+                                state
+                                host
+                                registry
+
+                        return!
+                            { next with
+                                Maintenance =
+                                    MaintenanceState.Unlocked }
+                            |> loop
+                    | FinishTerminalHostUpdate(Error error) ->
+                        let fatal, _ =
+                            enterFatalUpdate error state
+
+                        return! loop fatal
                 }
 
             loop
                 { LastSnapshot = EmbeddedTerminalSnapshot.empty; LastHost = None
-                  Phase = ManagerPhase.Steady; CleanupReservations = Map.empty })
+                  Maintenance = MaintenanceState.Unlocked
+                  LastUpdateAvailabilityError = None
+                  CleanupReservations = Map.empty })
 
     Manager(config, agent)
 
@@ -432,60 +841,36 @@ let create serverOrigin configuredOrigins =
         serverOrigin
         configuredOrigins
 
-let private tryReplaceHostIgnoringWith
-    operations
-    ignoredStagedVersion
-    beforeRecheck
-    query
-    (Manager(config, agent))
-    =
-    let commit plan activityQuery =
-        agent.PostAndAsyncReply(
-            (fun reply ->
-                BeginReplacement(
-                    plan,
-                    activityQuery,
-                    operations,
-                    reply
-                )),
-            timeout = 300_000
-        )
-
-    TerminalHostReplacement.tryReplaceHostIgnoring ignoredStagedVersion beforeRecheck query config commit
-
-let internal tryReplaceHostWithOperations
-    beforeRecheck
-    query
-    operations
-    manager
-    =
-    tryReplaceHostIgnoringWith
-        operations
-        None
-        beforeRecheck
-        query
-        manager
-
-let internal runReplacementCoordinator
-    manager
-    query
-    closureSnapshot
-    (cancellationToken: System.Threading.CancellationToken)
-    =
-    let operations =
-        TerminalHostReplacement.defaultOperations closureSnapshot
-
-    TerminalHostReplacement.runCoordinator (fun ignoredStagedVersion ->
-        tryReplaceHostIgnoringWith
-            operations
-            ignoredStagedVersion
-            (fun () -> async.Return())
-            query
-            manager)
-        cancellationToken
-
 let private ask (agent: MailboxProcessor<Message>) build =
     agent.PostAndAsyncReply(build, timeout = 60_000)
+
+let getUpdateState (Manager(_, agent)) =
+    ask agent GetUpdateState
+
+let internal runTerminalAction (Manager(_, agent)) operation =
+    agent.PostAndAsyncReply(
+        (fun reply ->
+            RunTerminalAction(operation, reply)),
+        timeout = 150_000
+    )
+
+let internal updateTerminalHostWithOperations
+    operations
+    queryRestartSessions
+    (Manager(_, agent))
+    =
+    agent.PostAndAsyncReply(fun reply ->
+        UpdateTerminalHost(
+            queryRestartSessions,
+            operations,
+            reply
+        ))
+
+let internal updateTerminalHost manager queryRestartSessions =
+    updateTerminalHostWithOperations
+        TerminalHostReplacement.defaultOperations
+        queryRestartSessions
+        manager
 
 let private startCore (Manager(_, agent)) worktreePath command =
     agent.PostAndAsyncReply(
@@ -508,16 +893,35 @@ let internal clientConfig (Manager(config, _)) = config
 
 let internal applyCleanup (Manager(_, agent)) completion = ask agent (fun reply -> ApplyCleanup(completion, reply))
 
+let private releaseCleanupToken (agent: MailboxProcessor<Message>) target token =
+    Log.log
+        "TerminalHost"
+        $"Cleanup reservation release requested lease={cleanupLeaseCorrelation token} target={cleanupTargetKind target}"
+
+    try
+        agent.PostAndReply(
+            (fun reply -> ReleaseCleanup(token, reply)),
+            timeout = 60_000
+        )
+    with error ->
+        Log.log
+            "TerminalHost"
+            $"Cleanup reservation release acknowledgement failed lease={cleanupLeaseCorrelation token} target={cleanupTargetKind target} errorType={error.GetType().Name}"
+
 let internal reserveCleanup (Manager(_, agent)) target fallback =
     async {
         let token = Guid.NewGuid()
 
         try
             return! ask agent (fun reply -> ReserveCleanup(target, fallback, token, reply))
-        with _ ->
-            agent.Post(ReleaseCleanup token)
+        with error ->
+            Log.log
+                "TerminalHost"
+                $"Cleanup reservation acquisition did not complete lease={cleanupLeaseCorrelation token} target={cleanupTargetKind target} errorType={error.GetType().Name}"
+
+            releaseCleanupToken agent target token
             return Error "Terminal cleanup could not start within 60 seconds; try again."
     }
 
 let internal releaseCleanup (Manager(_, agent)) (lease: CleanupLease) =
-    agent.Post(ReleaseCleanup lease.Token)
+    releaseCleanupToken agent lease.Target lease.Token

@@ -68,6 +68,7 @@ let private defaultModel : Model =
       IsLoading = false
       HasError = false
       SortMode = ByActivity
+      TerminalHostUpdate = TerminalHostUpdateModel.initial
       IsCompact = false
       SchedulerEvents = []
       LatestByCategory = Map.empty

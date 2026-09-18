@@ -24,11 +24,20 @@ type InstalledOverviewHistory =
     { Window: HistoryWindow
       Response: OverviewHistoryResponse }
 
+[<RequireQualifiedAccess>]
+type TerminalHostUpdateModel =
+    | Observed of TerminalHostUpdateState
+    | RequestInFlight
+
+module TerminalHostUpdateModel =
+    let initial = TerminalHostUpdateModel.Observed TerminalHostUpdateState.Unavailable
+
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
       HasError: bool
       SortMode: SortMode
+      TerminalHostUpdate: TerminalHostUpdateModel
       IsCompact: bool
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
@@ -74,6 +83,9 @@ type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
     | DataFailed of exn
     | ToggleSort
+    | UpdateTerminalHost
+    | TerminalHostUpdateCompleted of TerminalHostUpdateState
+    | TerminalHostUpdateRequestFailed of exn
     | ToggleCompact
     | SetWorkspaceMode of WorkspaceLayout.Mode
     | WorkspaceModeLoaded of WorkspaceLayout.Mode
