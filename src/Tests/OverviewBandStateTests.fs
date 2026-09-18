@@ -42,6 +42,7 @@ let private modelWith repos =
       IsLoading = false
       HasError = false
       SortMode = ByActivity
+      TerminalHostUpdate = TerminalHostUpdateModel.initial
       IsCompact = false
       SchedulerEvents = []
       LatestByCategory = Map.empty
@@ -90,7 +91,8 @@ let private response repos =
       TerminalPaneOpen = false
       CanvasPaneOpen = false
       OverviewPanelOpen = true
-      WorkspaceWidth = WorkspaceWidth.EqualThirds }
+      WorkspaceWidth = WorkspaceWidth.EqualThirds
+      TerminalHostUpdate = TerminalHostUpdateState.Unavailable }
 
 let private subscriptionKeys model =
     appSubscriptions model |> List.map (fst >> String.concat "/")

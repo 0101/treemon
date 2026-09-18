@@ -9,25 +9,22 @@
   or PowerShell productization stack. The whole terminal runtime (`src/TerminalHost`,
   `src/TerminalHostLayout`, `src/Server/TerminalHost*.fs`,
   `src/Server/TerminalSessionActivity.fs`, `src/Server/EmbeddedTerminal.fs`, and any terminal-specific
-  runtime script) stays at or below 5,200 nonblank production lines. Product-level launch policy
-  and user-authorized lifecycle policy (`TerminalLaunch.fs`, `WorktreeCleanup.fs`,
-  `SessionManager.fs`, `WorktreeApi.fs`) route to that runtime and are outside both it and the
-  budget.
+  runtime script) stays at or below 5,200 nonblank production lines. Product-level launch and
+  user-authorized cleanup policy remain outside that budget.
 - Give every terminal an exact kernel-owned process boundary established before ttyd executes.
-- Keep lifecycle control loopback-only, authenticated, versioned, and limited to the five endpoints
-  listed below.
-- Preserve terminal tabs across a host update by resuming only the Copilot session owned by each
-  exact terminal.
-- Shut down every exact terminal-owned Copilot process before automatic host replacement, while
-  never requesting shutdown for an owned `Working` or `WaitingForUser` process.
-- Make explicit terminal close, worktree delete, and worktree archive authoritative even when
-  graceful shutdown fails, with exact survivor verification before lifecycle closure completes.
+- Keep lifecycle control loopback-only, authenticated, versioned, and limited to health, list,
+  start, close, and host-wide shutdown.
 - Route every prompted or automatic agent launch through the embedded host while retaining Windows
   Terminal only for the card's explicit `>` / Enter action.
-- Make server-created terminals discoverable from an initially empty browser snapshot without
-  stealing dashboard focus.
-- Apply host updates at naturally idle Copilot boundaries without draining work, blocking new work,
-  or treating unrelated shell activity as a gate.
+- Apply a staged TerminalHost update only after the user clicks the plainly labelled toolbar action.
+- Acquire one global maintenance lock before snapshotting, reject every new embedded-terminal start
+  route while locked, restart only currently hosted durable sessions, and omit terminals without an
+  open durable session.
+- Release each path-scoped cleanup reservation through a bounded, uncancelled mailbox
+  acknowledgement, and log when acknowledgement cannot be obtained.
+- Once accepted, complete the update as one forward-only transaction. Any first failure leaves the
+  server process permanently locked with a fatal UI that directs the user to redeploy or restart
+  Treemon manually.
 - Keep development and verification isolated from production state, ports, and processes.
 
 ## Expected Behavior
@@ -192,7 +189,7 @@ lifecycle surface is:
 - authoritative terminal list;
 - start a new terminal by canonical worktree path;
 - close one terminal; and
-- shutdown, used only for committed host replacement or an explicit administrative request.
+- shutdown, used only for a user-requested host update or an explicit administrative request.
 
 Start, close, and list return or reconcile against the authoritative registry rather than asking the
 server to merge lifecycle fragments. Browser attachment endpoints ride terminal data returned by
@@ -212,145 +209,60 @@ any staged executable. Terminal registry state is read from the live host, not c
 manifest. The server rejects malformed or stale identities, non-loopback endpoints, unknown or
 unsafe worktree paths, invalid attachment endpoints, and unexpected browser origins.
 
-### Exact Copilot ownership and idle
+### Exact Copilot ownership and update snapshot
 
-Each started terminal receives a stable `TREEMON_TERMINAL_SESSION_ID` in its environment. A Copilot
-session launched inside that terminal inherits the value, and the passive reporting extension sends
-it as the optional `TerminalSessionId` origin on activity reports. Session activity persists that
-origin, allowing Treemon to join a Copilot `SessionId` to one host-owned terminal without guessing
-from worktree path.
+Each started terminal receives a stable `TREEMON_TERMINAL_SESSION_ID`. A Copilot process launched
+inside that terminal inherits the value, and the passive reporting extension stores it on the exact
+process instance. Terminal ownership is therefore joined by terminal ID, never inferred from the
+worktree path.
 
-Only open Copilot process instances whose `TerminalSessionId` appears in the current authoritative
-host registry participate in host-update gating and automatic replacement resume. A live instance
-is non-idle when its durable session's effective state is `Working` or `WaitingForUser`. Every
-non-idle owned instance blocks automatic replacement; Treemon never asks it to shut down. `Idle`,
-closed, stale, missing, and non-Copilot instances do not gate. An unrelated Copilot instance in the
-same worktree does not gate unless it carries that terminal's exact origin.
+When the user starts an update, Treemon intersects the current authoritative TerminalHost registry
+with open exact session instances and selects at most one durable Copilot `SessionId` per terminal,
+using greatest durable activity. `Working`, `WaitingForUser`, and `Idle` sessions are all eligible:
+the labelled update action is consent to interrupt them. A terminal with no open durable identity is
+omitted from the restart snapshot. Multiple live processes in one terminal are terminated with the
+host, but only the selected durable conversation is restarted.
 
-The replacement projection retains every open exact instance as a shutdown target, including
-separate processes that share one durable `SessionId`, while selecting at most one automatic Resume
-identity per terminal from the greatest durable activity. Automatic replacement therefore waits
-for and shuts down every owned process but never recreates accidental duplicate CLIs in one
-terminal. More than one process can share a terminal origin only when an earlier CLI remains
-backgrounded, orphaned, or otherwise alive while another CLI starts in the same shell; every
-descendant inherits the terminal ID. This is treated as anomalous multiplicity: all processes stop,
-only the greatest-activity durable session resumes, and the others remain available as history.
+Explicit terminal close, worktree delete, and worktree archive retain their user-authorized graceful
+session-shutdown and exact cleanup flow. The update transaction does not use that per-session path;
+it asks TerminalHost to shut down the complete host and its owned process trees.
 
-The same exact-origin join supplies terminal tab titles. Among the live sessions attributed to one
-terminal, the active session wins; otherwise the most recently active live session is
-representative. Its freshest reported intent or session title is exposed through the same activity
-selection and display formatting used by the worktree card. An unrelated session in the same
-worktree cannot label the tab.
+### User-requested TerminalHost updates
 
-An open `WaitingForUser` remains non-idle without an operator override. Once its process instance is
-closed or its liveness expires, it no longer gates replacement or supplies an automatic resume
-command.
+A valid staged executable makes exactly one standard header button, **Apply TerminalHost update**,
+appear immediately left of Sort. Its tooltip states that hosted durable sessions will be
+interrupted and restarted; `Unavailable` renders no action.
 
-The non-idle rule applies only to automatic replacement. Explicit terminal close, worktree delete,
-and worktree archive are user-authorized teardown operations and intentionally request graceful
-shutdown even for `Working` or `WaitingForUser` instances before continuing to exact cleanup.
+Clicking the action immediately removes it and shows a focused, non-dismissible overlay with a
+visible progress spinner. Client terminal messages and shortcuts become no-ops, while the
+`EmbeddedTerminal` mailbox enters `WaitingForCleanup` before acknowledging `Updating`; all new
+embedded or native terminal mutations and cleanup reservations are therefore locked at the server
+boundary too.
 
-Arbitrary shell commands, child or background jobs, terminal output, browser attachment state, and
-other non-Copilot activity never gate an update. Treemon neither inspects nor warns about foreground
-shell work before replacement, and does not wait for every session associated with a worktree.
+Cleanup already in progress is a sequencing dependency, not a rejection. Its apply and acknowledged
+release messages remain processable while the global lock is held. The update request returns
+`Updating` immediately, waits for every existing reservation to release, and then starts the
+host-wide transaction exactly once without another click. With no existing cleanup it starts
+immediately. Reservations have no blind expiry because they may still protect running teardown.
 
-Production lifecycle commands are a separate process-ownership boundary. `treemon.ps1` refuses
-`restart`, `deploy`, and a `start` that would launch production when the caller inherited
-`TREEMON_TERMINAL_SESSION_ID`, before stopping production or building deployment candidates. A
-`start` against an already-running server remains an informational no-op. Any production process
-launched from that shell would inherit the terminal's kill-on-close Job Object and later die when
-the terminal closes, the host is replaced, or the host crashes. `add` and `remove` still persist
-successful root changes, but skip their automatic production restart in this context and direct the
-user to restart from an external PowerShell window. `stop`, `status`, `log`, development, and demo
-commands remain available.
+The worker performs exactly one sequence:
 
-### Opportunistic host updates
+1. Ask the current TerminalHost to shut down, which closes every host-owned terminal and Job Object.
+2. Launch the staged TerminalHost executable once and await its health endpoint.
+3. Recreate one terminal per captured durable session in captured registry order.
+4. Submit the provider-specific direct session command (`--session-id=<id>`) to each recreated
+   terminal.
+5. Apply the new authoritative registry and return to `Unlocked` only after every recreation and
+   command succeeds.
 
-A newly published host executable is staged in a simple versioned directory while the current host
-and terminals continue normally. Treemon does not mark the old host drain-only and does not refuse,
-queue, delay, or proactively block new terminals, prompts, or Copilot sessions.
+No optional literal `resume` prompt is sent. Shell process state, terminal scrollback, and terminals
+without a captured durable session do not survive the update.
 
-After a Treemon server start, activity ingress becomes available before replacement reconciliation.
-Surviving reporters retry their acknowledged presence bootstrap. Every recently open persisted
-instance with a current terminal origin remains pending until that exact PID and process-start
-identity re-presents or sends a validated heartbeat, is proven dead, loses its origin from the
-authoritative registry, or reaches `openWindow`. Presence creates unknown bindings; a heartbeat can
-only reconcile an already-known, non-closed binding with matching metadata and a currently resolved
-exact process identity. Its current receipt re-establishes liveness even when the prior observation
-has just crossed `openWindow`, without widening the set of processes that may gate replacement.
-Pending instances gate replacement, so a truly empty terminal remains distinguishable from one
-whose reporter has not reconnected without a global startup delay.
-
-Whenever all currently owned Copilot sessions are naturally idle, Treemon captures the authoritative
-host registry revision and the owned-session activity epoch, then immediately rechecks both. It
-commits replacement only when the registry and activity are unchanged and no owned session is
-non-idle. If a terminal or activity report wins the race before commit, the attempt is abandoned
-without side effects and waits for the next natural idle window. Once commit begins, the brief
-terminal outage is the replacement itself; no pre-commit drain period exists.
-
-A failed staged version is suppressed for one minute to avoid a hot replacement loop, then becomes
-eligible for retry. A timed-out mailbox reply is inconclusive because the commit may still finish;
-the next poll rediscovers authoritative host state instead of suppressing that staged version.
-Replacement I/O runs outside the lifecycle mailbox after the mailbox enters a replacing phase.
-During that phase registry reads return the last authoritative snapshot without contacting a host
-between generations, while start and close requests fail immediately with a retryable error rather
-than waiting or remaining queued after their caller has gone away.
-
-Before committing replacement, Treemon captures every open exact process instance whose
-`TerminalSessionId` matches a current terminal and at most one automatic Resume identity per
-terminal selected by greatest durable `(UpdatedAt, SessionId)`. If any captured instance is
-non-idle or pending startup reconciliation, replacement remains blocked and no shutdown request is
-sent.
-
-When every captured instance is Idle, Treemon requests graceful SDK shutdown for every exact target
-through its process-keyed session bridge. The local endpoint acknowledges a valid exact request
-before invoking `session.rpc.shutdown({ type: "routine" })`; completion is confirmed out of band by
-monotonic exact-instance closure or verified process exit. Missing registration, rejection, or
-timeout while the old host remains healthy aborts replacement rather than creating a concurrent
-CLI instance. An aborted attempt leaves the original host and its terminals in place; Treemon does
-not automatically recreate or Resume partially shut-down sessions, so the user retries the next
-idle window or resumes explicitly.
-
-After graceful shutdown, Treemon snapshots exact process ownership, closes the old host, and only
-then verifies Job Object and captured-process exit. The host uses
-`JobObjectBasicProcessIdList` as the exact membership snapshot and supplements it only with bounded
-already-observed external descendants. After Job Object close, a final bounded pass covers
-processes created during graceful shutdown; only a survivor whose PID and start identity still
-match is terminated. An unresolved terminal survivor keeps that registry entry present, and an
-unresolved host survivor prevents host exit, so the unchanged control API reports failure through
-authoritative reconciliation. Only after cleanup is proven does Treemon start the staged host,
-recreate terminals, and deliver one selected provider-specific `CodingToolCli` Resume command per
-terminal. A terminal without one restarts as a plain PowerShell shell. This automatic continuity
-policy is intentionally narrower than explicit worktree Resume, which can select retained durable
-history as defined in `docs/spec/resume-last-session.md`.
-
-Replacement is forward-only and has one irreversible boundary: the confirmed exit of the old host.
-Before that boundary, any failure aborts the attempt, starts no other host, and reports a failure
-that leaves the original host authoritative. When the old host's stop cannot be confirmed, Treemon
-rechecks that exact captured identity. A host proven still alive keeps the current state; a host
-proven gone has already crossed the boundary; unresolved liveness retains that captured identity as
-the only known host, interrupts the tabs, and never launches the staged host.
-
-After the boundary, Treemon never launches or revives the old executable. Any post-stop failure
-fails closed. When a launch produced an exact staged host manifest, Treemon stops that exact staged
-host so its Job Object cleans up every terminal and Copilot process the attempt created; a
-confirmed stop reports no current host, and an unconfirmed stop retains that staged manifest as the
-only known host and interrupts the tabs. A staged launch that was rejected or that started without
-a verifiable exact manifest reports no current host, and no terminals have been recreated in that
-case. Treemon never starts another host generation to compensate. The reported error and the
-interrupted tabs state that replacement stopped after the old host exited and that an external
-restart and explicit Resume are required.
-
-Stopping the old host may discard arbitrary non-Copilot shell state, running commands, raw replay,
-and scrollback. Recreated terminals keep the captured opening order, and the client remaps each
-worktree's selected tab to the same sibling ordinal where possible. Process state and scrollback do
-not survive host replacement.
-
-A compatible Treemon deployment reconnects to the running host. When it carries a newer compatible
-host executable, that executable is staged and replaced only through the opportunistic flow above.
-An incompatible control-API deployment is blocked while the old host has terminals. The system does
-not run concurrent host generations or build a multi-protocol bridge, so the control API remains
-deliberately stable.
+Any first file, process, control-API, host-start, terminal-start, or command-delivery failure enters
+`Fatal(error)`. The global terminal lock and blocking overlay remain for the life of that Treemon
+server process. Treemon performs no retry, rollback, old-host restoration, staged-host cleanup,
+second generation, or partial-session recovery; the fatal message directs the user to redeploy or
+restart Treemon manually from an external PowerShell window.
 
 ### Worktree lifecycle and failure
 
@@ -360,8 +272,7 @@ graceful shutdown for every open exact instance owned by each target terminal, t
 terminal even when graceful shutdown is unavailable, rejected, or timed out. Exact survivor cleanup
 remains authoritative: after it succeeds, the activity service monotonically closes all and only
 the exact owned instances before the API returns. An unresolved survivor leaves the terminal
-registered and returns teardown failure. Automatic replacement is different: it never shuts down a
-non-idle session.
+registered and returns teardown failure.
 
 A forced process kill can leave Copilot's on-disk in-use marker behind. Treemon neither deletes nor
 overrides that marker. The next Resume may stop at Copilot's visible `Force resume?` confirmation;
@@ -376,10 +287,20 @@ The lifecycle mailbox holds a short-lived in-memory reservation for the canonica
 from before its terminal closes through the delete/archive mutation. Another cleanup, terminal
 start for that path receives a retryable busy error, while unrelated worktrees remain available;
 the reservation is acquired only when the cleanup workflow starts and is released after both
-successful and failed mutations. Constructing an async close or cleanup workflow is inert.
-An attempt made during committed host replacement fails without mutating the worktree or archive
-state; the client reconciles from the authoritative worktree snapshot and leaves the action
-available to retry after replacement.
+successful and failed mutations. Its `finally` performs a bounded, uncancelled request/reply so
+normal completion, typed failure, exception, and caller cancellation all attempt acknowledged
+removal before returning. Acquisition timeout makes the same release attempt because the mailbox
+may already have granted the lease. A failed acknowledgement is logged rather than hidden, and no
+blind expiry can clear cleanup that may still be active. Constructing an async close or cleanup
+workflow is inert.
+An attempt made during terminal maintenance fails without mutating the worktree or archive state.
+After a successful update terminal actions are available again; after a fatal update the blocking
+overlay remains until Treemon is manually restarted.
+
+Reservation and update telemetry correlates acquisition, release, queued waiting, transaction
+start, duplicate requests, and acknowledgement failures with bounded opaque lease IDs, ages, kinds,
+and counts. It excludes worktree paths, terminal content, commands, prompts, capabilities, and
+bearer values.
 
 If the host crashes, closing its Job Object handles kills every owned ttyd tree. Treemon keeps the
 affected tabs visible as interrupted, reports the loss, and can start fresh terminals. It does not
@@ -490,6 +411,11 @@ bundle members. Server and host reference that contract directly; deployment Pow
 the candidate server's serialized layout rather than reconstructing it. Treemon publish output
 carries the independent host under `terminal-host\`.
 
+Deployment fingerprints the complete non-PDB TerminalHost bundle. The nested host publish excludes
+repository source-revision metadata, so an unrelated Treemon commit does not change that fingerprint;
+any changed host assembly or runtime file does. An equal live fingerprint skips staging, while a
+different fingerprint is copied and verified in one digest-derived version directory.
+
 The replay buffer is raw and capped at 1 MiB in memory. Terminal bytes, prompts, environment
 contents, and attachment credentials are never persisted or written to diagnostics. The control
 bearer exists only in host memory, the required discovery manifest, and live attachment URLs
@@ -509,360 +435,126 @@ separate origin, so the dashboard cannot apply this styling itself.
 
 ### Treemon integration
 
-The server terminal runtime has one-way module boundaries: `TerminalHostProcess` owns process
-configuration, launch, and exact identity defaults; `TerminalHostEndpoint` owns the common
-loopback-HTTP endpoint shape; `TerminalHostManifest` validates discovery; `TerminalHostClient` owns
-authenticated control and attachment requests; `TerminalHostReplacement` coordinates the whole
-forward-only replacement attempt and returns its final transition; and `TerminalSessionActivity`
-derives the exact owned-session replacement policy from raw activity facts. `Server.EmbeddedTerminal`
-retains the mailbox, cleanup reservation, authoritative snapshot reconciliation, and public
-start/get surface. `TerminalHostReplacement` collapses every outcome into one mailbox directive —
-keep the current state, apply the replacement registry, interrupt while retaining a known host, or
-interrupt with no known host; the mailbox executes that directive without interpreting host state.
-`WorktreeCleanup` owns user-authorized close policy:
-it takes the mailbox cleanup lease, queries and gracefully stops exact sessions, performs host I/O
-outside the mailbox, applies one final cleanup completion — the authoritative registry it reached,
-the terminals that registry proved closed, and the message to stamp on survivors — records exact
-closure, and only then invokes delete/archive mutation. Lease acquisition and the teardown itself
-run uncancellable and the lease is released in a `finally`, so a failed or cancelled mutation can
-neither abandon half-closed terminals nor leave a path busy while unrelated paths stay concurrent.
-The mailbox grants one replacement phase, keeps serving cached reads and bounded rejection replies
-while replacement runs asynchronously, then alone applies the replacement's registry transition.
-The client stores active terminal IDs and in-flight start state per worktree. Registry refreshes
-retain exact selections while IDs remain valid, choose the same-worktree neighbor after a close,
-and preserve the selected sibling ordinal across replacement.
-It also stores a client-only view generation for terminals whose iframe is manually reconnected.
-The generation participates only in the React iframe key; advancing one generation remounts that
-iframe without changing the authoritative registry. Iframe load completion returns through Elmish,
-and the focus effect re-resolves the current DOM node and checks its generation, visibility, and
-absence of an active modal overlay before focusing it. The shared ordinary-focus transition clears
-pending terminal-view focus while the no-retarget Canvas focus path preserves it.
-A subscription keyed by the active terminal ID and safe endpoint origin reports visibility triggers
-through Elmish. The resulting command retries for a small bounded number of animation frames until
-React has committed the active unhidden iframe, then posts only while that terminal and pane remain
-visible. A matching iframe load replays the same Elmish notification so a visibility signal sent to
-the initial document cannot be lost before the terminal page installs its receiver. The parent
-activates only from a visible, focused dashboard and sends deactivation on blur, top-level hiding,
-pane/tab/worktree changes, and subscription disposal.
-Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
-port into the loopback dashboard origins supplied to `EmbeddedTerminal`. Production omits the
-option and allows only the configured server origin aliases, so the terminal client never infers a
-dashboard port from a server-port convention.
+`TerminalLaunch` is the sole product-level start boundary. Native card actions use `SessionManager`;
+every agent-bearing or embedded launch uses `EmbeddedTerminal`, so the maintenance lock covers normal
+start, agent start, Resume, contextual actions, Canvas launches, AutoSync fallback, create-worktree
+prompts, and `tm launch` without route-specific checks. When TerminalHost replacement is configured,
+the Worktree API also serializes native open/focus/kill operations through the same mailbox before
+calling `SessionManager`; an action ordered before the update may finish, while one ordered after the
+lock is installed returns without executing.
 
-`treemon.ps1` publishes the host and stages a changed executable in a plain versioned directory. It
-preflights control-API compatibility before replacing the Treemon server; a deployment that cannot
-control a live host is refused while terminals remain. When an exact incompatible host proves its
-authoritative registry is empty, the candidate shuts it down and confirms that exact process
-identity exited before allowing deployment. Server, frontend, and host candidates are built outside
-their active destinations, and the candidate Treemon's own compiled control client probes the exact
-live host before any active server files or processes are replaced. The staged directory carries the
-complete framework-dependent host publication alongside `TerminalHost.exe`.
-The script uses the inherited terminal session ID as a fail-closed origin marker for production
-launches and restarts; this check is independent of host compatibility and Copilot activity state.
-Compatibility probing uses the manifest-declared API version for health, list, and shutdown, so an
-empty older host can be retired safely while a non-empty one remains available to its matching
-server until its terminals are closed.
-Replacement always derives `ttyd.exe` from the exact host executable being launched, so a staged
-host uses its staged sibling. A configured path from another bundle generation can never override
-that pairing.
-Lazy host startup accepts only the explicit `TREEMON_TERMINAL_HOST_EXECUTABLE` deployment input or
-the `terminal-host` directory beside the published Treemon executable. Development startup sets the
-explicit input to its local TerminalHost build; shipped server code never probes source-tree
-Debug/Release output, and a missing published host fails at the deployment path without another
-fallback.
+`EmbeddedTerminal` owns the authoritative cached snapshot, cleanup reservations, and the maintenance
+state `Unlocked | WaitingForCleanup of PendingUpdate | Updating of RestartSession list | Fatal of
+string`. Installing `WaitingForCleanup` is the atomic global lock and immediately acknowledges
+`Updating`. The last acknowledged release posts one internal begin message; snapshot preparation
+then runs in the mailbox's serialized turn, and forward-only host I/O runs outside it. Only the
+mailbox installs the success registry or fatal transition, and no HTTP reply channel is retained
+across cleanup or replacement.
 
-The reporting extension reads `TREEMON_TERMINAL_SESSION_ID`, reports its parent Copilot PID, and
-establishes an acknowledged process-instance presence record. `SessionActivityService` resolves the
-exact process-start identity and stores terminal origin, liveness, and closure per instance while
-retaining status content per durable session. The activity mailbox maintains a bounded
-conversation cache and a process-local monotonic counter per terminal origin. Its narrow terminal
-query returns open instances for the caller's complete authoritative terminal-ID set joined to
-their durable session rows plus the maximum epoch.
-`TerminalSessionActivity` owns the terminal-specific projection and returns an opaque replacement
-policy plus the optional display-safe activity for each terminal. The remoting API enriches host
-registry snapshots from the scheduler's bounded live-session map; the TerminalHost registry and
-control API remain unaware of agent activity. Replacement policy remains opaque: wait, or proceed
-with the epoch, every exact shutdown target, every pending-reconciliation identity, and at most one
-optional shell command keyed by terminal session ID. Every open non-idle or pending instance gates.
-Within the confirmed open idle set, `(UpdatedAt, SessionId)` selects one resume identity per terminal.
-`TerminalSessionActivity` owns provider selection and `CodingToolCli` command construction;
-replacement orchestration owns graceful shutdown, authoritative teardown, fail-closed staged-host
-cleanup, host recreation, and command delivery. Hourly retention prunes old instances and origin
-epochs while the global counter remains monotonic.
-Activity ingestion accepts a Copilot `SessionId` only when it is 1–128 ASCII characters from
-`[A-Za-z0-9._:-]`, so the persisted resume identity is bounded and cannot carry terminal control
-input.
+`TerminalSessionActivity` queries only the exact terminal origins in the captured registry. It
+applies the ordinary open-instance rule, chooses the greatest-activity durable session per terminal,
+and builds the provider-specific direct Resume command.
 
-`SessionBridge` stores session registrations by exact process identity with secondary indexes by
-durable `SessionId` and worktree; `pollRegistry` remains separate. Exact shutdown and AutoSync
-delivery target one process registration. Canvas author ownership remains durable-session based and
-chooses the freshest live registration for that `SessionId`, preserving existing queueing,
-liveness, and reconnect behavior when duplicate physical processes exist. The extension registers
-its parent Copilot PID and inherited `TerminalSessionId`; the server validates both and resolves
-process-start ticks through the same injected process-identity boundary used by activity ingestion,
-shutdown waiting, and survivor verification. The loopback endpoint acknowledges the exact shutdown
-request before invoking
-`session.rpc.shutdown({ type: "routine" })`; the server then waits for exact closure or process exit
-and distinguishes unavailable registration, rejection, and timeout without logging the capability.
-Observed exited or PID-reused registrations are removed conditionally against the exact value that
-was probed, so a concurrent heartbeat cannot be deleted. Bulk shutdown bounds request and process
-probe concurrency, then waits through one 100-millisecond batch loop backed by one in-memory activity
-closure snapshot per interval and one shared 30-second deadline.
-The live `session.shutdown` event stops that reporter's heartbeats and closes its process-session
-binding. The parent CLI process can remain alive and bind a new session without losing the prior
-session's durable history.
+The client receives `TerminalHostUpdateState` with the normal dashboard response. Elmish owns the
+single Available button, immediate `Updating` transition, terminal-interaction gate, trigger command,
+success refresh, animated progress overlay, and permanent fatal overlay. Polling keeps the overlay
+installed through queued cleanup and replacement. If the acknowledgement transport fails, the
+client remains locked in `Updating` until an authoritative dashboard response reports the actual
+state instead of inventing a local fatal result.
 
-Replacement snapshots terminal presentation, every exact shutdown target, and the single selected
-Resume identity per terminal before graceful shutdown. `TerminalSessionActivity` uses
-`CodingToolCli` to prepare provider-specific commands; terminal replacement delivers those opaque
-commands in captured opening order only after prior shutdown, host close, and exact survivor
-verification complete. The replacement registry receives fresh terminal IDs, so the client
-preserves each worktree's selection by sibling ordinal rather than by stale identity.
+`treemon.ps1` still publishes the host and stages a changed complete host bundle in a versioned
+directory. Deployment compatibility preflight remains separate: an incompatible live host with
+terminals still blocks deployment. The running host monitors staging only to publish availability;
+it never initiates replacement.
 
-Lifecycle diagnostics record bounded counts and safe process identities for acknowledged presence,
-same-`SessionId` multiplicity, graceful shutdown outcomes, replacement failure, and exact survivor
-cleanup.
-Several open process identities for one durable session are represented truthfully rather than
-treated as corruption; diagnostics distinguish that condition from a replacement attempt that
-created another process before its predecessor was confirmed stopped. Prompts, tokens, shutdown
-capabilities, terminal content, and raw external records are never logged.
-Replacement emits ordered capture, recheck, graceful-shutdown, old-host close, staged-host launch,
-terminal recreation, and completion transitions, plus one terminal transition on failure that
-carries the typed failure kind, the resulting host state, and the safe identity of the host the
-mailbox retains. Explicit teardown emits ordered start, graceful-attempt, host-close, and final
-outcome transitions, with the host close carrying its typed outcome plus proven-closed and remaining
-terminal counts; each exact instance closure is recorded by its own closure diagnostic. When several durable conversations share one terminal origin, the
-capture records the one selected for Resume and the others retained as history. Failure text is
-never included in diagnostics. TerminalHost process cleanup separately records ownership capture and
-recapture, Job close, survivor observation, exact termination attempts, completion, or unresolved
-survivors. Every identity or session list shows at most eight sorted values plus full and omitted
-counts.
+TerminalHost control API version 2 remains unchanged. Update recreation uses the existing start
+endpoint and authenticated command attachment; session commands never become control-API input.
+Production lifecycle commands still require an external PowerShell window when the caller inherited
+`TREEMON_TERMINAL_SESSION_ID`.
+
+SessionBridge's graceful shutdown capability remains available for explicit close/delete/archive.
+The update path does not contact individual bridges, so a partial bridge shutdown cannot leave the
+old host connected while reporter heartbeats disappear.
 
 ### Deliberate simplicity
 
-There is one host and one current registry. The design has no generation journals, empty witnesses,
-content-addressed bundles, runtime-lock process, concurrent host generations, or live process-state
-migration. Session-instance presence, graceful shutdown capability, and exact process snapshots are
-the minimum additional state required to prevent duplicate CLIs and orphan descendants.
+Update coordination uses one host, one authoritative registry, one restart-session snapshot, and one
+four-case mailbox state. `WaitingForCleanup` adds sequencing without another worker or retry path.
+Success installs the new registry and unlocks the mailbox; any failure transitions it to `Fatal` for
+the rest of the server process.
 
 ## Verification
 
-All lifecycle verification uses isolated temporary worktrees, activity stores, TerminalHost state,
-and dynamically allocated non-production ports. Port allocation retries on collision. Verification
-never binds production port 5000, and every harness closes tracked sessions before stopping its
-isolated server and fails on incomplete exact process cleanup.
+All lifecycle verification uses isolated temporary worktrees, TerminalHost state, activity stores,
+and dynamically allocated non-production ports. Tests never bind production port 5000 or invoke
+`treemon.ps1 deploy`, `start`, `stop`, or `restart`.
 
-- `pwsh -NoProfile -File scripts\verify-session-isolation.ps1` builds and runs the checked-in
-  `src/Tests/SessionIsolationVerifier` harness. It runs five explicit phases with two live parent
-  processes sharing one durable `SessionId`, different exact identities/origins, the real activity
-  HTTP handler and SQLite store, PID remapping, and a same-port service restart. Its raw output
-  includes every identity/origin and snapshot, per-instance idempotency counts, closure isolation,
-  PID-reuse and restart/presence results, isolated paths and dynamic non-5000 port, then
-  zero-survivor/zero-leftover cleanup. The runner installs the pinned gitignored ttyd build
-  prerequisite when absent, so the command runs verbatim from a clean checkout without production
-  state or lifecycle actions.
-- A real-CLI outage harness starts reporting before its activity endpoint, then proves acknowledged
-  presence and idempotent replay recover the exact process after the server becomes available. It
-  first requires a running extension process and a startup log proving the inherited terminal
-  origin and configured endpoint count; failure reports the isolated install path, loader log
-  lines, and captured TerminalHost process tree instead of waiting for downstream HTTP evidence.
-- A real-CLI close harness proves SDK shutdown precedes terminal teardown when available, explicit
-  close remains authoritative on graceful failure, card state refreshes immediately, and no
-  captured descendant survives. A forced-cleanup subcase resumes the durable session, permits a
-  visible `Force resume?` confirmation, and proves no prior process or duplicate CLI remains.
-- A real-CLI replacement harness invokes the Windows Apps loader with
-  `--prefer-version 1.0.84-3` inside an isolated `COPILOT_HOME`. The pin is verifier-only, and the
-  harness clears `COPILOT_CLI_ENABLED_FEATURE_FLAGS` so it exercises the CLI's default synchronous
-  extension bootstrap rather than a forced experiment path. Both extensions read `TREEMON_PORT`,
-  so the isolated bridge listener also proxies `/api/session/activity` to the isolated Treemon
-  server. Every scenario requires the CLI to report two installed native extensions and both
-  `canvas-bridge` and `treemon-reporting` ready before it proves non-idle gating, graceful ordering,
-  one Resume per terminal, fail-closed staged-host cleanup after a post-stop failure, and zero
-  old-process survivors.
-- `npm run test:embedded-launch-routing` continues to exercise every agent-bearing launch entry
-  point, bearer-redacted evidence, native HWND preservation, and exact failed-delivery rollback.
+- `EmbeddedTerminalUpdateTests` covers staged availability, immediate `Updating` acknowledgement,
+  the one-pass happy transition, omission of terminals without captured durable sessions, rejection
+  of new starts/cleanup and idempotent duplicates while locked, cleanup-held queueing, automatic
+  single transaction after acknowledged release, safe queue/age/correlation logs, and permanent
+  fatal state after the first failure.
+- `TerminalOwnershipQueryTests` covers active and idle durable-session selection, stale-session
+  exclusion, one latest conversation per terminal, and no literal agent `resume` prompt.
+- Dashboard browser tests cover the exact one-button copy and position immediately before Sort,
+  hidden Unavailable state, immediate `Updating` acknowledgement, uninterrupted polling-driven
+  blocking overlay, visible spinner animation, success removal, and non-dismissible fatal recovery
+  overlay. Elmish tests cover every terminal action/shortcut message, subscription suppression, late
+  focus, and queued-launch suppression while locked.
+- Existing launch-routing tests prove every embedded and agent-bearing API route reaches the shared
+  `TerminalLaunch`/`EmbeddedTerminal` boundary.
+- Run the focused tests first, then `dotnet test src/Tests/Tests.fsproj --filter "Category=Fast"`.
 
 ## Decisions
 
 - **One separately running F# host:** ordinary Treemon restarts remain control-plane events while
-  the implementation has one language, one process owner, and no script/runtime handoff.
-- **Job Object plus exact survivor cleanup:** kernel membership is established before ttyd resumes
-  and remains the primary teardown mechanism. Exact descendant identities captured before close are
-  the bounded fallback for processes that survive outside the job.
-- **Windowless terminal infrastructure:** ttyd is created with `CREATE_NO_WINDOW`, so the background
-  host never allocates a native console or default-terminal surface; shell I/O exists only inside
-  ttyd's PTY.
-- **External production ownership:** production launch and restart require a caller outside an
-  embedded terminal because the terminal Job Object deliberately has no breakaway policy. The
-  inherited terminal session ID blocks self-owned production before destructive work; this is
-  independent of compatible-host idle gating and incompatible-host deployment refusal.
-- **One serialized terminal cleanup owner:** the registry closes retained process and Job Object
-  handles and verifies captured descendant cleanup. Server orchestration requests graceful Copilot
-  shutdown first and marks exact activity instances closed after authoritative teardown.
-  Data-plane upstream exit is a fire-and-forget exact-session notice, avoiding a mailbox dependency
-  cycle while making stale notices harmless.
-- **One upstream and one browser writer per terminal:** the host preserves each shell across browser
-  reconnects without defining multi-writer input semantics.
-- **Client-only manual view reconnect:** a per-terminal React key generation replaces one browser
-  attachment without introducing a lifecycle API or claiming connection health. Generation,
-  selection, and visibility guards prevent stale load focus from targeting a newer or hidden view.
-- **Overlay-gated browser reconnect:** terminal visibility alone never sends Enter or reloads a live
-  page. The cross-origin iframe reloads only after its injected listener positively identifies
-  ttyd 1.7.7's manual reconnect overlay, then the existing replaceable-attachment path restores the
-  tracked screen and interaction modes plus recent output. This avoids a ttyd frontend fork while
-  keeping normal shell and TUI input untouched.
-- **Separate state from proxy hosting:** the replay/attachment mailbox remains independently
-  testable while HTTP/WebSocket hosting shares one loopback-only Kestrel bootstrap with the control
-  API, preventing security-sensitive host configuration from drifting.
-- **Raw bounded replay plus interaction modes:** reconnect gets useful recent output without
-  persisting terminal content or introducing a screen-state serializer. A small seven-bit control
-  parser retains current DEC modes, preserves xterm's soft-reset exceptions, restores active-buffer
-  and rendering state before replay, and reapplies input state afterward because ttyd resets xterm
-  before consuming a replacement attachment. Replay capacity never doubles as an upstream transport
-  limit; large output messages are streamed while old retained frames are evicted.
-- **Explicit replay discontinuities:** replay reads distinguish a complete suffix from one whose
-  requested prefix was evicted. Resuming across that gap resets and clears the emulator and shows an
-  omission notice before the retained output.
-- **Bearer in the in-memory attachment URL:** a path-scoped copy of the existing host bearer lets
-  ttyd's unmodified iframe client authenticate every relative HTTP and WebSocket request without a
-  persistent cookie or a second capability.
-- **Exact session-origin gating:** only Copilot activity attributed to a current terminal can delay
-  replacement; every exact owned process is retained independently, while worktree co-location and
-  non-Copilot process activity are irrelevant.
-- **All shutdown targets, one Resume identity:** replacement must stop every exact process owned by
-  a terminal, including same-`SessionId` duplicates and anomalous distinct conversations, but
-  recreates only the greatest-activity durable session. Other conversations remain resumable
-  history.
-- **Bounded ownership-query state:** terminal replacement consumes a focused projection over only
-  current authoritative terminal IDs. Live status follows the existing idle-window bound,
-  per-origin epochs are pruned by durable retention and current registry membership without
-  resetting the global sequence.
-- **Acknowledged startup reconciliation:** activity ingress starts before replacement coordination,
-  and surviving reporters retry presence until acknowledged. Recently open persisted identities
-  gate individually until they re-present or send a validated exact heartbeat, die, lose their
-  origin, or reach `openWindow`; replacement does not infer absence from a missed first event or
-  title.
-- **Transition-based replacement diagnostics:** the coordinator logs only when its observable
-  blocker changes, distinguishing pending startup reconciliation from genuinely non-idle sessions
-  and reporting recheck races without writing one line per one-second poll. Activity-query failures
-  carry their elapsed time. An unexpected pre-commit coordinator exception is logged and retried on
-  the next poll; the replacement commit boundary already converts its own failures to explicit
-  outcomes, so the outer retry cannot repeat an uncertain mutation.
-- **Opportunistic replacement, not draining:** normal work is never rejected in anticipation of an
-  update. A race cancels the attempt rather than delaying the work.
-- **Non-idle sessions are never shut down for replacement:** every open `Working` or
-  `WaitingForUser` instance owned by a current terminal gates replacement. Graceful shutdown begins
-  only after every owned instance is Idle. Non-Copilot work is deliberately ignored and may be
-  terminated without warning once the Copilot gate is idle.
-- **Stable API over compatibility layers:** compatible servers reconnect; an incompatible deploy
-  waits until no terminals exist instead of carrying old protocol clients or migrating live state.
-- **Explicit versioned wire contracts:** the candidate deployment preflight is a parsed server run
-  mode with a named JSON result, and the host maps registry domain records to dedicated control API
-  v2 response property sets. Version 2 defines every start as creation of one fresh terminal, so a
-  server never silently reconnects to singleton-style start semantics. Exact-property regression
-  tests prevent internal fields from leaking
-  onto either wire contract.
-- **Truthful failure:** host loss kills owned trees and becomes an interruption, never a claimed
-  reconnect to an unproven process.
-- **Fail closed on unverified live discovery:** a malformed manifest or an exact live process that
-  fails health validation blocks lifecycle requests rather than starting a competing host. Lazy
-  startup is limited to a missing manifest with no previously verified live identity, or a
-  manifest whose exact process identity is dead.
-- **Exact Git top-level validation:** the bearer authorizes a lifecycle request, but it does not turn
-  an arbitrary directory into a known worktree; the requested canonical path must be Git's exact
-  top-level path before the registry is touched.
-- **Plain machine discovery and staging:** one bounded manifest and direct version directories are
-  sufficient. Registry state stays in the live host, and no generation journal or bundle store is
-  recreated. One compiled layout contract defines the state and staging paths, accepted version
-  names, executable names, and complete bundle membership for the host, server, and deployment
-  script.
-- **Candidate-first deployment:** publish and preflight in inactive directories, then atomically
-  stage the complete host publication before swapping server files. Treemon receives that stable
-  staged executable as its lazy-start path; if an exact live host still runs from an older publish
-  directory, those files are preserved until that process exits rather than overwritten in place.
-- **Deployment-owned executable selection:** production resolves only an explicit deployment input
-  or the published `terminal-host` layout. The development script supplies its source build path
-  explicitly, so the shipped assembly contains no build-machine checkout fallback.
-- **Startup-owned dashboard topology:** development passes the Vite port that it actually launches
-  into `Program`, which derives both loopback dashboard origins. The terminal client has no
-  dev-port convention, and production supplies no additional dashboard origin.
-- **Origin-scoped attachment framing:** attachment responses use CSP `frame-ancestors` with every
-  configured dashboard origin, rather than same-origin framing that would reject the legitimate
-  cross-port dashboard iframe.
-- **Proxy-owned terminal page integration:** the attachment proxy adds one CSS override and one
-  capture-phase keyboard bridge to ttyd's root page instead of carrying a forked custom
-  index. It hides the rendered xterm scrollbar while preserving scrollback, forwards Ctrl+P to
-  worktree search, Ctrl+N to start another terminal for the current worktree, Ctrl+W to close the
-  current terminal, and Ctrl+Tab / Ctrl+Shift+Tab to next/previous terminal selection before xterm
-  consumes those keys. Host injection and dashboard listener compile one shared action vocabulary,
-  so a renamed message breaks the build instead of being silently ignored by the other end. On the
-  focused xterm input, exact Ctrl+Enter sends a literal line feed, while exact Ctrl+V bypasses
-  xterm's `0x16` key encoding without cancelling the browser's trusted paste action, preserving
-  xterm's normal multiline and bracketed-paste handling. The dashboard accepts a forwarded shortcut
-  only from the active loopback terminal iframe, then sends an exact-origin focus request back after
-  terminal selection, terminal start, terminal close, or worktree-search dismissal so the active
-  xterm input keeps keyboard ownership.
-- **Graceful shutdown before automatic Resume:** replacement requests exact SDK session shutdown
-  for every exact target before terminal teardown and aborts while the old host is healthy if any
-  shutdown is unavailable, rejected, or times out. Endpoint acceptance is not completion; exact
-  closure or process exit confirms success. No selected Resume command runs until the old host
-  closed and survivor verification is clean. A failure before that close aborts the attempt without
-  any Resume; a failure after it stops the exact staged host rather than writing Resume into an
-  unverified generation.
-- **Shared bridge registry remains generic:** graceful shutdown extends the exact live-session
-  registration by re-keying physical sessions while preserving the separate poll map and
-  durable-session canvas queueing, liveness, and reconnect behavior.
-- **Visible stale-lock recovery:** Treemon never deletes Copilot in-use markers. Resume after forced
-  cleanup may require the CLI's `Force resume?` confirmation, but must never coexist with the prior
-  process.
-- **Safe lifecycle diagnostics:** record counts, typed outcomes, and exact safe identities for
-  multiplicity, shutdown, replacement failure, and survivor cleanup without logging terminal
-  content, capabilities, prompts, tokens, or raw records.
-- **Resume without widening the control API:** after each replacement terminal is
-  recreated, Treemon briefly attaches through the existing authenticated ttyd protocol and submits
-  selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no
-  input and remains a plain PowerShell shell. Submitted terminal input is a raw shell boundary:
-  direct commands carrying a control character are rejected rather than written, while
-  `CodingToolCli` first converts control-bearing prompt data to a control-free UTF-8/base64 form.
-  A stored Copilot `SessionId` therefore cannot inject an extra command line into a recreated shell.
-- **Typed launch-operation routing:** `TerminalLaunch` is the only product-level start boundary.
-  Its native operations return only native results and its embedded operations return exact
-  embedded-start results. Explicit native card operations remain native; every agent-bearing launch
-  uses the embedded backend, including external `tm launch`.
-- **Command delivery after lifecycle start:** normal agent launches reuse the same authenticated
-  attachment input boundary as replacement resume. The stable TerminalHost v2 lifecycle protocol
-  remains unchanged, the server rejects any complete input frame above the host's mirrored
-  16,384-byte attachment cap before lifecycle start, waits for output-backed shell readiness, and
-  confirms the exact registry entry after delivery. The command-only subprotocol skips replay and
-  output forwarding; failed delivery or retention closes only the exact new terminal. No chunking
-  or acknowledgement protocol is introduced.
-- **Background discovery without focus theft:** the client polls the registry even from an empty
-  snapshot. Background and CLI launches become attachable without opening or retargeting a user's
-  pane.
-- **Native-only card session state:** embedded terminal presence does not feed
-  `HasActiveSession` or add a second card indicator. The existing card state continues to describe
-  only the explicitly tracked Windows Terminal window; coding-tool activity describes agents.
-- **Truthful lifecycle state on failure:** only evidence that the exact host was lost interrupts
-  every tab. A rejected single-terminal request keeps the authoritative registry and leaves other
-  terminals running, and a replacement that stops short of a proven live host never reports its
-  terminals as running.
-- **Executable-path replacement identity:** Treemon captures the exact running executable path
-  before commit, waits for that exact process identity to exit, and verifies the replacement is
-  running from the selected direct staging directory. A launch that publishes any other executable
-  is stopped rather than adopted.
-- **One-way server terminal modules:** process/configuration, manifest, control client, replacement,
-  focused session-policy projection, and mailbox form an acyclic dependency graph. Replacement
-  returns a commit transition for the mailbox to apply, so only `EmbeddedTerminal` reconciles
-  `ManagerState` and no module cycle is required.
-- **Non-blocking replacement phase:** the mailbox grants the commit boundary but does not perform
-  replacement I/O inline. Reads use its last authoritative snapshot until completion, mutations
-  receive an immediate retryable error, and only the mailbox applies the final transition. This
-  avoids timeout mismatches and stale lifecycle requests without allowing a registry race during
-  replacement.
-- **Exact in-memory cleanup exclusion:** delete/archive uses a mailbox-owned canonical-path
-  reservation around all owned terminal closes plus mutation. Same-path lifecycle mutations fail
-  retryably until a `finally` release, while unrelated worktrees stay concurrent; no persistent
-  lease, supervisor, or cross-process cleanup protocol is required.
+  terminals and their owned process trees stay under one small host.
+- **Job Object ownership:** ttyd is assigned before resume, and exact survivor cleanup remains the
+  authoritative explicit-close fallback.
+- **One upstream and one browser writer per terminal:** attachment replacement preserves the shell
+  without defining multi-writer input semantics.
+- **Bounded raw replay:** reconnect restores useful recent output and terminal modes without
+  persisting terminal content or serializing complete screen state.
+- **Stable versioned control API:** compatible Treemon servers reconnect; incompatible deployment is
+  refused while the old host owns terminals.
+- **Typed launch routing:** every product-level embedded start crosses `TerminalLaunch` and the one
+  `EmbeddedTerminal` mailbox gate.
+- **User action over automatic eligibility:** staged availability produces one standard header
+  **Apply TerminalHost update** button immediately before Sort, with interruption detail in its
+  tooltip rather than another status label. Treemon never waits for an idle window or surprises the
+  user with replacement.
+- **Host-wide shutdown over per-session orchestration:** clicking the action consents to interrupting
+  active durable sessions; one host request closes every owned process tree and avoids partial bridge
+  shutdown split-brain.
+- **Durable sessions only:** the snapshot selects one greatest-activity durable conversation per
+  current terminal. Terminals without an open durable session and additional conversations are not
+  recreated.
+- **Forward-only fatal failure:** the first failed operation enters permanent `Fatal`, retains the
+  lock and overlay, and requires manual redeploy/restart. No retry, rollback, recovery, or second host
+  generation can repeat or disguise a partial transaction.
+- **Mailbox serialization is the atomic lock:** `WaitingForCleanup` is installed before the request
+  is acknowledged, so later mutations are rejected while earlier cleanup completion/release messages
+  drain. Snapshot capture starts in one serialized turn after the reservations reach zero; host I/O
+  then runs asynchronously under `Updating`.
+- **Captured current state:** current registry membership plus current open exact-session rows fully
+  define the restart set.
+- **Direct session selector:** recreated Copilot sessions use `--session-id=<id>` so the durable
+  identity exists before extensions join. No free-form recovery prompt is sent.
+- **External production ownership:** deploy/restart remains forbidden from an embedded terminal
+  because the caller would inherit the host's kill-on-close Job Object.
+- **Candidate-first deployment and plain staging:** inactive complete bundles are staged before server
+  replacement; the dashboard transaction consumes that existing staged executable without adding a
+  second bundle or journal mechanism.
+- **Bundle content over repository revision:** staging uses the complete non-PDB host fingerprint,
+  while source-revision metadata is excluded from the nested publish. Unrelated commits cannot offer
+  an update, but a changed host assembly or runtime file does.
+- **Native-only card session state:** embedded terminals do not change `HasActiveSession`; coding-tool
+  activity remains the agent indicator.
+- **Cleanup sequencing before host-wide replacement:** delete/archive retains its canonical-path
+  reservation until mailbox-acknowledged release. An accepted update locks all new terminal
+  mutations immediately, waits for those existing reservations, then starts the complete-host
+  replacement once. Cleanup is a sequencing dependency, not a rejection reason, and no lease TTL
+  can clear work that may still be running.
 
 ## Key Files
 
@@ -870,29 +562,29 @@ isolated server and fails on incomplete exact process cleanup.
 |---|---|
 | `src/TerminalHostLayout/Layout.fs` | Shared state/staging paths, version-directory grammar, executable names, and required host bundle members |
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
-| `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, and forward-only replacement with fail-closed staged-host cleanup |
+| `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, authenticated control client, staged-executable selection, and the one-pass update sequence |
 | `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, cleanup reservation, command-capable start, and authoritative snapshot reconciliation |
 | `src/Server/WorktreeCleanup.fs` | Product-level explicit terminal/worktree teardown, graceful exact-session coordination, host close, and closure publication |
 | `src/Server/ProcessIdentity.fs` | Shared exact PID/start-tick identity and resolver used by activity ingress and process lifecycle checks |
 | `src/Server/SessionActivity.fs` | Per-process instance lifecycle fold, validated session/origin identities, liveness, and closure |
-| `src/Server/LifecycleDiagnostics.fs` | Bounded structured presence, bridge, shutdown, replacement, and teardown diagnostics |
-| `src/Server/SessionActivityProtocol.fs`, `SessionActivityIngestion.fs`, and `SessionActivityService.fs` | Exact activity wire parsing, fold application, acknowledged presence, bounded live state, startup reconciliation, and mailbox-serialized terminal ownership queries |
-| `src/Server/TerminalSessionActivity.fs` | Exact process-instance and startup-reconciliation projection for tab activity, all-target non-idle gating, graceful shutdown targets, and one-per-terminal resume policy |
+| `src/Server/LifecycleDiagnostics.fs` | Bounded structured presence, bridge, graceful-shutdown, exact-closure, and teardown diagnostics |
+| `src/Server/SessionActivityProtocol.fs`, `SessionActivityIngestion.fs`, and `SessionActivityService.fs` | Exact activity wire parsing, fold application, acknowledged presence, bounded live state, and mailbox-serialized terminal ownership queries |
+| `src/Server/TerminalSessionActivity.fs` | Exact terminal-origin projection for tab activity, live-terminal reuse, and one durable restart session per terminal |
 | `src/Server/SessionActivityStoreSchema.fs` and `SessionActivityStore.fs` | Durable process-instance schema/migration, resume identity, event dedupe keys, and retention |
 | `src/Extension/reporting/extension.mjs` | Acknowledged process presence, passive activity, heartbeat, background lifecycle, and shutdown reports |
 | `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `src/Server/SessionBridge.fs` | Shared exact registration plus capability-guarded graceful shutdown endpoint and bounded typed server control client |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
-| `src/Server/Program.fs` | Host client and replacement-loop lifecycle without terminal shutdown on server stop |
+| `src/Server/Program.fs` | Host/API lifecycle and TerminalHost restart-session query wiring |
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/AppTypes.fs` and `src/Client/App.fs` | Reconnect view generation, Elmish messages, guarded load completion, and focus effect |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
-| `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus real proxy command delivery, control rejection, UTF-8 frame boundaries, replacement, crash, security, and cleanup coverage |
+| `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus update transaction, command delivery, control rejection, UTF-8 frame boundaries, crash, security, and cleanup coverage |
 | `src/Tests/SessionIsolationVerifier/` and `scripts/verify-session-isolation.ps1` | Durable five-phase concurrent same-session process-isolation harness and clean-checkout runner |
 | `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
 | `src/Tests/EmbeddedLaunchEndToEndTests.fs`, `src/Tests/TestAgentRecorder`, and `scripts/verify-embedded-launch-routing.ps1` | Reproducible isolated real-host launch matrix, exact argv recorder, raw route evidence, forced-delivery rollback, native HWND preservation, and exact cleanup |
 | `src/Tests/TerminalPaneTests.fs` and `src/Tests/WorkspaceLayoutTests.fs` | Terminal selection, reconnect generation/focus guards, and selected-only iframe replacement |
-| `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
+| `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, activity labels, and provider-specific durable restart snapshot coverage |
 | `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |
 
 ## Related Specs

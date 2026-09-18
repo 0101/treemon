@@ -29,6 +29,26 @@ let fetchEmbeddedTerminals (api: Lazy<IWorktreeApi>) =
         EmbeddedTerminalSnapshotChanged
         (fun _ -> EmbeddedTerminalPollFailed)
 
+let updateTerminalHost () =
+    Cmd.OfAsync.either
+        (fun () ->
+            worktreeApi.Value.updateTerminalHost ())
+        ()
+        TerminalHostUpdateCompleted
+        TerminalHostUpdateRequestFailed
+
+let private focusTerminalHostUpdateOverlayCmd =
+    Cmd.ofEffect (fun _ ->
+        Dom.document.activeElement
+        |> Option.ofObj
+        |> Option.iter (fun element -> element?blur())
+
+        Dom.window?requestAnimationFrame(fun (_: float) ->
+            Dom.document.querySelector ".terminal-host-update-lock"
+            |> Option.ofObj
+            |> Option.iter (fun element -> element?focus()))
+        |> ignore)
+
 let fetchSyncStatus () =
     Cmd.OfAsync.perform (fun () -> worktreeApi.Value.getSyncStatus ()) () SyncStatusUpdate
 
@@ -88,6 +108,7 @@ let init () =
       IsLoading = true
       HasError = false
       SortMode = ByActivity
+      TerminalHostUpdate = TerminalHostUpdateModel.initial
       IsCompact = false
       SchedulerEvents = []
       LatestByCategory = Map.empty
@@ -342,25 +363,31 @@ let private applyEmbeddedSnapshot snapshot (model: Model) =
             model.EmbeddedTerminalViewStates
             |> TerminalPane.reconcileViewStates visible }
 
-let private finishEmbeddedTerminalStart forceFocus path result model =
+let private finishEmbeddedTerminalStart allowInteraction forceFocus path result model =
     match result with
     | Ok started ->
         let applied = applyEmbeddedSnapshot started.Snapshot model
 
         let shouldFocus =
-            forceFocus
-            || TerminalPane.shouldFocusStartedTerminal
-                path
-                model.EmbeddedTerminalStarts
+            allowInteraction
+            && (forceFocus
+                || TerminalPane.shouldFocusStartedTerminal
+                    path
+                    model.EmbeddedTerminalStarts)
 
         let starts, queuedAgentCmd =
-            match
-                tryLaunchQueuedAgent
-                    path
+            if allowInteraction then
+                match
+                    tryLaunchQueuedAgent
+                        path
+                        model.EmbeddedTerminalStarts
+                with
+                | Some next -> next
+                | None ->
                     model.EmbeddedTerminalStarts
-            with
-            | Some next -> next
-            | None ->
+                    |> TerminalPane.clearStartState path,
+                    Cmd.none
+            else
                 model.EmbeddedTerminalStarts
                 |> TerminalPane.clearStartState path,
                 Cmd.none
@@ -384,8 +411,14 @@ let private finishEmbeddedTerminalStart forceFocus path result model =
                         updated.EmbeddedTerminalViewStates)
             queuedAgentCmd
         ]
-    | Error error ->
+    | Error error when allowInteraction ->
         failEmbeddedTerminalStart path error model
+    | Error _ ->
+        { model with
+            EmbeddedTerminalStarts =
+                model.EmbeddedTerminalStarts
+                |> TerminalPane.clearStartState path },
+        Cmd.none
 
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
@@ -427,19 +460,108 @@ let private focusEmbeddedTerminalOrDashboardCmd terminalId =
 
 [<RequireQualifiedAccess>]
 type private ActiveOverlay =
+    | TerminalHostUpdate
     | WorktreeSearch
     | Confirmation
     | CreateWorktree
 
+let private effectiveTerminalHostUpdateState =
+    function
+    | TerminalHostUpdateModel.Observed state -> state
+    | TerminalHostUpdateModel.RequestInFlight ->
+        TerminalHostUpdateState.Updating
+
+let private observedTerminalHostUpdate =
+    function
+    | TerminalHostUpdateState.Unavailable ->
+        TerminalHostUpdateModel.Observed
+            TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available ->
+        TerminalHostUpdateModel.Observed
+            TerminalHostUpdateState.Available
+    | TerminalHostUpdateState.Updating ->
+        TerminalHostUpdateModel.Observed
+            TerminalHostUpdateState.Updating
+    | TerminalHostUpdateState.Fatal ->
+        TerminalHostUpdateModel.Observed
+            TerminalHostUpdateState.Fatal
+
 let private activeOverlay model =
-    if WorktreeSearch.isOpen model.WorktreeSearch then
+    match
+        model.TerminalHostUpdate
+        |> effectiveTerminalHostUpdateState
+    with
+    | TerminalHostUpdateState.Updating
+    | TerminalHostUpdateState.Fatal ->
+        Some ActiveOverlay.TerminalHostUpdate
+    | TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available
+        when WorktreeSearch.isOpen model.WorktreeSearch ->
         Some ActiveOverlay.WorktreeSearch
-    elif model.ConfirmModal <> ConfirmModal.NoConfirm then
+    | TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available
+        when model.ConfirmModal <> ConfirmModal.NoConfirm ->
         Some ActiveOverlay.Confirmation
-    elif CreateWorktreeModal.isOpen model.CreateModal then
+    | TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available
+        when CreateWorktreeModal.isOpen model.CreateModal ->
         Some ActiveOverlay.CreateWorktree
-    else
+    | TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available ->
         None
+
+let private terminalHostUpdateLocksInteraction model =
+    activeOverlay model = Some ActiveOverlay.TerminalHostUpdate
+
+let private mergeTerminalHostUpdate current reported =
+    match current with
+    | TerminalHostUpdateModel.RequestInFlight ->
+        match reported with
+        | TerminalHostUpdateState.Fatal ->
+            observedTerminalHostUpdate
+                TerminalHostUpdateState.Fatal
+        | TerminalHostUpdateState.Unavailable
+        | TerminalHostUpdateState.Available
+        | TerminalHostUpdateState.Updating ->
+            current
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Fatal ->
+        current
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Available
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Updating ->
+        observedTerminalHostUpdate reported
+
+let private canRequestTerminalHostUpdate =
+    function
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Available ->
+        true
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Updating
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Fatal
+    | TerminalHostUpdateModel.RequestInFlight ->
+        false
+
+let private completeTerminalHostUpdate current reported =
+    match current with
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Fatal ->
+        current
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Available
+    | TerminalHostUpdateModel.Observed
+        TerminalHostUpdateState.Updating
+    | TerminalHostUpdateModel.RequestInFlight ->
+        observedTerminalHostUpdate reported
 
 let private canOpenOverlay model =
     activeOverlay model |> Option.isNone
@@ -465,6 +587,30 @@ let private focusWorktreeCard scopedKey model =
 
 let update msg model =
     match msg with
+    | (UpdateTerminalHost
+      | OpenTerminal _
+      | OpenEmbeddedTerminal _
+      | StartEmbeddedTerminal _
+      | StartAgent _
+      | StartEmbeddedTerminalFromTab _
+      | SelectEmbeddedTerminal _
+      | ReconnectEmbeddedTerminalView _
+      | NotifyEmbeddedTerminalVisibility(
+          _,
+          _,
+          (TerminalPane.TerminalVisibilitySignal.Activate
+          | TerminalPane.TerminalVisibilitySignal.Loaded)
+        )
+      | CycleEmbeddedTerminal _
+      | CloseEmbeddedTerminal _
+      | ToggleTerminalPane
+      | FocusSession _
+      | ResumeSession _
+      | LaunchCanvasSession _
+      | LaunchAction _)
+        when terminalHostUpdateLocksInteraction model ->
+        model, Cmd.none
+
     | DataLoaded (response, now) ->
         match model.AppVersion with
         | Some v when v <> response.AppVersion ->
@@ -557,6 +703,10 @@ let update msg model =
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
+                TerminalHostUpdate =
+                    mergeTerminalHostUpdate
+                        model.TerminalHostUpdate
+                        response.TerminalHostUpdate
                 TerminalPaneOpen =
                     if model.AppVersion.IsNone then response.TerminalPaneOpen
                     else model.TerminalPaneOpen
@@ -620,6 +770,55 @@ let update msg model =
         { model with
             SortMode = newSort
             Repos = model.Repos |> List.map (fun r -> { r with Worktrees = sortWorktrees newSort r.Worktrees }) },
+        Cmd.none
+
+    | UpdateTerminalHost
+        when not (
+            canRequestTerminalHostUpdate
+                model.TerminalHostUpdate
+        ) ->
+        model, Cmd.none
+
+    | UpdateTerminalHost ->
+        { model with
+            TerminalHostUpdate =
+                TerminalHostUpdateModel.RequestInFlight
+            EmbeddedTerminalViewStates =
+                model.EmbeddedTerminalViewStates
+                |> TerminalPane.cancelAllViewFocus },
+        Cmd.batch [
+            focusTerminalHostUpdateOverlayCmd
+            updateTerminalHost ()
+        ]
+
+    | TerminalHostUpdateCompleted reported ->
+        { model with
+            TerminalHostUpdate =
+                completeTerminalHostUpdate
+                    model.TerminalHostUpdate
+                    reported },
+        match reported with
+        | TerminalHostUpdateState.Unavailable ->
+            Cmd.batch [
+                fetchWorktrees ()
+                fetchEmbeddedTerminals worktreeApi
+            ]
+        | TerminalHostUpdateState.Available
+        | TerminalHostUpdateState.Updating
+        | TerminalHostUpdateState.Fatal ->
+            Cmd.none
+
+    | TerminalHostUpdateRequestFailed error ->
+        Fable.Core.JS.console.error (
+            "[terminal-host] update request failed",
+            error
+        )
+
+        { model with
+            TerminalHostUpdate =
+                completeTerminalHostUpdate
+                    model.TerminalHostUpdate
+                    TerminalHostUpdateState.Updating },
         Cmd.none
 
     | ToggleCompact ->
@@ -727,9 +926,26 @@ let update msg model =
         { model with EmbeddedTerminalPollInFlight = false },
         Cmd.none
     | EmbeddedTerminalStarted(path, result) ->
-        finishEmbeddedTerminalStart false path result model
+        finishEmbeddedTerminalStart
+            (not (terminalHostUpdateLocksInteraction model))
+            false
+            path
+            result
+            model
     | AgentStarted(path, result) ->
-        finishEmbeddedTerminalStart true path result model
+        finishEmbeddedTerminalStart
+            (not (terminalHostUpdateLocksInteraction model))
+            true
+            path
+            result
+            model
+    | EmbeddedTerminalRequestFailed (path, _)
+        when terminalHostUpdateLocksInteraction model ->
+        { model with
+            EmbeddedTerminalStarts =
+                model.EmbeddedTerminalStarts
+                |> TerminalPane.clearStartState path },
+        Cmd.none
     | EmbeddedTerminalRequestFailed (path, error) ->
         failEmbeddedTerminalStart path error model
     | SelectEmbeddedTerminal terminalId ->
@@ -780,6 +996,7 @@ let update msg model =
             focusAfterLoad
             && updated.TerminalPaneOpen
             && isStillReconnectable
+            && not (terminalHostUpdateLocksInteraction updated)
         then
             focusEmbeddedTerminalViewCmd
                 terminalId
@@ -1161,6 +1378,8 @@ let update msg model =
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView hint newFocus)
 
         match activeOverlay model with
+        | Some ActiveOverlay.TerminalHostUpdate ->
+            model, Cmd.none
         | Some ActiveOverlay.WorktreeSearch ->
             match key with
             | "Escape" ->
@@ -1418,6 +1637,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
                         dispatch (WorktreeSearchMsg WorktreeSearch.Msg.Open)
                     | Some ActiveOverlay.WorktreeSearch ->
                         ke.preventDefault()
+                    | Some ActiveOverlay.TerminalHostUpdate
                     | Some ActiveOverlay.Confirmation
                     | Some ActiveOverlay.CreateWorktree ->
                         ()
@@ -1448,21 +1668,27 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
 
     let visibleTerminal =
-        let _, activeTerminal =
-            activeEmbeddedTerminal model
+        if terminalHostUpdateLocksInteraction model then
+            None
+        else
+            let _, activeTerminal =
+                activeEmbeddedTerminal model
 
-        TerminalPane.visibleRunningTerminal
-            model.TerminalPaneOpen
-            activeTerminal
-            model.EmbeddedTerminals
+            TerminalPane.visibleRunningTerminal
+                model.TerminalPaneOpen
+                activeTerminal
+                model.EmbeddedTerminals
 
     let baseSubs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
-          [ "canvas-messages" ], CanvasUpdate.messageListener
-          [ "terminal-shortcuts" ], terminalShortcuts
-          [ "global-keyboard"; if canOpenOverlay model then "enabled" else "blocked" ],
-          globalKeyboard ]
+          [ "canvas-messages" ], CanvasUpdate.messageListener ]
+        @ (if terminalHostUpdateLocksInteraction model then
+               []
+           else
+               [ [ "terminal-shortcuts" ], terminalShortcuts ])
+        @ [ [ "global-keyboard"; if canOpenOverlay model then "enabled" else "blocked" ],
+            globalKeyboard ]
 
     let panelSubs =
         if model.OverviewPanelOpen && OverviewBand.hasAgentGroups model.Repos then
@@ -1551,6 +1777,78 @@ let viewSystemMetrics (metrics: SystemMetrics option) =
             ]
         ]
 
+let viewTerminalHostUpdateOverlay state =
+    let lockedContent ariaLabel (children: ReactElement list) =
+        Html.div [
+            prop.className "terminal-host-update-lock"
+            prop.tabIndex -1
+            prop.autoFocus true
+            prop.ariaLabel ariaLabel
+            prop.onKeyDown (fun event ->
+                event.preventDefault ()
+                event.stopPropagation ())
+            prop.children children
+        ]
+
+    match state with
+    | TerminalHostUpdateState.Updating ->
+        ModalOverlay.modalOverlayWithClasses
+            (Some "terminal-host-update-overlay")
+            None
+            None
+            [
+                lockedContent "TerminalHost update in progress" [
+                    Html.div [
+                        prop.className "modal-header"
+                        prop.text "Updating TerminalHost"
+                    ]
+                    Html.div [
+                        prop.className "modal-body"
+                        prop.children [
+                            Html.div [
+                                prop.className
+                                    "modal-loading terminal-host-update-progress"
+                                prop.children [
+                                    Html.span [
+                                        prop.className
+                                            "terminal-host-update-spinner"
+                                        prop.ariaHidden true
+                                    ]
+                                    Html.span
+                                        "Applying TerminalHost update..."
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+    | TerminalHostUpdateState.Fatal ->
+        ModalOverlay.modalOverlayWithClasses
+            (Some "terminal-host-update-overlay")
+            None
+            None
+            [
+                lockedContent "TerminalHost update failed" [
+                    Html.div [
+                        prop.className "modal-header error"
+                        prop.text "TerminalHost update failed"
+                    ]
+                    Html.div [
+                        prop.className "modal-body"
+                        prop.children [
+                            Html.div [
+                                prop.className "modal-error-message"
+                                prop.text
+                                    "TerminalHost update failed. Terminal actions remain blocked. Redeploy or restart Treemon manually from an external PowerShell window."
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+    | TerminalHostUpdateState.Unavailable
+    | TerminalHostUpdateState.Available ->
+        Html.none
+
 let viewAppHeader model dispatch =
     let widthChoices =
         match model.TerminalPaneOpen, model.Canvas.CanvasPaneOpen with
@@ -1601,6 +1899,27 @@ let viewAppHeader model dispatch =
                     Html.div [
                         prop.className "header-controls"
                         prop.children [
+                            match model.TerminalHostUpdate with
+                            | TerminalHostUpdateModel.Observed
+                                TerminalHostUpdateState.Available ->
+                                Html.button [
+                                    prop.className "ctrl-btn"
+                                    yield! noFocusProps
+                                    prop.onClick (fun _ ->
+                                        dispatch UpdateTerminalHost)
+                                    prop.title
+                                        "Apply the TerminalHost update. Hosted durable sessions will be interrupted and restarted."
+                                    prop.text
+                                        "Apply TerminalHost update"
+                                ]
+                            | TerminalHostUpdateModel.Observed
+                                TerminalHostUpdateState.Unavailable
+                            | TerminalHostUpdateModel.Observed
+                                TerminalHostUpdateState.Updating
+                            | TerminalHostUpdateModel.Observed
+                                TerminalHostUpdateState.Fatal
+                            | TerminalHostUpdateModel.RequestInFlight ->
+                                ()
                             Html.button [
                                 prop.className "ctrl-btn"
                                 yield! noFocusProps
@@ -1760,6 +2079,10 @@ let view model dispatch =
                 OverviewViews.schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
 
                 match activeOverlay model with
+                | Some ActiveOverlay.TerminalHostUpdate ->
+                    viewTerminalHostUpdateOverlay
+                        (effectiveTerminalHostUpdateState
+                            model.TerminalHostUpdate)
                 | Some ActiveOverlay.WorktreeSearch ->
                     WorktreeSearch.view
                         (WorktreeSearchMsg >> dispatch)

@@ -1,6 +1,7 @@
 module Tests.DashboardTests
 
 open System
+open System.Threading.Tasks
 open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
@@ -13,6 +14,12 @@ type DashboardTests() =
     inherit ServerFixture.SharedPageTest()
 
     let baseUrl = ServerFixture.viteUrl
+
+    let routeHandler
+        (handler: IRoute -> Task<unit>)
+        =
+        Func<IRoute, Task>(fun route ->
+            handler route :> Task)
 
     let computedStyle (prop: string) (locator: ILocator) =
         locator.EvaluateAsync<string>($"el => getComputedStyle(el).{prop}")
@@ -60,6 +67,129 @@ type DashboardTests() =
         page.EvaluateAsync<bool>(
             "() => { const event = new KeyboardEvent('keydown',{key:'p',ctrlKey:true,bubbles:true,cancelable:true}); document.activeElement.dispatchEvent(event); return event.defaultPrevented; }")
 
+    let prepareTerminalHostUpdate (page: IPage) =
+        task {
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+
+            let updateStarted =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+            let finalState =
+                TaskCompletionSource<TerminalHostUpdateState>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+            let updatingRefresh =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+            let finalRefresh =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            do!
+                page.RouteAsync(
+                    "**/IWorktreeApi/getWorktrees",
+                    routeHandler (fun route ->
+                        task {
+                            let! upstream = route.FetchAsync()
+                            let! json = upstream.TextAsync()
+                            let response =
+                                JsonConvert.DeserializeObject<DashboardResponse>(
+                                    json,
+                                    converter
+                                )
+                            let reportedState =
+                                if finalState.Task.IsCompletedSuccessfully then
+                                    finalRefresh.TrySetResult()
+                                    |> ignore
+
+                                    finalState.Task.Result
+                                elif updateStarted.Task.IsCompletedSuccessfully then
+                                    updatingRefresh.TrySetResult()
+                                    |> ignore
+
+                                    TerminalHostUpdateState.Updating
+                                else
+                                    TerminalHostUpdateState.Available
+                            let body =
+                                JsonConvert.SerializeObject(
+                                    { response with
+                                        TerminalHostUpdate = reportedState },
+                                    converter
+                                )
+
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = body
+                                    )
+                                )
+                        })
+                )
+
+            do!
+                page.RouteAsync(
+                    "**/IWorktreeApi/updateTerminalHost",
+                    routeHandler (fun route ->
+                        task {
+                            updateStarted.TrySetResult() |> ignore
+
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body =
+                                            JsonConvert.SerializeObject(
+                                                TerminalHostUpdateState.Updating,
+                                                converter
+                                            )
+                                    )
+                                )
+                        })
+                )
+
+            let! _ = page.GotoAsync(baseUrl)
+            let action =
+                page.Locator(
+                    ".header-controls > .ctrl-btn",
+                    PageLocatorOptions(
+                        HasText = "Apply TerminalHost update"
+                    )
+                )
+            do! action.WaitForAsync()
+            return
+                {| Action = action
+                   UpdateStarted = updateStarted.Task
+                   UpdatingRefresh = updatingRefresh.Task
+                   Complete =
+                    fun state ->
+                        finalState.TrySetResult state |> ignore
+                   FinalRefresh = finalRefresh.Task |}
+        }
+
+    let startTerminalHostUpdate (page: IPage) =
+        task {
+            let! prepared = prepareTerminalHostUpdate page
+            do! prepared.Action.ClickAsync()
+            do!
+                prepared.UpdateStarted.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            let overlay =
+                page.Locator(".terminal-host-update-overlay")
+            do! overlay.WaitForAsync()
+
+            return
+                {| Overlay = overlay
+                   UpdatingRefresh = prepared.UpdatingRefresh
+                   Complete = prepared.Complete
+                   FinalRefresh = prepared.FinalRefresh |}
+        }
+
     override this.ContextOptions() =
         let opts = base.ContextOptions()
         opts.IgnoreHTTPSErrors <- true
@@ -87,6 +217,223 @@ type DashboardTests() =
             let svg = headerLeft.Locator("svg")
             let! svgCount = svg.CountAsync()
             Assert.That(svgCount, Is.EqualTo(1), "Header should contain exactly one SVG element (the eye logo)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``TerminalHost available is one standard header button immediately before Sort``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let! prepared = prepareTerminalHostUpdate page
+            let! directlyBeforeSort =
+                prepared.Action.EvaluateAsync<bool>(
+                    "button => button.nextElementSibling?.textContent?.startsWith('Sort:') === true"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    prepared.Action.TextContentAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.EqualTo "Apply TerminalHost update"
+                )
+                Assert.That(
+                    prepared.Action.GetAttributeAsync("class")
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.EqualTo "ctrl-btn"
+                )
+                Assert.That(
+                    prepared.Action.GetAttributeAsync("title")
+                        .GetAwaiter()
+                        .GetResult(),
+                    Does.Contain("interrupted and restarted")
+                )
+                Assert.That(
+                    prepared.Action.IsEnabledAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.True
+                )
+                Assert.That(
+                    directlyBeforeSort,
+                    Is.True
+                )
+                Assert.That(
+                    page.Locator(
+                        ".header-controls > .ctrl-btn",
+                        PageLocatorOptions(
+                            HasText = "Apply TerminalHost update"
+                        )
+                    )
+                        .CountAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.EqualTo 1
+                ))
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``TerminalHost unavailable renders no status or action``() =
+        task {
+            Assert.That(
+                this.Page.GetByText(
+                    "Apply TerminalHost update",
+                    PageGetByTextOptions(Exact = true)
+                )
+                    .CountAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                Is.Zero
+            )
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``TerminalHost update spinner ignores reduced motion and clears after success``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            do!
+                page.EmulateMediaAsync(
+                    PageEmulateMediaOptions(
+                        ReducedMotion = ReducedMotion.Reduce
+                    )
+                )
+
+            let! update =
+                startTerminalHostUpdate page
+
+            Assert.That(
+                update.Overlay.Locator(".modal-header")
+                    .TextContentAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                Is.EqualTo "Updating TerminalHost")
+
+            let spinner =
+                update.Overlay.Locator(
+                    ".terminal-host-update-spinner"
+                )
+            do! spinner.WaitForAsync()
+            let! animationName =
+                computedStyle "animationName" spinner
+
+            let! _ =
+                page.WaitForFunctionAsync(
+                    "() => { const overlay = document.querySelector('.terminal-host-update-overlay'); return overlay?.contains(document.activeElement) === true; }"
+                )
+
+            do! page.Keyboard.PressAsync("Tab")
+
+            let! focusStayedLocked =
+                page.EvaluateAsync<bool>(
+                    "() => document.querySelector('.terminal-host-update-overlay')?.contains(document.activeElement) === true"
+                )
+
+            do!
+                update.UpdatingRefresh.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            Assert.That(
+                page.GetByText(
+                    "Apply TerminalHost update",
+                    PageGetByTextOptions(Exact = true)
+                )
+                    .CountAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                Is.Zero
+            )
+
+            update.Complete TerminalHostUpdateState.Unavailable
+
+            do!
+                update.FinalRefresh.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            do!
+                update.Overlay.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Detached
+                    )
+                )
+
+            Assert.That(
+                spinner.CountAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                Is.Zero)
+            Assert.That(
+                animationName,
+                Is.EqualTo "sync-spin",
+                "progress must remain visibly animated under reduced motion")
+            Assert.That(focusStayedLocked, Is.True)
+            Assert.That(
+                page.GetByText(
+                    "Apply TerminalHost update",
+                    PageGetByTextOptions(Exact = true)
+                )
+                    .CountAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                Is.Zero)
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``TerminalHost fatal update keeps the blocking recovery overlay``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let! update =
+                startTerminalHostUpdate page
+
+            let error =
+                "TerminalHost update failed. Terminal actions remain blocked. Redeploy or restart Treemon manually from an external PowerShell window."
+
+            update.Complete TerminalHostUpdateState.Fatal
+
+            do!
+                update.FinalRefresh.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            let errorMessage =
+                update.Overlay.Locator(".modal-error-message")
+            do! errorMessage.WaitForAsync()
+            do! page.Keyboard.PressAsync("Escape")
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    errorMessage.TextContentAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.EqualTo error
+                )
+                Assert.That(
+                    update.Overlay.CountAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.EqualTo 1
+                )
+                Assert.That(
+                    page.GetByText(
+                        "Apply TerminalHost update",
+                        PageGetByTextOptions(Exact = true)
+                    )
+                        .CountAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    Is.Zero
+                ))
+
+            do! page.CloseAsync()
         }
 
     [<Test>]
@@ -1373,7 +1720,7 @@ type DashboardTests() =
         task {
             let! page = this.Context.NewPageAsync()
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test"}"""
+                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test","TerminalHostUpdate":"Unavailable"}"""
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
             )
 
@@ -1404,7 +1751,7 @@ type DashboardTests() =
         task {
             let! page = this.Context.NewPageAsync()
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test"}"""
+                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test","TerminalHostUpdate":"Unavailable"}"""
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
             )
 
@@ -1424,7 +1771,7 @@ type DashboardTests() =
         task {
             let! page = this.Context.NewPageAsync()
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test"}"""
+                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test","TerminalHostUpdate":"Unavailable"}"""
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
             )
 
