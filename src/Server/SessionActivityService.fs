@@ -93,25 +93,16 @@ type private ServiceMsg =
         ProcessIdentity *
         DateTimeOffset *
         AsyncReplyChannel<ClosureAcknowledge>
-    | Seed of
-        DateTimeOffset *
-        StoredInstance list *
-        AsyncReplyChannel<unit>
+    | Seed of StoredInstance list * AsyncReplyChannel<unit>
     | Snapshot of AsyncReplyChannel<Map<ProcessIdentity, StoredInstance>>
     | ClosedProcessSnapshot of AsyncReplyChannel<Set<ProcessIdentity>>
     | QueryTerminalActivity of
-        DateTimeOffset *
-        ReconciliationScope *
         Set<TerminalSessionId> *
         AsyncReplyChannel<
-            Result<
-                int64 * StoredInstance list * Set<ProcessIdentity>,
-                string
-             >
+            Result<StoredInstance list, string>
          >
     | PruneMemory of
         DateTimeOffset *
-        Set<TerminalSessionId> *
         AsyncReplyChannel<unit>
     | Stop of AsyncReplyChannel<unit>
 
@@ -328,24 +319,16 @@ type SessionActivityService internal
                                     reply.Reply ClosureAcknowledge.Missing
                                     return! loop state
                                 | Some persisted ->
-                                    let published =
-                                        publishInstance
+                                    reply.Reply ClosureAcknowledge.Closed
+
+                                    return!
+                                        persisted
+                                        |> publishInstance
                                             scheduler
                                             closedAt
                                             (Some prior)
                                             state
-                                            persisted
-
-                                    let next =
-                                        { published with
-                                            PendingReconciliation =
-                                                state.PendingReconciliation
-                                                |> Set.remove identity }
-
-                                    reply.Reply ClosureAcknowledge.Closed
-
-                                    return!
-                                        loop next
+                                        |> loop
                         with error ->
                             Log.logException
                                 "Activity"
@@ -358,7 +341,7 @@ type SessionActivityService internal
                             )
 
                             return! loop state
-                    | Seed(now, loaded, reply) ->
+                    | Seed(loaded, reply) ->
                         let live =
                             loaded
                             |> List.map (fun instance ->
@@ -366,22 +349,10 @@ type SessionActivityService internal
                             |> Map.ofList
                             |> SchedulerState.evictStaleInstances
 
-                        let pending =
-                            live
-                            |> Map.values
-                            |> Seq.filter (fun instance ->
-                                instance.TerminalSessionId.IsSome
-                                && StoredInstance.isOpenAt now instance)
-                            |> Seq.map _.ProcessIdentity
-                            |> Set.ofSeq
-
                         reply.Reply()
 
                         return!
-                            loop
-                                { state with
-                                    Live = live
-                                    PendingReconciliation = pending }
+                            loop { state with Live = live }
                     | Snapshot reply ->
                         reply.Reply state.Live
                         return! loop state
@@ -394,60 +365,15 @@ type SessionActivityService internal
                         |> reply.Reply
 
                         return! loop state
-                    | QueryTerminalActivity(
-                        now,
-                        reconciliationScope,
-                        terminalSessionIds,
-                        reply
-                      ) ->
-                        match
-                            reconcilePending
-                                resolver
-                                scheduler
-                                now
-                                reconciliationScope
-                                terminalSessionIds
-                                store
-                                state
-                        with
-                        | Error error ->
-                            reply.Reply(Error error)
-                            return! loop state
-                        | Ok reconciled ->
-                            let activityEpoch, activityEpochState =
-                                reconciled.ActivityEpochState
-                                |> observeCurrentTerminalOrigins
-                                    terminalSessionIds
+                    | QueryTerminalActivity(terminalSessionIds, reply) ->
+                        state.Live
+                        |> statusesForTerminalOrigins
+                            terminalSessionIds
+                        |> Ok
+                        |> reply.Reply
 
-                            let pending =
-                                reconciled.PendingReconciliation
-                                |> Set.filter (fun identity ->
-                                    reconciled.Live
-                                    |> Map.tryFind identity
-                                    |> Option.bind _.TerminalSessionId
-                                    |> Option.exists
-                                        terminalSessionIds.Contains)
-
-                            reply.Reply(
-                                Ok(
-                                    activityEpoch,
-                                    statusesForTerminalOrigins
-                                        terminalSessionIds
-                                        reconciled.Live,
-                                    pending
-                                )
-                            )
-
-                            return!
-                                loop
-                                    { reconciled with
-                                        ActivityEpochState =
-                                            activityEpochState }
-                    | PruneMemory(
-                        now,
-                        retainedTerminalSessionIds,
-                        reply
-                      ) ->
+                        return! loop state
+                    | PruneMemory(now, reply) ->
                         let liveCutoff = now - idleWindow
 
                         let live =
@@ -458,16 +384,7 @@ type SessionActivityService internal
                         reply.Reply()
 
                         return!
-                            loop
-                                { state with
-                                    Live = live
-                                    PendingReconciliation =
-                                        state.PendingReconciliation
-                                        |> Set.filter live.ContainsKey
-                                    ActivityEpochState =
-                                        state.ActivityEpochState
-                                        |> pruneTerminalOriginEpochs
-                                            retainedTerminalSessionIds }
+                            loop { state with Live = live }
                     | Stop reply -> reply.Reply()
                 }
 
@@ -519,10 +436,9 @@ type SessionActivityService internal
 
     let pruneAt now =
         let deleted = store.PruneOld(now - retentionPeriod)
-        let retainedOrigins = store.RetainedTerminalSessionIds()
 
         mailbox.PostAndReply(fun reply ->
-            PruneMemory(now, retainedOrigins, reply))
+            PruneMemory(now, reply))
 
         deleted
 
@@ -774,7 +690,7 @@ type SessionActivityService internal
         )
 
         mailbox.PostAndReply(fun reply ->
-            Seed(now, loaded, reply))
+            Seed(loaded, reply))
 
         Log.log
             "Activity"
@@ -790,10 +706,8 @@ type SessionActivityService internal
 
         mailbox.PostAndReply Snapshot
 
-    member private _.QueryTerminalActivityAtWithScope
+    member _.QueryTerminalActivity
         (
-            now: DateTimeOffset,
-            reconciliationScope: ReconciliationScope,
             terminalSessionIds: Set<TerminalSessionId>
         ) =
         if isDisposed () then
@@ -806,8 +720,6 @@ type SessionActivityService internal
                     mailbox.PostAndReply(
                         (fun reply ->
                             QueryTerminalActivity(
-                                now,
-                                reconciliationScope,
                                 terminalSessionIds,
                                 reply
                             )),
@@ -838,29 +750,8 @@ type SessionActivityService internal
                 Error
                     $"exact terminal activity query failed after {timer.ElapsedMilliseconds}ms"
 
-    member internal this.QueryTerminalActivityAt
-        (
-            now: DateTimeOffset,
-            terminalSessionIds: Set<TerminalSessionId>
-        ) =
-        this.QueryTerminalActivityAtWithScope(
-            now,
-            ReconciliationScope.AuthoritativeOrigins,
-            terminalSessionIds
-        )
-
-    member this.QueryTerminalActivity terminalSessionIds =
-        this.QueryTerminalActivityAt(
-            DateTimeOffset.UtcNow,
-            terminalSessionIds
-        )
-
     member internal this.QuerySelectedTerminalActivity terminalSessionIds =
-        this.QueryTerminalActivityAtWithScope(
-            DateTimeOffset.UtcNow,
-            ReconciliationScope.SelectedOrigins,
-            terminalSessionIds
-        )
+        this.QueryTerminalActivity terminalSessionIds
 
     member internal _.RunRetention(now: DateTimeOffset) =
         if isDisposed () then

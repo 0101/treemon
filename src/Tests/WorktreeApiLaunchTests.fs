@@ -91,6 +91,7 @@ let private createApi
           ActivityStore = activityStore
           SnapshotStore = None
           AutoSyncStore = None
+          TerminalHostRestartSessions = None
           WorktreeRoots = [ root ]
           TestFixtures = None
           AppVersion = "test"

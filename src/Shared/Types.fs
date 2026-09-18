@@ -233,6 +233,13 @@ type EmbeddedTerminalSnapshot =
 module EmbeddedTerminalSnapshot =
     let empty = { Tabs = [] }
 
+[<RequireQualifiedAccess>]
+type TerminalHostUpdateState =
+    | Unavailable
+    | Available
+    | Updating
+    | Fatal
+
 type EmbeddedTerminalStartResult =
     { Snapshot: EmbeddedTerminalSnapshot
       TerminalId: EmbeddedTerminalId }
@@ -574,7 +581,8 @@ type DashboardResponse =
       TerminalPaneOpen: bool
       CanvasPaneOpen: bool
       OverviewPanelOpen: bool
-      WorkspaceWidth: WorkspaceWidth }
+      WorkspaceWidth: WorkspaceWidth
+      TerminalHostUpdate: TerminalHostUpdateState }
 
 type FixtureData =
     { Worktrees: DashboardResponse
