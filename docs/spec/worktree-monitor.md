@@ -91,8 +91,9 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - Active-card headers show the branch name, session status dots, and card chrome. Expanded cards place open PR details on the left and a right-aligned tail of `+/-` stats, commit grid, Diff, and Create PR when applicable; compact cards show metrics in compact detail; archive cards retain metrics in their header.
 - Coding tool status dots — one per open physical process instance (Working / WaitingForUser /
   Idle), each keyed by its opaque exact identity and rendered as a context-usage donut when that
-  process has reported usage, else a plain dot. Duplicate processes for one durable session remain
-  separate markers. A worktree with no open instance shows the single grey NoSession dot.
+  binding has reported usage or inherited the durable session's last-known gauge, else a plain dot.
+  Duplicate processes for one durable session remain separate markers and accept later usage
+  updates independently. A worktree with no open instance shows the single grey NoSession dot.
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
 - "N behind {base}" with an always-visible circular two-arrow auto-sync toggle and tracked staged/unstaged dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
