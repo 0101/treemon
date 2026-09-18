@@ -425,11 +425,12 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
         | Some (wt, doc) ->
             let isFocusedDocAlive = isDocAlive bridgeLiveness doc
             let scopedKey = WorktreePath.value wt.Path
-            let isTerminalLinked =
-                CanvasTerminalLink.isConnectedToSelectedTerminal
-                    selectedTerminalSessionIds
+            let isTerminalLinked linkedDoc =
+                CanvasTerminalLink.effectiveSessionId
                     bridgeLiveness
                     scopedKey
+                    linkedDoc
+                |> Option.exists selectedTerminalSessionIds.Contains
             // The SystemView (beads) entry gets a distinct affordance pinned to the far left of the
             // strip; AgentDocs keep the normal tab treatment. The strip always renders the active
             // doc's tab — including a lone AgentDoc (so it gets a labeled tab instead of a bare
@@ -463,14 +464,19 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                                 $"{d.Filename} — double-click to open in a browser tab (for full-page screenshots)"
                                 + terminalLinkTitleSuffix isLinked)
                             prop.children [
-                                livenessDotFor bridgeLiveness d
-                                Html.text (d.Filename.Replace(".html", ""))
                                 Html.span [
-                                    prop.className "canvas-tab-meta"
+                                    prop.className "canvas-tab-content"
                                     prop.children [
+                                        livenessDotFor bridgeLiveness d
+                                        Html.text (d.Filename.Replace(".html", ""))
                                         Html.span [
-                                            prop.className "canvas-tab-age"
-                                            prop.text (Components.relativeTimeCompact System.DateTimeOffset.Now d.LastModified)
+                                            prop.className "canvas-tab-meta"
+                                            prop.children [
+                                                Html.span [
+                                                    prop.className "canvas-tab-age"
+                                                    prop.text (Components.relativeTimeCompact System.DateTimeOffset.Now d.LastModified)
+                                                ]
+                                            ]
                                         ]
                                     ]
                                 ]

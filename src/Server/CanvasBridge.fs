@@ -61,8 +61,7 @@ let internal cancelPendingLaunch worktreePath =
     launchAgent.PostAndAsyncReply(fun reply -> CancelPendingLaunch(normalizePath worktreePath, reply))
 
 let internal selectSystemViewTarget
-    (sessionInstances: StoredInstance seq)
-    (worktreePath: string)
+    (worktreeInstances: StoredInstance seq)
     (liveSessions: SessionBridge.SessionEntry list)
     =
     let liveSessionIds =
@@ -71,10 +70,10 @@ let internal selectSystemViewTarget
         |> Set.ofList
 
     let mostRecentlyActive =
-        sessionInstances
+        worktreeInstances
         |> Seq.filter (fun stored ->
             stored.ClosedAt.IsNone
-            && WorktreePath.value stored.WorktreePath = worktreePath
+            && stored.UpdatedAt <> DateTimeOffset.MinValue
             && liveSessionIds.Contains stored.SessionId)
         |> List.ofSeq
         |> StoredInstance.tryMostRecentActivity
@@ -124,11 +123,20 @@ let internal resolveTarget
                         None
         | SystemView ->
             let now = DateTime.UtcNow
+            let worktreeKey = normalizePath worktreePath
 
             let liveSessions =
                 SessionBridge.canvasSessionsForWorktreeAt now worktreePath
 
-            return selectSystemViewTarget sessionInstances worktreePath liveSessions
+            let worktreeInstances =
+                sessionInstances
+                |> Seq.filter (fun stored ->
+                    stored.WorktreePath
+                    |> WorktreePath.value
+                    |> normalizePath
+                    |> (=) worktreeKey)
+
+            return selectSystemViewTarget worktreeInstances liveSessions
     }
 
 /// What routing decided, in the caller's terms. `QueuedNeedingSession` means nothing could receive

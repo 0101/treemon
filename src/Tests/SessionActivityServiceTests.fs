@@ -1869,7 +1869,13 @@ type TerminalOwnershipQueryTests() =
                 ClosedAt = Some(at "10:04:55") }
 
         let decorated =
-            { Tabs = [ tab terminalA 61001; tab terminalB 61002 ] }
+            { Tabs =
+                [ tab terminalA 61001
+                  tab terminalB 61002
+                  { tab terminalC 61003 with
+                      Lifecycle =
+                          EmbeddedTerminalLifecycle.Interrupted
+                              "host exited" } ] }
             |> withReportedActivity
                 now
                 [ stored terminalA "idle-a" SessionLevelStatus.Idle (at "10:03:00") (at "10:04:00")
@@ -1886,7 +1892,7 @@ type TerminalOwnershipQueryTests() =
                       (now - openWindow - TimeSpan.FromSeconds 1.0)
                       (message "Stale terminal activity" "10:04:50") None
                   stored terminalC "unrelated" SessionLevelStatus.Working (at "10:04:30") (at "10:04:30")
-                      (message "Wrong terminal" "10:04:30") None ]
+                      (message "Interrupted terminal activity" "10:04:30") None ]
 
         Assert.That(
             decorated.Tabs
@@ -1900,7 +1906,10 @@ type TerminalOwnershipQueryTests() =
                   [ "idle-a"; "working-a" ]
                   EmbeddedTerminalId(TerminalSessionId.value terminalB),
                   Some "Session title only",
-                  [ "working-b" ] ]
+                  [ "working-b" ]
+                  EmbeddedTerminalId(TerminalSessionId.value terminalC),
+                  Some "Interrupted terminal activity",
+                  [] ]
             )
         )
 

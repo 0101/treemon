@@ -147,11 +147,14 @@ let internal withReportedActivity
                         sessions
                         |> CodingToolStatus.representativeActivityText now
                     SessionIds =
-                        sessions
-                        |> List.map _.SessionId
-                        |> List.map SessionId.value
-                        |> List.distinct
-                        |> List.sort }) }
+                        match tab.Lifecycle with
+                        | EmbeddedTerminalLifecycle.Running _ ->
+                            sessions
+                            |> List.map _.SessionId
+                            |> List.map SessionId.value
+                            |> List.distinct
+                            |> List.sort
+                        | EmbeddedTerminalLifecycle.Interrupted _ -> [] }) }
 
 let internal restartSessions
     resolveProvider

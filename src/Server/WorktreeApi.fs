@@ -44,21 +44,6 @@ let loadFixtures (path: string) : Result<FixtureData, string> =
     with ex ->
         Error $"Failed to load fixture file '{path}': {ex.Message}"
 
-let internal bridgeLivenessAt
-    (now: DateTime)
-    (sessionInstances: StoredInstance seq)
-    (worktreePaths: string list)
-    =
-    SessionBridge.getAllLivenessAt now worktreePaths
-    |> Map.map (fun worktreePath liveness ->
-        let target =
-            SessionBridge.canvasSessionsForWorktreeAt now worktreePath
-            |> CanvasBridge.selectSystemViewTarget sessionInstances worktreePath
-
-        { liveness with
-            SystemViewTargetSessionId =
-                target |> Option.map SessionId.value })
-
 let readOnlyApi
     (modeName: string)
     (getWorktrees: unit -> Async<DashboardResponse>)
@@ -1276,10 +1261,28 @@ let internal worktreeApiWithLaunch
                           SchedulerState.StateMsg.GetState
                       )
 
+                  let instancesByWorktree =
+                      state.SessionInstances
+                      |> Map.values
+                      |> SchedulerState.groupInstancesByWorktree
+
+                  let systemViewTarget worktreePath liveSessions =
+                      instancesByWorktree
+                      |> Map.tryFind (
+                          Server.PathUtils.normalizePath
+                              worktreePath
+                      )
+                      |> Option.defaultValue []
+                      |> fun instances ->
+                          CanvasBridge.selectSystemViewTarget
+                              instances
+                              liveSessions
+                      |> Option.map SessionId.value
+
                   return
-                      bridgeLivenessAt
+                      SessionBridge.getAllLivenessAt
+                          systemViewTarget
                           DateTime.UtcNow
-                          (state.SessionInstances |> Map.values)
                           paths
               }
           // Roots are managed restart-to-apply: persist to global config only (no scheduler

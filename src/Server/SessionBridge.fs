@@ -1240,7 +1240,11 @@ let getSessionForWorktree worktreePath =
     |> List.tryHead
     |> Option.bind _.SessionId
 
-let internal getAllLivenessAt now (worktreePaths: string list) : Map<string, BridgeLiveness> =
+let internal getAllLivenessAt
+    (systemViewTarget: string -> SessionEntry list -> string option)
+    now
+    (worktreePaths: string list)
+    : Map<string, BridgeLiveness> =
     worktreePaths
     |> List.choose (fun path ->
         let key = normalizePath path
@@ -1255,8 +1259,15 @@ let internal getAllLivenessAt now (worktreePaths: string list) : Map<string, Bri
 
         computeLiveness now session poll
         |> Option.map (fun (_, liveness) ->
-            path, { liveness with LiveSessionIds = liveSessionIds }))
+            path,
+            { liveness with
+                LiveSessionIds = liveSessionIds
+                SystemViewTargetSessionId =
+                    systemViewTarget path sessions }))
     |> Map.ofList
 
 let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
-    getAllLivenessAt DateTime.UtcNow worktreePaths
+    getAllLivenessAt
+        (fun _ _ -> None)
+        DateTime.UtcNow
+        worktreePaths

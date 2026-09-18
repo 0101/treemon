@@ -19,15 +19,6 @@ module CanvasTerminalLink =
             |> Map.tryFind scopedKey
             |> Option.bind _.SystemViewTargetSessionId
 
-    let isConnectedToSelectedTerminal
-        (selectedTerminalSessionIds: Set<string>)
-        bridgeLiveness
-        scopedKey
-        doc
-        =
-        effectiveSessionId bridgeLiveness scopedKey doc
-        |> Option.exists selectedTerminalSessionIds.Contains
-
 [<RequireQualifiedAccess>]
 type CanvasSendState =
     // scopedKey identifies the target worktree the message was queued for, so the "Waiting for

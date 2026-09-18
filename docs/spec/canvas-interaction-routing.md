@@ -93,8 +93,8 @@ delegates a required spawn to the shared embedded command-launch boundary.
 canvas-collapsed live registrations, orders their exact rows from
 `SchedulerState.SessionInstances` by `StoredInstance.activityOrderKey`, and falls back to the
 freshest live registration when no reachable session has an activity row.
-The same resolution populates `BridgeLiveness` for canvas tabs; it is absent when no live
-registration can receive a SystemView interaction.
+The same captured live-registration list and resolution populate `BridgeLiveness` for canvas tabs;
+the target is absent when no live registration can receive a SystemView interaction.
 `CanvasBridge.sendMessage` returns the resolved target alongside the outcome so the caller can
 distinguish "queued because nothing is reachable" from "queued behind a known session".
 

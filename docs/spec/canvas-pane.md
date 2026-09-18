@@ -115,7 +115,8 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 - Selecting a tab marks that doc viewed. When its effective session matches a terminal in the
   targeted worktree, selection also selects that terminal without opening, revealing, or focusing
   the Terminal pane.
-- Viewed but inactive tabs render at 0.5 opacity. The active tab stays full opacity.
+- Viewed but inactive tab content renders at 0.5 opacity. The active tab stays full opacity, while
+  the terminal-link border and underline remain visible independently.
 - The archive button moves the active doc to `.agents/canvas/archive/`. It is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-regenerated, not user-owned, so it has no archive button.
 - The share button publishes the active doc to an unguessable, auto-expiring authenticated-viewer URL and copies a rich titled link to the clipboard. Like archive, it is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-generated, not shareable, so it has no share button. Clipboard success uses the dismissible `ClipboardNotice` channel (green), independent of the send `Waiting` and delivery-`Failed` banners: a successful publish shows `Shared — link copied` (or `Shared — link ready, copy it manually: <url>` when the async clipboard write is rejected), while a *failed* publish reuses the existing red `CanvasSendState.Failed` error banner. Success and failure are mutually exclusive — each result arm clears the other channel — so a red + green stack never renders. Share cannot start while a path copy is pending, and path copy cannot start until Share has completed its publish and clipboard phases. See `docs/spec/canvas-sharing.md` for the full publish/viewer/clipboard flow.
 

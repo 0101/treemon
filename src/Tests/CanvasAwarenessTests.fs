@@ -142,40 +142,7 @@ type CanvasTerminalLinkTests() =
           SessionIds = sessionIds
           Lifecycle = lifecycle }
 
-    [<Test>]
-    member _.``AgentDocs use persisted owners while SystemViews use the worktree routing target``() =
-        let agentDoc =
-            { makeDoc "status.html" "h1" with
-                OwnerSessionId = Some "owner" }
-        let systemView = makeSystemDoc "diff.html" "h2"
-        let liveness = bridgeLiveness (Some "system-target")
-
-        Assert.Multiple(fun () ->
-            Assert.That(
-                CanvasTerminalLink.effectiveSessionId
-                    liveness
-                    "r/target"
-                    agentDoc,
-                Is.EqualTo(Some "owner")
-            )
-            Assert.That(
-                CanvasTerminalLink.effectiveSessionId
-                    liveness
-                    "r/target"
-                    systemView,
-                Is.EqualTo(Some "system-target")
-            )
-            Assert.That(
-                CanvasTerminalLink.isConnectedToSelectedTerminal
-                    (Set.ofList [ "owner"; "system-target" ])
-                    liveness
-                    "r/target"
-                    systemView,
-                Is.True
-            ))
-
-    [<Test>]
-    member _.``Selecting a cross-worktree SystemView remembers its matching terminal without opening the pane``() =
+    let linkedSystemViewModel () =
         let focusWorktree = makeWorktree "r" "focus" []
         let targetWorktree =
             makeWorktree
@@ -224,16 +191,41 @@ type CanvasTerminalLinkTests() =
                 Canvas.BridgeLiveness =
                     bridgeLiveness (Some "system-target") }
 
+        model, targetPath, plainId, linkedId
+
+    [<Test>]
+    member _.``AgentDocs use persisted owners while SystemViews use the worktree routing target``() =
+        let agentDoc =
+            { makeDoc "status.html" "h1" with
+                OwnerSessionId = Some "owner" }
+        let systemView = makeSystemDoc "diff.html" "h2"
+        let liveness = bridgeLiveness (Some "system-target")
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                CanvasTerminalLink.effectiveSessionId
+                    liveness
+                    "r/target"
+                    agentDoc,
+                Is.EqualTo(Some "owner")
+            )
+            Assert.That(
+                CanvasTerminalLink.effectiveSessionId
+                    liveness
+                    "r/target"
+                    systemView,
+                Is.EqualTo(Some "system-target")
+            ))
+
+    [<Test>]
+    member _.``Selecting a cross-worktree SystemView remembers its matching terminal without opening the pane``() =
+        let model, targetPath, _, linkedId =
+            linkedSystemViewModel ()
+
         let selected, cmd =
             update
                 (SelectCanvasDoc("r/target", "diff.html"))
                 model
-
-        let messages = dispatchedMsgs cmd
-        let switched =
-            messages
-            |> List.fold (fun current message ->
-                update message current |> fst) selected
 
         Assert.Multiple(fun () ->
             Assert.That(selected.TerminalPaneOpen, Is.False)
@@ -250,14 +242,115 @@ type CanvasTerminalLinkTests() =
                 "Canvas selection must cancel pending terminal focus"
             )
             Assert.That(
-                messages,
-                Is.EqualTo([ SelectEmbeddedTerminal linkedId ])
+                TerminalPane.activeTerminalId
+                    (Some targetPath)
+                    selected.ActiveEmbeddedTerminals
+                    selected.EmbeddedTerminals,
+                Is.EqualTo(Some linkedId)
             )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``TerminalHost update locking leaves terminal selection unchanged``() =
+        let model, targetPath, plainId, _ =
+            linkedSystemViewModel ()
+
+        let selected, cmd =
+            update
+                (SelectCanvasDoc("r/target", "diff.html"))
+                { model with
+                    TerminalHostUpdate =
+                        TerminalHostUpdateModel.RequestInFlight }
+
+        Assert.Multiple(fun () ->
+            Assert.That(selected.TerminalPaneTarget, Is.EqualTo(None))
             Assert.That(
                 TerminalPane.activeTerminalId
                     (Some targetPath)
-                    switched.ActiveEmbeddedTerminals
-                    switched.EmbeddedTerminals,
+                    selected.ActiveEmbeddedTerminals
+                    selected.EmbeddedTerminals,
+                Is.EqualTo(Some plainId)
+            )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``Opening a cross-worktree diff selects its matching terminal without changing card focus``() =
+        let model, targetPath, _, linkedId =
+            linkedSystemViewModel ()
+        let initial =
+            { model with
+                Canvas.CanvasPaneOpen = true
+                Canvas.TargetWorktree = None }
+
+        let opened, _ =
+            update
+                (OpenWorktreeDiff "r/target")
+                initial
+
+        Assert.Multiple(fun () ->
+            Assert.That(opened.TerminalPaneOpen, Is.False)
+            Assert.That(opened.FocusedElement, Is.EqualTo(initial.FocusedElement))
+            Assert.That(opened.Canvas.TargetWorktree, Is.EqualTo(Some "r/target"))
+            Assert.That(opened.TerminalPaneTarget, Is.EqualTo(Some targetPath))
+            Assert.That(
+                TerminalPane.activeTerminalId
+                    (Some targetPath)
+                    opened.ActiveEmbeddedTerminals
+                    opened.EmbeddedTerminals,
+                Is.EqualTo(Some linkedId)
+            ))
+
+    [<Test>]
+    member _.``Opening an owned AgentDoc selects its matching terminal``() =
+        let focusWorktree = makeWorktree "r" "focus" []
+        let ownedDoc =
+            { makeDoc "status.html" "h1" with
+                OwnerSessionId = Some "owner" }
+        let targetWorktree =
+            makeWorktree "r" "target" [ ownedDoc ]
+        let targetPath = targetWorktree.Path
+        let plainId = EmbeddedTerminalId "plain"
+        let linkedId = EmbeddedTerminalId "linked"
+        let model =
+            { defaultModel with
+                Repos =
+                    [ makeRepo
+                          "r"
+                          [ focusWorktree
+                            targetWorktree ] ]
+                FocusedElement = Some(Card "r/focus")
+                Canvas.CanvasPaneOpen = true
+                EmbeddedTerminals =
+                    { Tabs =
+                        [ terminal
+                              "plain"
+                              targetPath
+                              []
+                              (EmbeddedTerminalLifecycle.Running
+                                  "http://127.0.0.1:61231/")
+                          terminal
+                              "linked"
+                              targetPath
+                              [ "owner" ]
+                              (EmbeddedTerminalLifecycle.Running
+                                  "http://127.0.0.1:61232/") ] }
+                ActiveEmbeddedTerminals =
+                    Map.ofList [ targetPath, plainId ] }
+
+        let opened, _ =
+            update
+                (OpenCanvasDoc("r/target", "status.html"))
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(opened.TerminalPaneOpen, Is.False)
+            Assert.That(opened.FocusedElement, Is.EqualTo(Some(Card "r/target")))
+            Assert.That(opened.TerminalPaneTarget, Is.EqualTo(Some targetPath))
+            Assert.That(
+                TerminalPane.activeTerminalId
+                    (Some targetPath)
+                    opened.ActiveEmbeddedTerminals
+                    opened.EmbeddedTerminals,
                 Is.EqualTo(Some linkedId)
             ))
 

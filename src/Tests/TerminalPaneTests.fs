@@ -1916,6 +1916,7 @@ type TerminalFocusTests() =
 
         let updated, _ =
             CanvasUpdate.openCanvasDoc
+                true
                 (WorktreePath.value second)
                 doc.Filename
                 { focusModel with

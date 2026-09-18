@@ -775,6 +775,12 @@ type CanvasPaneTests() =
                   LastModified = DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero)
                   OwnerSessionId = None
                   Kind = CanvasDocKind.SystemView }
+            let linkedViewedDoc: CanvasDoc =
+                { Filename = "notes.html"
+                  ContentHash = "notes-linked"
+                  LastModified = DateTimeOffset(2026, 9, 18, 11, 0, 0, TimeSpan.Zero)
+                  OwnerSessionId = Some linkedSession
+                  Kind = CanvasDocKind.AgentDoc }
 
             do!
                 this.Page.RouteAsync(
@@ -810,7 +816,10 @@ type CanvasPaneTests() =
                                                                     | _ -> doc)
 
                                                             { worktree with
-                                                                CanvasDocs = docs @ [ diffDoc ] }
+                                                                CanvasDocs =
+                                                                    docs
+                                                                    @ [ diffDoc
+                                                                        linkedViewedDoc ] }
                                                         else
                                                             worktree) }) }
 
@@ -951,6 +960,19 @@ type CanvasPaneTests() =
                 Does.Not.Contain("canvas-terminal-linked"),
                 "A live owner outside TerminalHost must not appear linked"
             )
+
+            let linkedViewedTab =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-tab",
+                    PageLocatorOptions(HasText = "notes"))
+            let! linkedViewedClass =
+                linkedViewedTab.GetAttributeAsync("class")
+            Assert.That(linkedViewedClass, Does.Contain("canvas-tab-viewed"))
+            Assert.That(linkedViewedClass, Does.Contain("canvas-terminal-linked"))
+            do!
+                Assertions.Expect(
+                    linkedViewedTab.Locator(".canvas-tab-content"))
+                    .ToHaveCSSAsync("opacity", "0.5")
 
             let linkedSystemTabs =
                 this.Page.Locator(
