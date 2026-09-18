@@ -225,7 +225,8 @@ type EmbeddedTerminalTab =
       /// Display-safe activity from the representative live Copilot session owned by this exact
       /// terminal, using the freshest reported intent or session title.
       ReportedActivity: string option
-      /// Distinct durable Copilot sessions currently live in this exact terminal.
+      /// Distinct, deterministically sorted durable Copilot sessions currently live in this exact
+      /// terminal.
       SessionIds: string list
       Lifecycle: EmbeddedTerminalLifecycle }
 

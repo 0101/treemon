@@ -760,6 +760,220 @@ type CanvasPaneTests() =
         }
 
     [<Test>]
+    [<Category("CanvasTerminalLinks")>]
+    member this.``Canvas links select the matching terminal without opening or focusing the Terminal pane``() =
+        task {
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let worktreePath = WorktreePath "Q:/code/treemon/multirepo"
+            let linkedSession = "linked-session"
+            let externalSession = "external-session"
+            let plainTerminal = EmbeddedTerminalId "plain-terminal"
+            let linkedTerminal = EmbeddedTerminalId "linked-terminal"
+            let diffDoc: CanvasDoc =
+                { Filename = "diff.html"
+                  ContentHash = "diff-linked"
+                  LastModified = DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero)
+                  OwnerSessionId = None
+                  Kind = CanvasDocKind.SystemView }
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getWorktrees",
+                    Func<IRoute, Task>(fun route ->
+                        task {
+                            let! upstream = route.FetchAsync()
+                            let! json = upstream.TextAsync()
+                            let response =
+                                JsonConvert.DeserializeObject<DashboardResponse>(json, converter)
+                            let transformed =
+                                { response with
+                                    Repos =
+                                        response.Repos
+                                        |> List.map (fun repo ->
+                                            { repo with
+                                                Worktrees =
+                                                    repo.Worktrees
+                                                    |> List.map (fun worktree ->
+                                                        if worktree.Path = worktreePath then
+                                                            let docs =
+                                                                worktree.CanvasDocs
+                                                                |> List.map (fun doc ->
+                                                                    match doc.Filename with
+                                                                    | "dashboard.html" ->
+                                                                        { doc with
+                                                                            OwnerSessionId =
+                                                                                Some linkedSession }
+                                                                    | "status.html" ->
+                                                                        { doc with
+                                                                            OwnerSessionId =
+                                                                                Some externalSession }
+                                                                    | _ -> doc)
+
+                                                            { worktree with
+                                                                CanvasDocs = docs @ [ diffDoc ] }
+                                                        else
+                                                            worktree) }) }
+
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = JsonConvert.SerializeObject(transformed, converter)
+                                    )
+                                )
+                        } :> Task)
+                )
+
+            let terminalSnapshot =
+                { Tabs =
+                    [ { Id = plainTerminal
+                        Worktree = worktreePath
+                        ReportedActivity = Some "Plain shell"
+                        SessionIds = []
+                        Lifecycle =
+                            EmbeddedTerminalLifecycle.Running
+                                $"{ServerFixture.canvasUrl}/fixture-terminal-plain" }
+                      { Id = linkedTerminal
+                        Worktree = worktreePath
+                        ReportedActivity = Some "Owned session"
+                        SessionIds = [ linkedSession ]
+                        Lifecycle =
+                            EmbeddedTerminalLifecycle.Running
+                                $"{ServerFixture.canvasUrl}/fixture-terminal-linked" } ] }
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getEmbeddedTerminals",
+                    Func<IRoute, Task>(fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body =
+                                    JsonConvert.SerializeObject(
+                                        terminalSnapshot,
+                                        converter
+                                    )
+                            )
+                        ))
+                )
+
+            let liveness =
+                Map.ofList [
+                    WorktreePath.value worktreePath,
+                    { IsAlive = true
+                      SessionId = Some externalSession
+                      LiveSessionIds =
+                        [ externalSession
+                          linkedSession ]
+                      SystemViewTargetSessionId =
+                        Some linkedSession }
+                ]
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getBridgeLiveness",
+                    Func<IRoute, Task>(fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body =
+                                    JsonConvert.SerializeObject(
+                                        liveness,
+                                        converter
+                                    )
+                            )
+                        ))
+                )
+
+            let! _ = this.Page.ReloadAsync()
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+
+            let terminalToggle =
+                this.Page.Locator(
+                    ".header-controls .ctrl-btn",
+                    PageLocatorOptions(HasText = "Terminal"))
+
+            do! terminalToggle.ClickAsync()
+            let terminalPane = this.Page.Locator(".terminal-pane.open")
+            do! terminalPane.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do!
+                Assertions.Expect(
+                    terminalPane.Locator(".terminal-tab"))
+                    .ToHaveCountAsync(2)
+            do!
+                Assertions.Expect(
+                    terminalPane.Locator(".terminal-tab.selected .terminal-tab-label"))
+                    .ToHaveTextAsync("Plain shell")
+
+            do! terminalToggle.ClickAsync()
+            do!
+                Assertions.Expect(
+                    this.Page.Locator(".terminal-pane.open"))
+                    .ToHaveCountAsync(0)
+
+            do! ensureCanvasPaneOpen this.Page
+            do! (canvasTabBar this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do!
+                Assertions.Expect(
+                    this.Page.Locator(".canvas-pane .canvas-terminal-linked"))
+                    .ToHaveCountAsync(0)
+
+            let dashboardTab =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-tab",
+                    PageLocatorOptions(HasText = "dashboard"))
+
+            do! dashboardTab.ClickAsync()
+            do! Assertions.Expect(dashboardTab).ToBeFocusedAsync()
+            do!
+                Assertions.Expect(
+                    this.Page.Locator(".terminal-pane.open"))
+                    .ToHaveCountAsync(0)
+
+            do! terminalToggle.ClickAsync()
+            do! terminalPane.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do!
+                Assertions.Expect(
+                    terminalPane.Locator(".terminal-tab.selected .terminal-tab-label"))
+                    .ToHaveTextAsync("Owned session")
+
+            let! dashboardClass = dashboardTab.GetAttributeAsync("class")
+            Assert.That(dashboardClass, Does.Contain("active"))
+            Assert.That(dashboardClass, Does.Contain("canvas-terminal-linked"))
+
+            let statusTab =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-tab",
+                    PageLocatorOptions(HasText = "status"))
+            let! statusClass = statusTab.GetAttributeAsync("class")
+            Assert.That(
+                statusClass,
+                Does.Not.Contain("canvas-terminal-linked"),
+                "A live owner outside TerminalHost must not appear linked"
+            )
+
+            let linkedSystemTabs =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-system-tab.canvas-terminal-linked")
+            do! Assertions.Expect(linkedSystemTabs).ToHaveCountAsync(2)
+
+            let! dashboardTitle = dashboardTab.GetAttributeAsync("title")
+            let! systemTabs = linkedSystemTabs.AllAsync()
+
+            Assert.That(
+                dashboardTitle,
+                Does.EndWith("Connected to selected terminal")
+            )
+
+            for systemTab in systemTabs do
+                let! title = systemTab.GetAttributeAsync("title")
+                Assert.That(
+                    title,
+                    Does.EndWith("Connected to selected terminal")
+                )
+        }
+
+    [<Test>]
     member this.``Single-doc worktree shows a labeled tab with a compact age``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch

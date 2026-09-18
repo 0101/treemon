@@ -117,18 +117,65 @@ let setWorkspaceWidth (width: WorkspaceWidth) (model: Model) =
     { model with Canvas.WorkspaceWidth = width },
     Cmd.OfAsync.attempt worktreeApi.Value.saveWorkspaceWidth width (fun _ -> NoOp)
 
+let private matchingCanvasTerminal
+    (scopedKey: string)
+    (filename: string)
+    (model: Model)
+    =
+    findWorktree scopedKey model
+    |> Option.bind (fun worktree ->
+        worktree.CanvasDocs
+        |> List.tryFind (fun doc -> doc.Filename = filename)
+        |> Option.bind (
+            CanvasTerminalLink.effectiveSessionId
+                model.Canvas.BridgeLiveness
+                scopedKey
+        )
+        |> Option.bind (fun sessionId ->
+            TerminalPane.tryFindSessionTerminal
+                worktree.Path
+                sessionId
+                model.ActiveEmbeddedTerminals
+                model.EmbeddedTerminals)
+        |> Option.map (fun terminalId ->
+            worktree.Path,
+            terminalId))
+
 let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
+    let matchingTerminal =
+        matchingCanvasTerminal scopedKey filename model
+
     let targeted =
         { model with
             Canvas.TargetWorktree =
                 if model.Canvas.TargetWorktree.IsSome then Some scopedKey
-                else None }
-    revealCanvasDoc
-        (if model.Canvas.CanvasPaneOpen then Visible else Hidden)
-        scopedKey
-        filename
-        model
-        targeted
+                else None
+            TerminalPaneTarget =
+                matchingTerminal
+                |> Option.map fst
+                |> Option.orElse model.TerminalPaneTarget
+            EmbeddedTerminalViewStates =
+                match matchingTerminal with
+                | Some _ ->
+                    model.EmbeddedTerminalViewStates
+                    |> TerminalPane.cancelAllViewFocus
+                | None -> model.EmbeddedTerminalViewStates }
+
+    let selected, revealCmd =
+        revealCanvasDoc
+            (if model.Canvas.CanvasPaneOpen then Visible else Hidden)
+            scopedKey
+            filename
+            model
+            targeted
+
+    selected,
+    Cmd.batch [
+        revealCmd
+        matchingTerminal
+        |> Option.map (snd >> SelectEmbeddedTerminal >> Cmd.ofMsg)
+        |> Option.defaultValue Cmd.none
+    ]
 
 /// The single chokepoint for setting `FocusedElement`. The terminal pane derives its visible tabs
 /// from this focus while retaining each worktree's terminal selection independently. When

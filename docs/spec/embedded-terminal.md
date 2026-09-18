@@ -78,16 +78,21 @@ focuses a terminal when none exists; the next card selection restores normal foc
 tab strip shows only the targeted worktree's terminals and labels each one with the freshest
 display-safe activity from that exact terminal's representative live Copilot session: reported
 `assistant.intent` or session title.
+Each tab also exposes the distinct live durable Copilot `SessionId` values from its exact terminal
+origins, sorted ordinally. Duplicate physical instances of one durable session contribute one ID;
+closed, stale, external, and plain-shell sessions contribute none.
 Until either exists, the label falls back to `Terminal 1`, `Terminal 2`, and so on in opening order.
 It remembers the selected terminal independently for each worktree. **New** starts another terminal
-for the targeted worktree; the empty state offers **Start terminal**. Switching worktrees hides the
-other worktrees' tabs without closing their terminals, and running iframes stay mounted so their
-browser state survives. Closing the last visible tab leaves the pane open in its empty state; only
-the persistent top-bar **Terminal** control hides or shows the pane, using the same active treatment
-as the **Canvas** control. Middle-clicking a tab or pressing Ctrl+W while its terminal has focus
-invokes the same exact-terminal close action as its close button. Close removes the tab and iframe
-immediately and remembers that exact terminal ID so stale registry, start, or cleanup responses
-cannot restore it while authoritative teardown continues. A registry read that no longer lists the
+for the targeted worktree; the empty state offers **Start terminal**. Selecting a canvas doc whose
+effective session matches a listed terminal changes this remembered selection without opening,
+revealing, or focusing the Terminal pane. Switching worktrees hides the other worktrees' tabs
+without closing their terminals, and running iframes stay mounted so their browser state survives.
+Closing the last visible tab leaves the pane open in its empty state; only the persistent top-bar
+**Terminal** control hides or shows the pane, using the same active treatment as the **Canvas**
+control. Middle-clicking a tab or pressing Ctrl+W while its terminal has focus invokes the same
+exact-terminal close action as its close button. Close removes the tab and iframe immediately and
+remembers that exact terminal ID so stale registry, start, or cleanup responses cannot restore it
+while authoritative teardown continues. A registry read that no longer lists the
 terminal confirms teardown and releases the dismissal; a failed teardown releases it at once so the
 next authoritative registry read restores the tab.
 
@@ -570,7 +575,7 @@ and dynamically allocated non-production ports. Tests never bind production port
 | `src/Server/SessionActivity.fs` | Per-process instance lifecycle fold, validated session/origin identities, liveness, and closure |
 | `src/Server/LifecycleDiagnostics.fs` | Bounded structured presence, bridge, graceful-shutdown, exact-closure, and teardown diagnostics |
 | `src/Server/SessionActivityProtocol.fs`, `SessionActivityIngestion.fs`, and `SessionActivityService.fs` | Exact activity wire parsing, fold application, acknowledged presence, bounded live state, and mailbox-serialized terminal ownership queries |
-| `src/Server/TerminalSessionActivity.fs` | Exact terminal-origin projection for tab activity, live-terminal reuse, and one durable restart session per terminal |
+| `src/Server/TerminalSessionActivity.fs` | Exact terminal-origin projection for tab activity and distinct live SessionIds, live-terminal reuse, and one durable restart session per terminal |
 | `src/Server/SessionActivityStoreSchema.fs` and `SessionActivityStore.fs` | Durable process-instance schema/migration, resume identity, event dedupe keys, and retention |
 | `src/Extension/reporting/extension.mjs` | Acknowledged process presence, passive activity, heartbeat, background lifecycle, and shutdown reports |
 | `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `src/Server/SessionBridge.fs` | Shared exact registration plus capability-guarded graceful shutdown endpoint and bounded typed server control client |
@@ -578,7 +583,7 @@ and dynamically allocated non-production ports. Tests never bind production port
 | `src/Server/Program.fs` | Host/API lifecycle and TerminalHost restart-session query wiring |
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/AppTypes.fs` and `src/Client/App.fs` | Reconnect view generation, Elmish messages, guarded load completion, and focus effect |
-| `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
+| `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, activity labels, live SessionIds, Canvas-driven selection without pane focus, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus update transaction, command delivery, control rejection, UTF-8 frame boundaries, crash, security, and cleanup coverage |
 | `src/Tests/SessionIsolationVerifier/` and `scripts/verify-session-isolation.ps1` | Durable five-phase concurrent same-session process-isolation harness and clean-checkout runner |
 | `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
