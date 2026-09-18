@@ -23,6 +23,7 @@ let private tab terminalId path lifecycle =
     { Id = terminalId
       Worktree = path
       ReportedActivity = None
+      SessionIds = []
       Lifecycle = lifecycle }
 
 let private running terminalId path port =

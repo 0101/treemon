@@ -1846,7 +1846,7 @@ type TerminalOwnershipQueryTests() =
         )
 
     [<Test>]
-    member _.``terminal snapshot titles use each exact terminal's representative activity``() =
+    member _.``terminal snapshot projects representative activity and distinct live session IDs``() =
         let now = ts "2026-03-01T10:05:00Z"
         let at clock = ts $"2026-03-01T{clock}Z"
         let message text clock = Some { Text = text; At = at clock }
@@ -1860,6 +1860,7 @@ type TerminalOwnershipQueryTests() =
             { Id = EmbeddedTerminalId(TerminalSessionId.value terminalSessionId)
               Worktree = WorktreePath "C:/wt/a"
               ReportedActivity = None
+              SessionIds = []
               Lifecycle = EmbeddedTerminalLifecycle.Running $"http://127.0.0.1:{port}/" }
 
         let closed =
@@ -1875,6 +1876,9 @@ type TerminalOwnershipQueryTests() =
                       (message "Idle terminal work" "10:03:00") None
                   stored terminalA "working-a" SessionLevelStatus.Working (at "10:02:00") (at "10:04:30")
                       (message "Implementing exact terminal titles" "10:04:30") None
+                  { stored terminalA "working-a" SessionLevelStatus.Idle (at "10:01:00") (at "10:04:00")
+                        None None with
+                      ProcessIdentity = syntheticProcessIdentityForSessionId "working-a-copy" }
                   stored terminalB "working-b" SessionLevelStatus.Working (at "10:04:00") (at "10:04:30")
                       None (message "Session title only" "10:04:00")
                   closed
@@ -1885,11 +1889,18 @@ type TerminalOwnershipQueryTests() =
                       (message "Wrong terminal" "10:04:30") None ]
 
         Assert.That(
-            decorated.Tabs |> List.map (fun tab -> tab.Id, tab.ReportedActivity),
+            decorated.Tabs
+            |> List.map (fun tab ->
+                tab.Id,
+                tab.ReportedActivity,
+                tab.SessionIds),
             Is.EqualTo(
                 [ EmbeddedTerminalId(TerminalSessionId.value terminalA),
-                  Some "Implementing exact terminal titles"
-                  EmbeddedTerminalId(TerminalSessionId.value terminalB), Some "Session title only" ]
+                  Some "Implementing exact terminal titles",
+                  [ "idle-a"; "working-a" ]
+                  EmbeddedTerminalId(TerminalSessionId.value terminalB),
+                  Some "Session title only",
+                  [ "working-b" ] ]
             )
         )
 

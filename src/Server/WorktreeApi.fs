@@ -44,6 +44,21 @@ let loadFixtures (path: string) : Result<FixtureData, string> =
     with ex ->
         Error $"Failed to load fixture file '{path}': {ex.Message}"
 
+let internal bridgeLivenessAt
+    (now: DateTime)
+    (sessionInstances: StoredInstance seq)
+    (worktreePaths: string list)
+    =
+    SessionBridge.getAllLivenessAt now worktreePaths
+    |> Map.map (fun worktreePath liveness ->
+        let target =
+            SessionBridge.canvasSessionsForWorktreeAt now worktreePath
+            |> CanvasBridge.selectSystemViewTarget sessionInstances worktreePath
+
+        { liveness with
+            SystemViewTargetSessionId =
+                target |> Option.map SessionId.value })
+
 let readOnlyApi
     (modeName: string)
     (getWorktrees: unit -> Async<DashboardResponse>)
@@ -1254,7 +1269,19 @@ let internal worktreeApiWithLaunch
                   shareCanvasDocImpl req)
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
           loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
-          getBridgeLiveness = fun paths -> async { return SessionBridge.getAllLiveness paths }
+          getBridgeLiveness = fun paths ->
+              async {
+                  let! state =
+                      agent.PostAndAsyncReply(
+                          SchedulerState.StateMsg.GetState
+                      )
+
+                  return
+                      bridgeLivenessAt
+                          DateTime.UtcNow
+                          (state.SessionInstances |> Map.values)
+                          paths
+              }
           // Roots are managed restart-to-apply: persist to global config only (no scheduler
           // message, no live-roots read). getWorktrees/createWorktree/path-validation keep using
           // the `rootPaths` captured at startup above — correct, since roots only change across

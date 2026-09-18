@@ -60,6 +60,34 @@ let internal beginPendingLaunch worktreePath =
 let internal cancelPendingLaunch worktreePath =
     launchAgent.PostAndAsyncReply(fun reply -> CancelPendingLaunch(normalizePath worktreePath, reply))
 
+let internal selectSystemViewTarget
+    (sessionInstances: StoredInstance seq)
+    (worktreePath: string)
+    (liveSessions: SessionBridge.SessionEntry list)
+    =
+    let liveSessionIds =
+        liveSessions
+        |> List.choose _.SessionId
+        |> Set.ofList
+
+    let mostRecentlyActive =
+        sessionInstances
+        |> Seq.filter (fun stored ->
+            stored.ClosedAt.IsNone
+            && WorktreePath.value stored.WorktreePath = worktreePath
+            && liveSessionIds.Contains stored.SessionId)
+        |> List.ofSeq
+        |> StoredInstance.tryMostRecentActivity
+        |> Option.map _.SessionId
+
+    let freshestReachable () =
+        liveSessions
+        |> List.filter (fun entry -> entry.SessionId |> Option.isSome)
+        |> List.sortByDescending _.RegisteredAt
+        |> List.tryPick _.SessionId
+
+    mostRecentlyActive |> Option.orElseWith freshestReachable
+
 /// Which session receives an interaction from a canvas document.
 ///
 /// An AgentDoc has a real author, so it keeps its persisted owner. A SystemView is server-generated
@@ -100,28 +128,7 @@ let internal resolveTarget
             let liveSessions =
                 SessionBridge.canvasSessionsForWorktreeAt now worktreePath
 
-            let liveSessionIds =
-                liveSessions
-                |> List.choose _.SessionId
-                |> Set.ofList
-
-            let mostRecentlyActive =
-                sessionInstances
-                |> Seq.filter (fun stored ->
-                    stored.ClosedAt.IsNone
-                    && WorktreePath.value stored.WorktreePath = worktreePath
-                    && liveSessionIds.Contains stored.SessionId)
-                |> List.ofSeq
-                |> StoredInstance.tryMostRecentActivity
-                |> Option.map _.SessionId
-
-            let freshestReachable () =
-                liveSessions
-                |> List.filter (fun entry -> entry.SessionId |> Option.isSome)
-                |> List.sortByDescending _.RegisteredAt
-                |> List.tryPick _.SessionId
-
-            return mostRecentlyActive |> Option.orElseWith freshestReachable
+            return selectSystemViewTarget sessionInstances worktreePath liveSessions
     }
 
 /// What routing decided, in the caller's terms. `QueuedNeedingSession` means nothing could receive

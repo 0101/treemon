@@ -899,6 +899,48 @@ type SystemViewInteractionRoutingTests() =
             Assert.That(target, Is.EqualTo(Some(SessionId newer))))
 
     [<Test>]
+    member _.``Bridge liveness projects the activity-selected SystemView target, not the freshest registration``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-projection"
+            let active = uniqueSid "active"
+            let freshest = uniqueSid "freshest"
+
+            let activeIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:1/inject" (Some active)
+
+            Thread.Sleep 15
+
+            let freshestIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:2/inject" (Some freshest)
+
+            let statuses =
+                [ storedAt activeIdentity active path "2026-03-01T12:05:00Z"
+                  storedAt freshestIdentity freshest path "2026-03-01T12:00:00Z" ]
+
+            let liveness =
+                Server.WorktreeApi.bridgeLivenessAt
+                    DateTime.UtcNow
+                    statuses
+                    [ path ]
+                |> Map.find path
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    liveness.SessionId,
+                    Is.EqualTo(Some freshest),
+                    "Aggregate status still reports the freshest bridge registration"
+                )
+                Assert.That(
+                    liveness.SystemViewTargetSessionId,
+                    Is.EqualTo(Some active),
+                    "SystemView metadata must use the same activity-aware selection as delivery"
+                )
+                Assert.That(
+                    liveness.LiveSessionIds,
+                    Is.EqualTo(List.sort [ active; freshest ])
+                )))
+
+    [<Test>]
     member _.``A SystemView ignores a more recently active session that is not live``() =
         withTempCwd (fun () ->
             let path = uniquePath "sv-dead"
