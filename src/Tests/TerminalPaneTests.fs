@@ -454,6 +454,7 @@ let private focusModel : Model =
       IsLoading = false
       HasError = false
       SortMode = ByActivity
+      TerminalHostUpdate = TerminalHostUpdateModel.initial
       IsCompact = false
       SchedulerEvents = []
       LatestByCategory = Map.empty
@@ -497,6 +498,104 @@ let private focusModel : Model =
       WorktreeSearch = WorktreeSearch.initial
       EmbeddedTerminalPollInFlight = false }
 
+let private dashboardResponse terminalHostUpdate =
+    { Repos = []
+      SchedulerEvents = []
+      LatestByCategory = Map.empty
+      AppVersion = "test"
+      DeployBranch = None
+      SystemMetrics = None
+      EditorName = "VS Code"
+      WorktreeSkills = []
+      CollapsedRepos = Set.empty
+      TerminalPaneOpen = false
+      CanvasPaneOpen = false
+      OverviewPanelOpen = false
+      WorkspaceWidth = WorkspaceWidth.EqualThirds
+      TerminalHostUpdate = terminalHostUpdate }
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type TerminalHostUpdateStateTests() =
+
+    [<Test>]
+    member _.``Stale unavailable refresh cannot settle a locally requested update``() =
+        let ready =
+            { focusModel with
+                TerminalHostUpdate =
+                    TerminalHostUpdateModel.Observed
+                        TerminalHostUpdateState.Available }
+
+        let started, _ =
+            App.update UpdateTerminalHost ready
+
+        let refreshed, _ =
+            App.update
+                (DataLoaded(
+                    dashboardResponse
+                        TerminalHostUpdateState.Unavailable,
+                    DateTimeOffset.UtcNow
+                ))
+                started
+
+        Assert.That(
+            refreshed.TerminalHostUpdate,
+            Is.EqualTo(
+                TerminalHostUpdateModel.RequestInFlight
+            )
+        )
+
+    [<Test>]
+    member _.``Server-observed update settles from an unavailable refresh``() =
+        let updating =
+            { focusModel with
+                TerminalHostUpdate =
+                    TerminalHostUpdateModel.Observed
+                        TerminalHostUpdateState.Updating }
+
+        let refreshed, _ =
+            App.update
+                (DataLoaded(
+                    dashboardResponse
+                        TerminalHostUpdateState.Unavailable,
+                    DateTimeOffset.UtcNow
+                ))
+                updating
+
+        Assert.That(
+            refreshed.TerminalHostUpdate,
+            Is.EqualTo TerminalHostUpdateModel.initial
+        )
+
+    [<Test>]
+    member _.``Immediate acknowledgement installs observed Updating and blocks duplicates``() =
+        let acknowledged, _ =
+            App.update
+                (TerminalHostUpdateCompleted(
+                    TerminalHostUpdateState.Updating
+                ))
+                { focusModel with
+                    TerminalHostUpdate =
+                        TerminalHostUpdateModel.RequestInFlight }
+
+        let duplicate, command =
+            App.update UpdateTerminalHost acknowledged
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                acknowledged.TerminalHostUpdate,
+                Is.EqualTo(
+                    TerminalHostUpdateModel.Observed
+                        TerminalHostUpdateState.Updating
+                )
+            )
+            Assert.That(
+                duplicate,
+                Is.EqualTo acknowledged
+            )
+            Assert.That(command, Is.Empty))
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -505,6 +604,140 @@ type TerminalFocusTests() =
     let subscriptionKeys model =
         App.appSubscriptions model
         |> List.map (fst >> String.concat "/")
+
+    [<Test>]
+    member _.``TerminalHost update lock ignores every user terminal entry point``() =
+        let locked =
+            { focusModel with
+                TerminalHostUpdate =
+                    TerminalHostUpdateModel.RequestInFlight }
+
+        let terminalActions =
+            [ UpdateTerminalHost
+              OpenTerminal first
+              OpenEmbeddedTerminal first
+              StartEmbeddedTerminal first
+              StartAgent first
+              StartEmbeddedTerminalFromTab firstTwo
+              SelectEmbeddedTerminal firstOne
+              ReconnectEmbeddedTerminalView firstTwo
+              NotifyEmbeddedTerminalVisibility(
+                  firstTwo,
+                  "http://127.0.0.1:61232",
+                  TerminalVisibilitySignal.Activate
+              )
+              CycleEmbeddedTerminal(firstTwo, CycleDirection.Next)
+              CloseEmbeddedTerminal firstTwo
+              ToggleTerminalPane
+              FocusSession first
+              ResumeSession first
+              LaunchAction(first, ActionKind.CreatePr)
+              KeyPressed("t", false)
+              KeyPressed("Enter", false) ]
+
+        let subscriptions = subscriptionKeys locked
+        let _, deactivateCommand =
+            App.update
+                (NotifyEmbeddedTerminalVisibility(
+                    firstTwo,
+                    "http://127.0.0.1:61232",
+                    TerminalVisibilitySignal.Deactivate
+                ))
+                locked
+
+        Assert.Multiple(fun () ->
+            terminalActions
+            |> List.iter (fun action ->
+                let updated, command = App.update action locked
+                let context = $"Terminal action %A{action}"
+
+                Assert.That(updated, Is.EqualTo locked, context)
+                Assert.That(command, Is.Empty, context))
+
+            Assert.That(
+                subscriptions,
+                Has.None.EqualTo("terminal-shortcuts")
+            )
+            Assert.That(
+                subscriptions,
+                Has.None.StartsWith("terminal-visible/")
+            )
+            Assert.That(
+                subscriptions,
+                Does.Contain("global-keyboard/blocked")
+            )
+            Assert.That(
+                List.length deactivateCommand,
+                Is.EqualTo 1,
+                "locking must still deactivate the previously visible terminal"
+            ))
+
+    [<Test>]
+    member _.``TerminalHost update lock suppresses queued launch and late terminal focus``() =
+        let exact = terminalId "completed-during-update"
+        let snapshot =
+            { Tabs =
+                focusModel.EmbeddedTerminals.Tabs
+                @ [ running exact first 61241 ] }
+
+        let locked =
+            { focusModel with
+                TerminalHostUpdate =
+                    TerminalHostUpdateModel.RequestInFlight
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        first,
+                        TerminalStartState.StartingWithQueuedAgents(
+                            true,
+                            1
+                        )
+                    ]
+                EmbeddedTerminalViewStates =
+                    Map.ofList [
+                        firstTwo,
+                        { Generation = 1
+                          FocusAfterLoad = true }
+                    ] }
+
+        let completed, completionCommand =
+            App.update
+                (AgentStarted(
+                    first,
+                    Ok
+                        { Snapshot = snapshot
+                          TerminalId = exact }
+                ))
+                locked
+
+        let loaded, focusCommand =
+            App.update
+                (EmbeddedTerminalViewLoaded(firstTwo, 1))
+                locked
+
+        let failed, failureCommand =
+            App.update
+                (EmbeddedTerminalRequestFailed(
+                    first,
+                    "request failed during update"
+                ))
+                locked
+
+        Assert.Multiple(fun () ->
+            Assert.That(completionCommand, Is.Empty)
+            Assert.That(
+                tryStartState first completed.EmbeddedTerminalStarts,
+                Is.EqualTo None
+            )
+            Assert.That(focusCommand, Is.Empty)
+            Assert.That(
+                loaded.EmbeddedTerminalViewStates[firstTwo].FocusAfterLoad,
+                Is.False
+            )
+            Assert.That(failureCommand, Is.Empty)
+            Assert.That(
+                tryStartState first failed.EmbeddedTerminalStarts,
+                Is.EqualTo None
+            ))
 
     [<Test>]
     member _.``T key opens or focuses the embedded terminal for the focused card``() =

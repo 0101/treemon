@@ -71,7 +71,7 @@ type ArchiveUpdateTests() =
             ArchiveViews.update
                 unusedApi
                 (ArchiveViews.OpCompleted(
-                    Error "TerminalHost replacement is in progress"
+                    Error "TerminalHost update is in progress"
                 ))
 
         Assert.Multiple(fun () ->
@@ -447,7 +447,7 @@ type ArchiveE2ETests() =
 
     let makeDashboardJson (worktrees: string list) =
         let wts = worktrees |> String.concat ","
-        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true,"BaseBranch":"main"}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","WorktreeSkills":[],"CollapsedRepos":[],"TerminalPaneOpen":false,"CanvasPaneOpen":false,"OverviewPanelOpen":false,"WorkspaceWidth":"EqualThirds"}}"""
+        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true,"BaseBranch":"main"}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","WorktreeSkills":[],"CollapsedRepos":[],"TerminalPaneOpen":false,"CanvasPaneOpen":false,"OverviewPanelOpen":false,"WorkspaceWidth":"EqualThirds","TerminalHostUpdate":"Unavailable"}}"""
 
     let emptySyncStatus = "{}"
 

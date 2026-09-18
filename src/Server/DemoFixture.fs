@@ -458,7 +458,8 @@ let private baseDashboard: DashboardResponse =
       TerminalPaneOpen = false
       CanvasPaneOpen = false
       OverviewPanelOpen = false
-      WorkspaceWidth = WorkspaceWidth.EqualThirds }
+      WorkspaceWidth = WorkspaceWidth.EqualThirds
+      TerminalHostUpdate = TerminalHostUpdateState.Unavailable }
 
 let private baseFixture: FixtureData =
     { Worktrees = baseDashboard

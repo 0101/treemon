@@ -600,6 +600,7 @@ let main args =
                       ActivityStore = None
                       SnapshotStore = None
                       AutoSyncStore = None
+                      TerminalHostRestartSessions = None
                       WorktreeRoots = worktreeRoots
                       TestFixtures = fixtures
                       AppVersion = appVersion
@@ -668,6 +669,13 @@ let main args =
                           ActivityStore = Some store
                           SnapshotStore = Some activity.SnapshotStore
                           AutoSyncStore = Some autoSyncStore
+                          TerminalHostRestartSessions =
+                            Some(fun terminals ->
+                                TerminalSessionActivity.restartSessions
+                                    CodingToolStatus.readConfiguredProvider
+                                    activity.Components.Service.QueryTerminalActivity
+                                    DateTimeOffset.UtcNow
+                                    terminals)
                           WorktreeRoots = worktreeRoots
                           TestFixtures = fixtures
                           AppVersion = appVersion
@@ -736,53 +744,34 @@ let main args =
             use_gzip
         }
 
-    // The HTTP activity endpoint must be listening before replacement reconciliation can query
-    // startup-pending process identities, so this lifecycle handle is assigned only after host.Start.
-    let mutable replacementLoop: BackgroundLoop.Running option = None
-
     try
+        let canvasHost =
+            match schedulerAgent, config.CanvasPort with
+            | Some agent, Some canvasPort ->
+                Some(CanvasDocServer.start agent canvasPort)
+            | _ -> None
+
         try
-            let canvasHost =
-                match schedulerAgent, config.CanvasPort with
-                | Some agent, Some canvasPort -> Some(CanvasDocServer.start agent canvasPort)
-                | _ -> None
+            use host = app.Build()
+            let applicationLifetime =
+                host.Services.GetService(typeof<IHostApplicationLifetime>)
+                :?> IHostApplicationLifetime
 
-            try
-                use host = app.Build()
-                let applicationLifetime =
-                    host.Services.GetService(typeof<IHostApplicationLifetime>)
-                    :?> IHostApplicationLifetime
-
-                runHostWithCapture
-                    (fun () ->
-                        host.Start()
-
-                        replacementLoop <-
-                            match embeddedTerminal, sessionActivityService with
-                            | Some manager, Some service ->
-                                EmbeddedTerminal.runReplacementCoordinator
-                                    manager
-                                    (TerminalSessionActivity.queryReplacementPlan
-                                        CodingToolStatus.readConfiguredProvider
-                                        (fun terminalSessionIds ->
-                                            service.QueryTerminalActivity terminalSessionIds))
-                                    service.ClosedProcessSnapshot
-                                |> BackgroundLoop.start
-                                |> Some
-                            | _ -> None)
-                    (fun () -> host.WaitForShutdownAsync().GetAwaiter().GetResult())
-                    applicationLifetime.ApplicationStopping
-                    capture
-            finally
-                canvasHost
-                |> Option.iter (fun host ->
-                    try
-                        host.StopAsync().GetAwaiter().GetResult()
-                    finally
-                        host.DisposeAsync().GetAwaiter().GetResult())
+            runHostWithCapture
+                host.Start
+                (fun () ->
+                    host.WaitForShutdownAsync()
+                        .GetAwaiter()
+                        .GetResult())
+                applicationLifetime.ApplicationStopping
+                capture
         finally
-            replacementLoop
-            |> Option.iter (BackgroundLoop.stop "TerminalHost replacement coordinator")
+            canvasHost
+            |> Option.iter (fun host ->
+                try
+                    host.StopAsync().GetAwaiter().GetResult()
+                finally
+                    host.DisposeAsync().GetAwaiter().GetResult())
     finally
         activityRuntime
         |> Option.iter (fun runtime ->

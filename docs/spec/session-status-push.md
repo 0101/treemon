@@ -22,6 +22,8 @@ shared state; no session-log parsing remains.
 - Retain an optional exact terminal origin for sessions launched inside a host-owned terminal.
 - Record monotonic exact-instance closure from live SDK shutdown or authoritative terminal teardown
   while retaining durable conversation history for later Resume.
+- Supply the user-requested TerminalHost update with one current durable restart identity per
+  hosted terminal, independent of Working/Waiting/Idle status.
 - Let auto-sync target an existing session through `SessionBridge` before launching another CLI.
 - Filter synthetic user-channel content before it can change durable session state.
 - Bound untrusted input and durable storage while keeping the fold deterministic.
@@ -61,13 +63,10 @@ shared state; no session-log parsing remains.
 - The extension sends an acknowledged, idempotent `session_present` bootstrap until the server has
   recorded the instance, then liveness-only heartbeats every 60 seconds. Presence creates the
   instance even when the session has no title or replayable lifecycle event; heartbeats never create
-  an anonymous conversation and otherwise update only that instance's receipt-time liveness. After
-  server restart, a validated heartbeat for the same known, non-closed exact binding also clears
-  that binding's startup-reconciliation gate and refreshes `LastSeen`, because the current exact
-  report proves the surviving process reached the new server generation even when its previous
-  observation just crossed `openWindow`. The heartbeat cadence starts immediately after presence
-  is acknowledged and cannot be delayed by replay. A heartbeat transport failure invalidates the
-  in-flight replay generation and restarts the presence handshake.
+  an anonymous conversation and otherwise update only that instance's receipt-time liveness. The
+  heartbeat cadence starts immediately after presence is acknowledged and cannot be delayed by
+  replay. A heartbeat transport failure invalidates the in-flight replay generation and restarts
+  the presence handshake.
 - A live `session.shutdown` stops that reporter's heartbeats and closes its process-session binding.
   The parent CLI process may remain alive and subsequently present another session; that new binding
   supersedes the prior one without deleting its durable history. Terminal lifecycle orchestration
@@ -75,8 +74,8 @@ shared state; no session-log parsing remains.
   including when graceful SDK shutdown was unavailable, rejected, or timed out. Closure remains
   monotonic within each binding.
   Exact activity closure is not proof that the operating-system process has left its foreground
-  terminal; replacement therefore submits Resume only into a terminal it recreated on a verified
-  host after the previous host exited.
+  terminal. Explicit cleanup therefore verifies terminal teardown separately; a host update closes
+  the whole TerminalHost before it starts any captured durable session on the new host.
 - Accepted usage reports preserve conversation state without becoming lifecycle events; instance
   presence remains on the dedicated presence path.
 
@@ -140,34 +139,25 @@ shared state; no session-log parsing remains.
   session exists in a running terminal, the existing terminal is returned instead of launching
   another process.
 
-### Context usage, resume, and restart
+### Context usage, Resume, and TerminalHost update
 
-- `session.usage_info` updates a durable per-process-instance context gauge without changing status. Its
-  ordering clock is separate from lifecycle ordering, so older delayed gauges cannot replace newer
-  values and usage cannot block a lifecycle transition.
-- Usage values and their ordering timestamp are stored on `session_instances`; usage is not appended
-  to `activity_events` and cannot establish presence for an unknown process identity.
-- Once invoked, explicit worktree Resume selects the greatest `(UpdatedAt, SessionId)` from all
-  durable sessions for the worktree, regardless of current status or heartbeat recency. Sessions
-  older than the live window remain manually resumable until retention removes them. Automatic
-  TerminalHost replacement is narrower: it resumes only an open exact-origin process instance, as
-  `docs/spec/embedded-terminal.md`.
-- On server start, durable conversations and recently observed instances are loaded from SQLite.
-  Durable titles, intents, skill, footer messages, context gauges, and their ordering clocks are
-  restored. The activity endpoint is made available before replacement reconciliation begins, and
-  surviving extensions retry `session_present` until acknowledged. A recently open exact instance
-  with a current terminal origin remains pending reconciliation until the same process identity
-  re-presents or sends a validated heartbeat, that exact process is proven dead, its terminal origin
-  leaves the authoritative registry, or `openWindow` expires. Unknown, closed, metadata-mismatched,
-  and PID-reused reporters cannot clear another binding's pending state. Pending reconciliation
-  gates automatic replacement without introducing another lifecycle status. A process proven dead
-  is monotonically closed and removed from the scheduler's exact live collection; missing-origin and
-  expired rows simply stop participating in terminal ownership. Retained conversations outside the
-  live window remain available for footer and explicit Resume selection, and a closed identity
-  cannot reopen.
-- Background-agent clocks are process-instance-local and durable within retention. Restart restores
-  unfinished background work for each exact identity, so an Idle parent remains effectively Working
-  until its matching terminal event or stale-gap cleanup.
+- `session.usage_info` updates a durable per-process-instance context gauge without changing status.
+  Its ordering clock is separate from lifecycle ordering, so older delayed gauges cannot replace
+  newer values and usage cannot establish presence for an unknown process identity.
+- Explicit worktree Resume selects the greatest `(UpdatedAt, SessionId)` from all durable sessions
+  for the worktree, regardless of current liveness. If that exact session is already open in a
+  running embedded terminal, Treemon reuses the terminal; otherwise it starts a new terminal with
+  the direct `--session-id=<id>` selector.
+- A user-requested TerminalHost update is narrower in a different way: it intersects only the
+  current host registry with currently open exact-origin instances, selects one greatest-activity
+  durable session per terminal, and restarts both active and idle sessions. Terminals without an
+  open durable session and stale durable history are omitted.
+- On server start, durable conversations and recently observed instances load from SQLite and are
+  immediately projected through their ordinary liveness windows. Surviving extensions retry
+  acknowledged `session_present`.
+- Background-agent clocks remain process-instance-local and durable within retention. Restart
+  restores unfinished background work for each exact identity, so an Idle parent remains
+  effectively Working until its matching terminal event or stale-gap cleanup.
 
 ## Technical Approach
 
@@ -274,13 +264,12 @@ use independent ordering paths:
 - Title bootstrap hydrates durable state without appending an event or advancing lifecycle time.
 - Usage persists only the latest gauge on its own ordering clock.
 - Presence resolves the exact Copilot process start identity, creates or refreshes one instance with
-  server receipt time, advances the terminal-origin activity epoch, and replies only after the
-  store update succeeds.
+  server receipt time, and replies only after the store update succeeds.
 - Heartbeats refresh only a known, non-closed exact instance. The current heartbeat re-establishes
   receipt-time openness, including after the prior `openWindow` elapsed; it cannot create a binding
-  or change its session metadata or terminal origin. Heartbeats affect automatic replacement
-  eligibility but never order footer selection or explicit Resume ownership, which use conversation
-  `UpdatedAt`.
+  or change its session metadata or terminal origin. Heartbeats never order footer selection,
+  explicit Resume ownership, or the per-terminal durable session chosen for a host update; those
+  use conversation `UpdatedAt`.
 - Closure is monotonic for one process identity whether it came from live `session.shutdown` or
   terminal-authoritative teardown. A report from that same closed process remains closed even when
   it arrives later; only a different process identity can create a new instance. Graceful,
@@ -294,16 +283,11 @@ preserves concurrent process state without allowing one CLI to steal another pro
 origin, mark another instance Idle, or reopen an explicitly closed instance. Before advancing an
 instance after a stale gap, the service clears its old background clocks.
 
-The mailbox also maintains a process-local monotonic activity sequence per terminal origin. An
-instance report stamps its terminal origin, so presence or closure changes that terminal's epoch.
-Its narrow query accepts the complete current authoritative terminal-ID set and returns open
-instances joined to durable conversation state plus their maximum epoch.
-`TerminalSessionActivity` derives effective state and selects the greatest-activity open instance
-per terminal. Concurrent instances of one durable session cannot overwrite each other's origin or
-liveness. Unrelated origins, closed instances, stale instances, and sessions with no origin cannot
-change the replacement join result. Hourly retention removes old instance rows and epochs not
-backed by retained instances or the latest authoritative registry; pruning never resets the global
-epoch sequence.
+The mailbox's narrow terminal query accepts a terminal-ID set and returns only matching exact
+instances. `TerminalSessionActivity` filters openness and selects the greatest-activity durable
+session per terminal. Concurrent instances of one durable session cannot overwrite each other's
+origin or liveness; unrelated origins, closed instances, stale instances, and sessions with no
+origin do not enter the update snapshot.
 
 Exact-instance ingestion accepts only a resolvable parent process identity. Reports without one are
 rejected rather than folded under a synthetic identity.
@@ -354,8 +338,8 @@ Pre-upgrade footer content — titles, intents, messages, skill, and context gau
 not migrated. Immediately after upgrade a card can show no footer history until its worktree reports
 again, while explicit Resume still selects the latest pre-upgrade `SessionId`.
 
-The terminal-origin index follows `(terminal_session_id, updated_at DESC, session_id DESC)`; its
-leading origin key supports retained-origin scans used when pruning process-local activity epochs.
+The terminal-origin index follows `(terminal_session_id, updated_at DESC, session_id DESC)` so
+selected-origin queries and greatest-activity durable-session selection stay bounded.
 
 Event append/status upsert and context updates are transactional and reread the authoritative
 persisted row. Hourly retention deletes event keys, exact instances, and pre-upgrade resume
@@ -404,21 +388,21 @@ into lifecycle status.
 | Session model | Working, WaitingForUser, Idle; NoSession only at worktree collapse. |
 | Synthetic messages | Filter server-side before ingestion with the shared user-message classifier. |
 | Ask-user ordering | Persist independent request/completion clocks; do not keep lifecycle state in the extension. |
-| Liveness | Acknowledged presence and heartbeats update one process instance using server receipt time; heartbeat starts on acknowledgement and sends independently of replay; usage does not establish presence. |
-| Representative ordering | Use instance `(UpdatedAt, SessionId, ProcessIdentity)`; liveness gates openness and automatic replacement eligibility but never replaces lifecycle ordering. |
-| Multiple instances | Preserve concurrent CLI processes and sequential sessions within one process as separate full fold rows; never let one binding's event or heartbeat replace another's status, origin, or closure. |
-| Ownership boundary | Session activity owns reporting, exact-instance state, liveness, and monotonic closure; embedded-terminal orchestration owns shutdown policy, authoritative teardown, fail-closed staged-host cleanup, and survivor cleanup. |
-| Startup reconciliation | Keep each recently open terminal-owned instance pending until that exact known, non-closed binding re-presents or sends a validated heartbeat, dies, loses its terminal origin, or reaches `openWindow`; never use one global startup delay. |
-| Background agents | Persist per-tool start/finish clocks on each exact instance; WaitingForUser outranks background Working; stale-gap cleanup bounds abandoned clocks. |
+| Liveness | Acknowledged presence and heartbeats update one exact process instance using server receipt time; usage does not establish presence. |
+| Representative ordering | Use `(UpdatedAt, SessionId, ProcessIdentity)`; heartbeat-only `LastSeen` never replaces lifecycle ordering. |
+| Multiple instances | Preserve concurrent CLI processes and sequential sessions within one process as separate full fold rows. |
+| Ownership boundary | Session activity owns exact-instance state, liveness, origin, and monotonic closure; embedded-terminal orchestration owns host and terminal lifecycle. |
+| Restart startup | Restore rows through the ordinary open window; surviving extensions re-present through the normal presence path. |
+| Background agents | Persist per-tool start/finish clocks on each exact instance; WaitingForUser outranks background Working. |
 | Footer | Decouple from the status dot and merge the SQL-ranked greatest durable exact instance per worktree. |
 | Activity | Use freshest source-tagged intent/title; bootstrap title from metadata, never infer intent. |
-| Context usage | Persist the last-known gauge and ordering timestamp; do not append it to activity events. |
-| Persistence | Store exact process-session binding folds in full; keep event rows as binding-scoped dedupe keys only and pre-upgrade history as bare resume identity; rebuild legacy schema transactionally. |
+| Context usage | Persist the latest gauge and ordering timestamp; do not append it to activity events. |
+| Persistence | Store exact process-session binding folds in full; retain event rows only as binding-scoped dedupe keys and pre-upgrade history as bare resume identity. |
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
-| Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
-| Explicit Resume | Once invoked, query durable most-recent activity identity, then use bounded live exact-origin state only to reuse that target's running terminal instead of launching a duplicate process. |
-| Terminal origin | Validate and persist optional `TerminalSessionId` on the process instance; a focused terminal module derives exact ownership for tab activity, Resume idempotency, and replacement, never from worktree inference. |
-| Explicit close | The client dismisses the exact terminal tab immediately and suppresses stale snapshots until a registry read no longer lists it; a failed close restores it from an authoritative registry refresh. Live `session.shutdown` closes one process-session binding; confirmed terminal teardown closes the current binding for each exact process, and heartbeat expiry remains the crash fallback. |
+| Auto-sync | Busy worktrees defer; otherwise prefer a settled open bridged session, then retained identity only when no session is open. |
+| Explicit Resume | Select durable most-recent activity identity, then use exact terminal origin only to reuse an already-running target. |
+| TerminalHost update snapshot | Intersect the current host registry with open exact-origin rows and select one greatest-activity durable session per terminal, regardless of Working/Waiting/Idle state. |
+| Explicit close | Graceful shutdown remains best effort; confirmed terminal teardown monotonically closes the current exact bindings. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
 
 ## Key Files
@@ -429,12 +413,12 @@ into lifecycle status.
 | `src/Extension/reporting/reporting-runtime.mjs` | Single-endpoint presence/retry state, cached compact reconnect replay, heartbeat lane, metadata bootstrap, and live shutdown. |
 | `src/Extension/reporting/reporting-core.mjs` | Pure wire mapping plus the compact replay accumulator. |
 | `src/Server/ProcessIdentity.fs` | Generic exact PID/start-tick identity, opaque client encoding, injectable resolver contract, and default operating-system resolver. |
-| `src/Server/SessionActivity.fs` | Validated session and terminal-origin identities, event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
+| `src/Server/SessionActivity.fs` | Validated session and terminal-origin identities, event domain, pure fold, background lifecycle, effective activity/status, freshness, and active selection. |
 | `src/Server/LifecycleDiagnostics.fs` | Bounded structured lifecycle events over validated session, terminal, and process identities only. |
 | `src/Server/SessionActivityProtocol.fs` | Bounded activity wire DTO parsing and exact-instance event mapping. |
-| `src/Server/SessionActivityIngestion.fs` | Exact-instance fold application, independent ordering paths, scheduler publication, and startup reconciliation. |
+| `src/Server/SessionActivityIngestion.fs` | Exact-instance fold application, independent ordering paths, and scheduler publication. |
 | `src/Server/SessionActivityService.fs` | Known-worktree filtering, acknowledged presence, mailbox lifecycle, retention, and raw exact-origin queries. |
-| `src/Server/TerminalSessionActivity.fs` | Exact owned-session and startup-reconciliation projection for embedded-terminal tab activity and TerminalHost replacement policy. |
+| `src/Server/TerminalSessionActivity.fs` | Exact terminal-origin projection for tab activity, live-terminal reuse, and the durable host-update restart snapshot. |
 | `src/Server/UserMessageFormatting.fs` | System-reminder classification and user/canvas footer projection. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
 | `src/Server/SessionActivityStoreSchema.fs` | Transactional exact-instance schema creation, pre-upgrade resume-identity migration, legacy retirement, and event-key rebuild. |
@@ -456,8 +440,8 @@ into lifecycle status.
 
 ## Related Specs
 
-- `docs/spec/embedded-terminal.md` - authoritative shutdown policy, terminal teardown, forward-only
-  replacement, and exact survivor cleanup.
+- `docs/spec/embedded-terminal.md` - authoritative terminal teardown and user-requested forward-only
+  TerminalHost update.
 - `docs/spec/worktree-monitor.md` - dashboard architecture and refresh model.
 - `docs/spec/beads-overview-band.md` - live task and agent aggregation with per-group membership.
 - `docs/spec/overview-activity-history.md` - durable canonical Overview snapshots.

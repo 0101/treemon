@@ -2021,6 +2021,9 @@ type DiffEndpointHttpTests() =
                                 agent
                                 (SessionManager.createAgent ())
                                 None
+                                (EmbeddedTerminal.create
+                                    "http://localhost:5000"
+                                    [])
                                 (Map.ofList
                                     [ RepoId "diff-endpoint-tests",
                                       repoDir ])
