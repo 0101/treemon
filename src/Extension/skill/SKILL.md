@@ -140,6 +140,12 @@ often does not appear verbatim in the source:
 Work in the canvas rather than answering only in the terminal. The selected range pulses while the
 agent is processing and clears when the document updates (or the user starts another selection).
 
+Selected-text Comment is the default feedback channel for displayed content. Do not add generic
+comment boxes after sections or duplicate the injected Explain / Remove / Comment UI. Add an
+authored control only when the answer needs structure, validation, multiline entry, an explicit
+confirmation, or no meaningful selectable-text anchor. Keep each control specific to that
+interaction and send its value with `canvasSend`.
+
 ### Don't block the conversation when the doc collects the answer
 
 If the canvas doc itself gathers the user's input — choices, a form, buttons, a comment box — **do not** also call `ask_user` (or any other blocking prompt). The doc's `canvasSend` reply *is* the channel for the answer. Calling `ask_user` at the same time pops a separate blocking modal, freezes the session, and prevents the user from responding through the doc you just built.
@@ -184,7 +190,11 @@ Users can archive docs to `.agents/canvas/archive/`. Don't rely on canvas docs f
 - After an interaction, confirm the focused request is resolved and no affected section contradicts it.
 - Read the collapsed result as the intended audience after creating or editing it: the point is clear, necessary terms are explained, and repeated or dispensable prose is gone.
 
-## Minimal template
+## Standalone input template
+
+Use this only when the canvas exists to collect an unanchored message. Do not copy it into ordinary
+status, review, or investigation sections; selected-text Comment already covers feedback on
+displayed content.
 
 The base theme already styles `body`, headings, and the form controls, so an input-collecting doc can be tiny — no `<style>` block needed:
 
