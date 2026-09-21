@@ -23,6 +23,7 @@ let private tab terminalId path lifecycle =
     { Id = terminalId
       Worktree = path
       ReportedActivity = None
+      SessionIds = []
       Lifecycle = lifecycle }
 
 let private running terminalId path port =
@@ -31,6 +32,9 @@ let private running terminalId path port =
         path
         (EmbeddedTerminalLifecycle.Running
             $"http://127.0.0.1:{port}/")
+
+let private withSessions sessionIds terminal =
+    { terminal with SessionIds = sessionIds }
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -130,6 +134,50 @@ type TerminalPaneStateTests() =
                     first, firstTwo
                     second, secondOne
                 ])
+        )
+
+    [<Test>]
+    member _.``Session lookup keeps the current terminal when duplicate live sessions exist``() =
+        let snapshot =
+            { Tabs =
+                [ running firstOne first 61231
+                  running firstTwo first 61232 ]
+                |> List.map (withSessions [ "shared-session" ]) }
+
+        let selections = Map.ofList [ first, firstTwo ]
+
+        Assert.That(
+            tryFindSessionTerminal
+                first
+                "shared-session"
+                selections
+                snapshot,
+            Is.EqualTo(Some firstTwo)
+        )
+
+    [<Test>]
+    member _.``Session lookup ignores plain, interrupted, and other-worktree terminals``() =
+        let linked = terminalId "first-linked"
+        let snapshot =
+            { Tabs =
+                [ running firstOne first 61231
+                  tab
+                      firstTwo
+                      first
+                      (EmbeddedTerminalLifecycle.Interrupted "host exited")
+                  running secondOne second 61232
+                  running linked first 61233 ]
+                |> List.mapi (fun index terminal ->
+                    if index = 0 then terminal
+                    else withSessions [ "target-session" ] terminal) }
+
+        Assert.That(
+            tryFindSessionTerminal
+                first
+                "target-session"
+                (Map.ofList [ first, firstOne ])
+                snapshot,
+            Is.EqualTo(Some linked)
         )
 
     [<Test>]
@@ -1868,6 +1916,7 @@ type TerminalFocusTests() =
 
         let updated, _ =
             CanvasUpdate.openCanvasDoc
+                true
                 (WorktreePath.value second)
                 doc.Filename
                 { focusModel with

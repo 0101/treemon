@@ -1254,7 +1254,37 @@ let internal worktreeApiWithLaunch
                   shareCanvasDocImpl req)
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
           loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
-          getBridgeLiveness = fun paths -> async { return SessionBridge.getAllLiveness paths }
+          getBridgeLiveness = fun paths ->
+              async {
+                  let! state =
+                      agent.PostAndAsyncReply(
+                          SchedulerState.StateMsg.GetState
+                      )
+
+                  let instancesByWorktree =
+                      state.SessionInstances
+                      |> Map.values
+                      |> SchedulerState.groupInstancesByWorktree
+
+                  let systemViewTarget worktreePath liveSessions =
+                      instancesByWorktree
+                      |> Map.tryFind (
+                          Server.PathUtils.normalizePath
+                              worktreePath
+                      )
+                      |> Option.defaultValue []
+                      |> fun instances ->
+                          CanvasBridge.selectSystemViewTarget
+                              instances
+                              liveSessions
+                      |> Option.map SessionId.value
+
+                  return
+                      SessionBridge.getAllLivenessAt
+                          systemViewTarget
+                          DateTime.UtcNow
+                          paths
+              }
           // Roots are managed restart-to-apply: persist to global config only (no scheduler
           // message, no live-roots read). getWorktrees/createWorktree/path-validation keep using
           // the `rootPaths` captured at startup above — correct, since roots only change across

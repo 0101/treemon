@@ -129,10 +129,12 @@ shared state; no session-log parsing remains.
   concurrent processes for the same Copilot `SessionId` remain distinct. Treemon never infers
   terminal ownership from worktree path.
 - The embedded-terminal API uses the bounded live-session projection to label each tab with the
-  representative exact session's freshest display-safe activity. An active session wins; otherwise
-  the most recently active live session is representative. Activity uses the same reported-intent
-  or session-title choice as the worktree card; when neither exists the tab keeps its numbered
-  fallback.
+  representative exact session's freshest display-safe activity and its distinct sorted live
+  durable `SessionId` values. An active session wins; otherwise the most recently active live
+  session is representative. Activity uses the same reported-intent or session-title choice as the
+  worktree card; when neither exists the tab keeps its numbered fallback. The ID list includes
+  only open exact instances with that terminal origin and collapses duplicate physical instances
+  of one durable session.
 - `TerminalSessionId` is process-instance attribution metadata for exact host-terminal joins. It
   does not participate in conversation status folding or representative ordering. Explicit Resume
   uses it only after selecting the durable target session: if an open instance of that exact
@@ -284,10 +286,11 @@ origin, mark another instance Idle, or reopen an explicitly closed instance. Bef
 instance after a stale gap, the service clears its old background clocks.
 
 The mailbox's narrow terminal query accepts a terminal-ID set and returns only matching exact
-instances. `TerminalSessionActivity` filters openness and selects the greatest-activity durable
-session per terminal. Concurrent instances of one durable session cannot overwrite each other's
-origin or liveness; unrelated origins, closed instances, stale instances, and sessions with no
-origin do not enter the update snapshot.
+instances. `TerminalSessionActivity` filters openness, selects the greatest-activity durable
+session per terminal, and returns the distinct ordinally sorted durable `SessionId` values for
+each terminal. Concurrent instances of one durable session cannot overwrite each other's origin or
+liveness; unrelated origins, closed instances, stale instances, and sessions with no origin do not
+enter the update snapshot.
 
 Exact-instance ingestion accepts only a resolvable parent process identity. Reports without one are
 rejected rather than folded under a synthetic identity.
@@ -418,7 +421,7 @@ into lifecycle status.
 | `src/Server/SessionActivityProtocol.fs` | Bounded activity wire DTO parsing and exact-instance event mapping. |
 | `src/Server/SessionActivityIngestion.fs` | Exact-instance fold application, independent ordering paths, and scheduler publication. |
 | `src/Server/SessionActivityService.fs` | Known-worktree filtering, acknowledged presence, mailbox lifecycle, retention, and raw exact-origin queries. |
-| `src/Server/TerminalSessionActivity.fs` | Exact terminal-origin projection for tab activity, live-terminal reuse, and the durable host-update restart snapshot. |
+| `src/Server/TerminalSessionActivity.fs` | Exact terminal-origin projection for tab activity and live SessionIds, live-terminal reuse, and the durable host-update restart snapshot. |
 | `src/Server/UserMessageFormatting.fs` | System-reminder classification and user/canvas footer projection. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
 | `src/Server/SessionActivityStoreSchema.fs` | Transactional exact-instance schema creation, pre-upgrade resume-identity migration, legacy retirement, and event-key rebuild. |

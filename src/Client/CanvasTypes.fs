@@ -4,6 +4,21 @@ module CanvasTypes
 // parked in the focus/navigation-scoped Navigation module. Imported by the canvas pane, state, update
 // and awareness modules.
 
+open Shared
+
+module CanvasTerminalLink =
+    let effectiveSessionId
+        (bridgeLiveness: Map<string, BridgeLiveness>)
+        (scopedKey: string)
+        (doc: CanvasDoc)
+        =
+        match doc.Kind with
+        | AgentDoc -> doc.OwnerSessionId
+        | SystemView ->
+            bridgeLiveness
+            |> Map.tryFind scopedKey
+            |> Option.bind _.SystemViewTargetSessionId
+
 [<RequireQualifiedAccess>]
 type CanvasSendState =
     // scopedKey identifies the target worktree the message was queued for, so the "Waiting for

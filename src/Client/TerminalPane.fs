@@ -101,11 +101,36 @@ let activeTerminalId selectedWorktree selections snapshot =
         |> Option.orElseWith (fun () ->
             tabs |> List.tryHead |> Option.map _.Id))
 
+let activeTerminal selectedWorktree selections snapshot =
+    activeTerminalId selectedWorktree selections snapshot
+    |> Option.bind (fun terminalId ->
+        tryFindTab terminalId snapshot)
+
 let selectTerminal terminalId snapshot selections =
     tryFindTab terminalId snapshot
     |> Option.map (fun tab ->
         setPathValue tab.Worktree terminalId selections)
     |> Option.defaultValue selections
+
+let liveSessionIds tab =
+    match tab.Lifecycle with
+    | EmbeddedTerminalLifecycle.Running _ ->
+        tab.SessionIds |> Set.ofList
+    | EmbeddedTerminalLifecycle.Interrupted _ -> Set.empty
+
+let private containsLiveSession sessionId tab =
+    tab |> liveSessionIds |> Set.contains sessionId
+
+let tryFindSessionTerminal path sessionId selections snapshot =
+    let matching =
+        snapshot
+        |> tabsForWorktree path
+        |> List.filter (containsLiveSession sessionId)
+
+    activeTerminal (Some path) selections snapshot
+    |> Option.filter (containsLiveSession sessionId)
+    |> Option.orElseWith (fun () -> matching |> List.tryHead)
+    |> Option.map _.Id
 
 let cycleTerminal direction selectedWorktree snapshot selections =
     selectedWorktree

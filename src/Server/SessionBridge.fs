@@ -1188,7 +1188,8 @@ let internal computeLiveness now (session: SessionEntry option) (poll: bool * Da
             age,
             { IsAlive = isSessionAlive now entry || isPollAlive now heartbeat
               SessionId = entry.SessionId |> Option.map SessionId.value
-              LiveSessionIds = liveSessionIds })
+              LiveSessionIds = liveSessionIds
+              SystemViewTargetSessionId = None })
     | Some entry, (false, _) ->
         let age = (now - entry.RegisteredAt).TotalSeconds
         let liveSessionIds =
@@ -1202,14 +1203,16 @@ let internal computeLiveness now (session: SessionEntry option) (poll: bool * Da
             age,
             { IsAlive = isSessionAlive now entry
               SessionId = entry.SessionId |> Option.map SessionId.value
-              LiveSessionIds = liveSessionIds })
+              LiveSessionIds = liveSessionIds
+              SystemViewTargetSessionId = None })
     | None, (true, heartbeat) ->
         let age = (now - heartbeat).TotalSeconds
         Some (
             age,
             { IsAlive = isPollAlive now heartbeat
               SessionId = None
-              LiveSessionIds = [] })
+              LiveSessionIds = []
+              SystemViewTargetSessionId = None })
     | None, (false, _) -> None
 
 let getStatus (worktreePath: string) =
@@ -1237,9 +1240,11 @@ let getSessionForWorktree worktreePath =
     |> List.tryHead
     |> Option.bind _.SessionId
 
-let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
-    let now = DateTime.UtcNow
-
+let internal getAllLivenessAt
+    (systemViewTarget: string -> SessionEntry list -> string option)
+    now
+    (worktreePaths: string list)
+    : Map<string, BridgeLiveness> =
     worktreePaths
     |> List.choose (fun path ->
         let key = normalizePath path
@@ -1254,5 +1259,15 @@ let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
 
         computeLiveness now session poll
         |> Option.map (fun (_, liveness) ->
-            path, { liveness with LiveSessionIds = liveSessionIds }))
+            path,
+            { liveness with
+                LiveSessionIds = liveSessionIds
+                SystemViewTargetSessionId =
+                    systemViewTarget path sessions }))
     |> Map.ofList
+
+let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
+    getAllLivenessAt
+        (fun _ _ -> None)
+        DateTime.UtcNow
+        worktreePaths

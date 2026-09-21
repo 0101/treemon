@@ -225,6 +225,9 @@ type EmbeddedTerminalTab =
       /// Display-safe activity from the representative live Copilot session owned by this exact
       /// terminal, using the freshest reported intent or session title.
       ReportedActivity: string option
+      /// Distinct, deterministically sorted durable Copilot sessions currently live in this exact
+      /// terminal.
+      SessionIds: string list
       Lifecycle: EmbeddedTerminalLifecycle }
 
 type EmbeddedTerminalSnapshot =
@@ -402,7 +405,9 @@ type CanvasMessageResult =
 type BridgeLiveness =
     { IsAlive: bool
       SessionId: string option
-      LiveSessionIds: string list }
+      LiveSessionIds: string list
+      /// Current activity-aware recipient for generated SystemViews in this worktree.
+      SystemViewTargetSessionId: string option }
 
 module BridgeLiveness =
     let hasLiveSession sessionId (byWorktree: Map<string, BridgeLiveness>) =

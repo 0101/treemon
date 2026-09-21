@@ -110,12 +110,14 @@ type WrapperTypeSerializationTests() =
                 [ { Id = EmbeddedTerminalId "00000000000000000000000000000002"
                     Worktree = WorktreePath @"Q:\code\running"
                     ReportedActivity = Some "Implementing terminal titles"
+                    SessionIds = [ "session-b"; "session-a" ]
                     Lifecycle =
                         EmbeddedTerminalLifecycle.Running
                             "http://127.0.0.1:61234/" }
                   { Id = EmbeddedTerminalId "00000000000000000000000000000004"
                     Worktree = WorktreePath @"Q:\code\interrupted"
                     ReportedActivity = None
+                    SessionIds = []
                     Lifecycle =
                         EmbeddedTerminalLifecycle.Interrupted
                             "host exited" } ] }
@@ -124,6 +126,16 @@ type WrapperTypeSerializationTests() =
             roundTrip<EmbeddedTerminalSnapshot> original,
             Is.EqualTo original
         )
+
+    [<Test>]
+    member _.``Bridge liveness SystemView target survives JSON round-trip``() =
+        let original =
+            { IsAlive = true
+              SessionId = Some "freshest-registration"
+              LiveSessionIds = [ "activity-target"; "freshest-registration" ]
+              SystemViewTargetSessionId = Some "activity-target" }
+
+        Assert.That(roundTrip<BridgeLiveness> original, Is.EqualTo original)
 
     [<Test>]
     member _.``CreateWorktreeRequest survives JSON round-trip``() =

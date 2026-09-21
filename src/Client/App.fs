@@ -1520,7 +1520,12 @@ let update msg model =
 
     | SetWorkspaceWidth width -> CanvasUpdate.setWorkspaceWidth width model
 
-    | SelectCanvasDoc (scopedKey, filename) -> CanvasUpdate.selectCanvasDoc scopedKey filename model
+    | SelectCanvasDoc (scopedKey, filename) ->
+        CanvasUpdate.selectCanvasDoc
+            (not (terminalHostUpdateLocksInteraction model))
+            scopedKey
+            filename
+            model
 
     | FocusOverviewCard scopedKey ->
         let openPane = not model.Canvas.CanvasPaneOpen
@@ -1535,9 +1540,18 @@ let update msg model =
             retargetCmd
         ]
 
-    | OpenCanvasDoc (scopedKey, filename) -> CanvasUpdate.openCanvasDoc scopedKey filename model
+    | OpenCanvasDoc (scopedKey, filename) ->
+        CanvasUpdate.openCanvasDoc
+            (not (terminalHostUpdateLocksInteraction model))
+            scopedKey
+            filename
+            model
 
-    | OpenWorktreeDiff scopedKey -> CanvasUpdate.openWorktreeDiff scopedKey model
+    | OpenWorktreeDiff scopedKey ->
+        CanvasUpdate.openWorktreeDiff
+            (not (terminalHostUpdateLocksInteraction model))
+            scopedKey
+            model
 
     | ArchiveCanvasDoc (scopedKey, filename) -> CanvasUpdate.archiveCanvasDoc scopedKey filename model
 
