@@ -894,6 +894,327 @@ type CanvasPaneTests() =
         }
 
     [<Test>]
+    [<Category("CanvasTerminalLinks")>]
+    member this.``Canvas links select the matching terminal without opening or focusing the Terminal pane``() =
+        task {
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let worktreePath = WorktreePath "Q:/code/treemon/multirepo"
+            let linkedSession = "linked-session"
+            let externalSession = "external-session"
+            let plainTerminal = EmbeddedTerminalId "plain-terminal"
+            let linkedTerminal = EmbeddedTerminalId "linked-terminal"
+            let diffDoc: CanvasDoc =
+                { Filename = "diff.html"
+                  ContentHash = "diff-linked"
+                  LastModified = DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero)
+                  OwnerSessionId = None
+                  Kind = CanvasDocKind.SystemView }
+            let linkedViewedDoc: CanvasDoc =
+                { Filename = "notes.html"
+                  ContentHash = "notes-linked"
+                  LastModified = DateTimeOffset(2026, 9, 18, 11, 0, 0, TimeSpan.Zero)
+                  OwnerSessionId = Some linkedSession
+                  Kind = CanvasDocKind.AgentDoc }
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getWorktrees",
+                    Func<IRoute, Task>(fun route ->
+                        task {
+                            let! upstream = route.FetchAsync()
+                            let! json = upstream.TextAsync()
+                            let response =
+                                JsonConvert.DeserializeObject<DashboardResponse>(json, converter)
+                            let transformed =
+                                { response with
+                                    Repos =
+                                        response.Repos
+                                        |> List.map (fun repo ->
+                                            { repo with
+                                                Worktrees =
+                                                    repo.Worktrees
+                                                    |> List.map (fun worktree ->
+                                                        if worktree.Path = worktreePath then
+                                                            let docs =
+                                                                worktree.CanvasDocs
+                                                                |> List.map (fun doc ->
+                                                                    match doc.Filename with
+                                                                    | "dashboard.html" ->
+                                                                        { doc with
+                                                                            OwnerSessionId =
+                                                                                Some linkedSession }
+                                                                    | "status.html" ->
+                                                                        { doc with
+                                                                            OwnerSessionId =
+                                                                                Some externalSession }
+                                                                    | _ -> doc)
+
+                                                            { worktree with
+                                                                CanvasDocs =
+                                                                    docs
+                                                                    @ [ diffDoc
+                                                                        linkedViewedDoc ] }
+                                                        else
+                                                            worktree) }) }
+
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = JsonConvert.SerializeObject(transformed, converter)
+                                    )
+                                )
+                        } :> Task)
+                )
+
+            let terminalSnapshot =
+                { Tabs =
+                    [ { Id = plainTerminal
+                        Worktree = worktreePath
+                        ReportedActivity = Some "Plain shell"
+                        SessionIds = []
+                        Lifecycle =
+                            EmbeddedTerminalLifecycle.Running
+                                $"{ServerFixture.canvasUrl}/fixture-terminal-plain" }
+                      { Id = linkedTerminal
+                        Worktree = worktreePath
+                        ReportedActivity = Some "Owned session"
+                        SessionIds = [ linkedSession ]
+                        Lifecycle =
+                            EmbeddedTerminalLifecycle.Running
+                                $"{ServerFixture.canvasUrl}/fixture-terminal-linked" } ] }
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getEmbeddedTerminals",
+                    Func<IRoute, Task>(fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body =
+                                    JsonConvert.SerializeObject(
+                                        terminalSnapshot,
+                                        converter
+                                    )
+                            )
+                        ))
+                )
+
+            let liveness =
+                Map.ofList [
+                    WorktreePath.value worktreePath,
+                    { IsAlive = true
+                      SessionId = Some externalSession
+                      LiveSessionIds =
+                        [ externalSession
+                          linkedSession ]
+                      SystemViewTargetSessionId =
+                        Some linkedSession }
+                ]
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getBridgeLiveness",
+                    Func<IRoute, Task>(fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body =
+                                    JsonConvert.SerializeObject(
+                                        liveness,
+                                        converter
+                                    )
+                            )
+                        ))
+                )
+
+            let! _ = this.Page.ReloadAsync()
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+
+            let terminalToggle =
+                this.Page.Locator(
+                    ".header-controls .ctrl-btn",
+                    PageLocatorOptions(HasText = "Terminal"))
+
+            do! terminalToggle.ClickAsync()
+            let terminalPane = this.Page.Locator(".terminal-pane.open")
+            do! terminalPane.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do!
+                Assertions.Expect(
+                    terminalPane.Locator(".terminal-tab"))
+                    .ToHaveCountAsync(2)
+            do!
+                Assertions.Expect(
+                    terminalPane.Locator(".terminal-tab.selected .terminal-tab-label"))
+                    .ToHaveTextAsync("Plain shell")
+
+            do! terminalToggle.ClickAsync()
+            do!
+                Assertions.Expect(
+                    this.Page.Locator(".terminal-pane.open"))
+                    .ToHaveCountAsync(0)
+
+            do! ensureCanvasPaneOpen this.Page
+            do! (canvasTabBar this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do!
+                Assertions.Expect(
+                    this.Page.Locator(".canvas-pane .canvas-terminal-linked"))
+                    .ToHaveCountAsync(0)
+
+            let dashboardTab =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-tab",
+                    PageLocatorOptions(HasText = "dashboard"))
+            let tabPresentation (tab: ILocator) =
+                task {
+                    let! _ =
+                        tab.EvaluateAsync<bool>(
+                            "tab => Promise.all(tab.getAnimations().map(animation => animation.finished)).then(() => true)"
+                        )
+                    return!
+                        tab.EvaluateAsync<string array>(
+                            """tab => {
+                                const style = getComputedStyle(tab);
+                                return [
+                                    style.backgroundColor,
+                                    style.borderColor,
+                                    style.boxShadow,
+                                    style.color,
+                                    style.opacity
+                                ];
+                            }"""
+                        )
+                }
+
+            do! dashboardTab.ClickAsync()
+            do! Assertions.Expect(dashboardTab).ToBeFocusedAsync()
+            do!
+                Assertions.Expect(
+                    this.Page.Locator(".terminal-pane.open"))
+                    .ToHaveCountAsync(0)
+
+            do! terminalToggle.ClickAsync()
+            do! terminalPane.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do!
+                Assertions.Expect(
+                    terminalPane.Locator(".terminal-tab.selected .terminal-tab-label"))
+                    .ToHaveTextAsync("Owned session")
+
+            let! dashboardClass = dashboardTab.GetAttributeAsync("class")
+            Assert.That(dashboardClass, Does.Contain("active"))
+            Assert.That(dashboardClass, Does.Contain("canvas-terminal-linked"))
+            let! ownedSelectedPresentation =
+                tabPresentation dashboardTab
+
+            let statusTab =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-tab",
+                    PageLocatorOptions(HasText = "status"))
+            let! statusClass = statusTab.GetAttributeAsync("class")
+            Assert.That(statusClass, Does.Contain("canvas-tab-viewed"))
+            Assert.That(
+                statusClass,
+                Does.Not.Contain("canvas-terminal-linked"),
+                "A live owner outside TerminalHost must not appear linked"
+            )
+
+            let linkedViewedTab =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-tab",
+                    PageLocatorOptions(HasText = "notes"))
+            let! linkedViewedClass =
+                linkedViewedTab.GetAttributeAsync("class")
+            Assert.That(linkedViewedClass, Does.Contain("canvas-tab-viewed"))
+            Assert.That(linkedViewedClass, Does.Contain("canvas-terminal-linked"))
+            do!
+                Assertions.Expect(
+                    linkedViewedTab)
+                    .ToHaveCSSAsync("opacity", "0.5")
+
+            let! unownedReadPresentation =
+                tabPresentation statusTab
+            let! ownedReadPresentation =
+                tabPresentation linkedViewedTab
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    ownedReadPresentation[0],
+                    Is.Not.EqualTo(unownedReadPresentation[0]),
+                    "Ownership must tint the background"
+                )
+                Assert.That(
+                    ownedReadPresentation[1],
+                    Is.EqualTo(unownedReadPresentation[1]),
+                    "Ownership must not change the border"
+                )
+                Assert.That(ownedReadPresentation[2], Is.EqualTo("none"))
+                Assert.That(
+                    ownedReadPresentation[3],
+                    Is.EqualTo("rgb(166, 227, 161)"),
+                    "Owned tabs must use the green session text color"
+                )
+                Assert.That(ownedReadPresentation[4], Is.EqualTo("0.5"))
+                Assert.That(unownedReadPresentation[0], Is.EqualTo("rgb(49, 50, 68)"))
+                Assert.That(unownedReadPresentation[1], Is.EqualTo("rgb(69, 71, 90)"))
+                Assert.That(unownedReadPresentation[4], Is.EqualTo("0.5")))
+
+            do! statusTab.ClickAsync()
+            let! unownedSelectedPresentation =
+                tabPresentation statusTab
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    ownedSelectedPresentation[0],
+                    Is.Not.EqualTo(unownedSelectedPresentation[0]),
+                    "Selected ownership must remain a background tint"
+                )
+                Assert.That(
+                    ownedSelectedPresentation[1],
+                    Is.EqualTo(unownedSelectedPresentation[1]),
+                    "Selected ownership must retain the normal blue border"
+                )
+                Assert.That(ownedSelectedPresentation[2], Is.EqualTo("none"))
+                Assert.That(
+                    ownedSelectedPresentation[3],
+                    Is.EqualTo("rgb(166, 227, 161)")
+                )
+                Assert.That(unownedSelectedPresentation[0], Is.EqualTo("rgb(46, 52, 82)"))
+                Assert.That(unownedSelectedPresentation[1], Is.EqualTo("rgb(137, 180, 250)"))
+                Assert.That(unownedSelectedPresentation[3], Is.EqualTo("rgb(137, 180, 250)")))
+
+            let linkedSystemTabs =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-system-tab.canvas-terminal-linked")
+            do! Assertions.Expect(linkedSystemTabs).ToHaveCountAsync(2)
+
+            let! dashboardTitle = dashboardTab.GetAttributeAsync("title")
+            let! systemTabs = linkedSystemTabs.AllAsync()
+
+            Assert.That(
+                dashboardTitle,
+                Does.EndWith("Connected to selected terminal")
+            )
+
+            for systemTab in systemTabs do
+                let! title = systemTab.GetAttributeAsync("title")
+                let! presentation = tabPresentation systemTab
+                Assert.That(
+                    title,
+                    Does.EndWith("Connected to selected terminal")
+                )
+                Assert.That(
+                    presentation[2],
+                    Is.EqualTo("none"),
+                    "SystemView ownership must use a background tint, not an underline"
+                )
+                Assert.That(
+                    presentation[3],
+                    Is.EqualTo("rgb(166, 227, 161)"),
+                    "Owned SystemViews must use the green session text color"
+                )
+        }
+
+    [<Test>]
     member this.``Single-doc worktree shows a labeled tab with a compact age``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch

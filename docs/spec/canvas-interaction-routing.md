@@ -30,9 +30,12 @@ and `StoredInstance.UpdatedAt` only *orders* them. A reachable session that has 
 therefore still a valid target — resolution falls back to the freshest registration rather than
 reporting "no target", so Treemon does not spawn a second session beside a usable one. Heartbeat and
 usage timestamps never decide the target, preserving the rule that `LastSeen` is liveness-only.
+`BridgeLiveness` exposes this exact current target for canvas presentation; it remains computed
+state, not SystemView ownership or affinity. The client receives a polled snapshot, while delivery
+reruns the same selection at send time.
 
-Because a SystemView target is computed rather than stored, it cannot go stale, be raced by
-concurrent activity, or need pruning. A SystemView's owner is likewise absent from
+Because the routing target is recomputed for each interaction rather than stored, it cannot go
+stale, be raced by concurrent activity, or need pruning. A SystemView's owner is likewise absent from
 `CanvasDoc.OwnerSessionId`, so liveness, Start session, archive, share, awareness, heartbeat, and
 morph behavior continue to depend only on `CanvasDoc.Kind`.
 
@@ -90,6 +93,8 @@ delegates a required spawn to the shared embedded command-launch boundary.
 canvas-collapsed live registrations, orders their exact rows from
 `SchedulerState.SessionInstances` by `StoredInstance.activityOrderKey`, and falls back to the
 freshest live registration when no reachable session has an activity row.
+The same captured live-registration list and resolution populate `BridgeLiveness` for canvas tabs;
+the target is absent when no live registration can receive a SystemView interaction.
 `CanvasBridge.sendMessage` returns the resolved target alongside the outcome so the caller can
 distinguish "queued because nothing is reachable" from "queued behind a known session".
 
@@ -104,7 +109,7 @@ gating every lifecycle affordance on `CanvasDoc.Kind`.
 ## Decisions
 
 - **Resolve SystemViews, store AgentDocs:** a routing target that is a pure function of live session
-  state is computed per interaction rather than cached. Caching it required compare-and-swap
+  state is computed for interaction and presentation rather than cached. Caching it required compare-and-swap
   ownership, pending-launch arbitration against concurrent activity, exact-session resume with
   registration stamps, transport-failure invalidation, and a filesystem-revalidating prune — all to
   keep a copy of a value that is cheap to derive.

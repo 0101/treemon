@@ -125,28 +125,36 @@ let internal withReportedActivity
         |> List.map terminalOrigin
         |> Set.ofList
 
-    let reportedActivity =
+    let ownedSessionsByTerminal =
         instances
         |> Seq.filter (StoredInstance.isOpenAt now)
         |> joinOwnedInstances terminalSessionIds
         |> List.groupBy fst
-        |> List.choose (fun (terminalSessionId, ownedSessions) ->
-            ownedSessions
-            |> List.map snd
-            |> CodingToolStatus.representativeActivityText now
-            |> Option.map (fun activity ->
-                terminalSessionId,
-                activity))
         |> Map.ofList
 
     { snapshot with
         Tabs =
             snapshot.Tabs
             |> List.map (fun tab ->
+                let sessions =
+                    ownedSessionsByTerminal
+                    |> Map.tryFind (terminalOrigin tab)
+                    |> Option.defaultValue []
+                    |> List.map snd
+
                 { tab with
                     ReportedActivity =
-                        reportedActivity
-                        |> Map.tryFind (terminalOrigin tab) }) }
+                        sessions
+                        |> CodingToolStatus.representativeActivityText now
+                    SessionIds =
+                        match tab.Lifecycle with
+                        | EmbeddedTerminalLifecycle.Running _ ->
+                            sessions
+                            |> List.map _.SessionId
+                            |> List.map SessionId.value
+                            |> List.distinct
+                            |> List.sort
+                        | EmbeddedTerminalLifecycle.Interrupted _ -> [] }) }
 
 let internal restartSessions
     resolveProvider

@@ -122,6 +122,275 @@ let private morph scopedKey filename contentHash =
 
 let private updateModel msg model = update msg model |> fst
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CanvasTerminalLinkTests() =
+
+    let bridgeLiveness target =
+        Map.ofList [
+            "r/target",
+            { IsAlive = true
+              SessionId = Some "freshest"
+              LiveSessionIds = [ "owner"; "system-target" ]
+              SystemViewTargetSessionId = target }
+        ]
+
+    let terminal terminalId path sessionIds lifecycle =
+        { Id = EmbeddedTerminalId terminalId
+          Worktree = path
+          ReportedActivity = None
+          SessionIds = sessionIds
+          Lifecycle = lifecycle }
+
+    let linkedSystemViewModel () =
+        let focusWorktree = makeWorktree "r" "focus" []
+        let targetWorktree =
+            makeWorktree
+                "r"
+                "target"
+                [ makeSystemDoc "diff.html" "h1" ]
+        let targetPath = targetWorktree.Path
+        let plainId = EmbeddedTerminalId "plain"
+        let linkedId = EmbeddedTerminalId "linked"
+        let snapshot =
+            { Tabs =
+                [ terminal
+                      "plain"
+                      targetPath
+                      []
+                      (EmbeddedTerminalLifecycle.Running
+                          "http://127.0.0.1:61231/")
+                  terminal
+                      "linked"
+                      targetPath
+                      [ "system-target" ]
+                      (EmbeddedTerminalLifecycle.Running
+                          "http://127.0.0.1:61232/") ] }
+        let model =
+            { defaultModel with
+                Repos =
+                    [ makeRepo
+                          "r"
+                          [ focusWorktree
+                            targetWorktree ] ]
+                FocusedElement = Some(Card "r/focus")
+                TerminalPaneOpen = false
+                EmbeddedTerminals = snapshot
+                ActiveEmbeddedTerminals =
+                    Map.ofList [ targetPath, plainId ]
+                EmbeddedTerminalViewStates =
+                    Map.ofList [
+                        plainId,
+                        { Generation = 1
+                          FocusAfterLoad = true }
+                        linkedId,
+                        { Generation = 2
+                          FocusAfterLoad = true }
+                    ]
+                Canvas.TargetWorktree = Some "r/target"
+                Canvas.BridgeLiveness =
+                    bridgeLiveness (Some "system-target") }
+
+        model, targetPath, plainId, linkedId
+
+    [<Test>]
+    member _.``AgentDocs use persisted owners while SystemViews use the worktree routing target``() =
+        let agentDoc =
+            { makeDoc "status.html" "h1" with
+                OwnerSessionId = Some "owner" }
+        let systemView = makeSystemDoc "diff.html" "h2"
+        let liveness = bridgeLiveness (Some "system-target")
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                CanvasTerminalLink.effectiveSessionId
+                    liveness
+                    "r/target"
+                    agentDoc,
+                Is.EqualTo(Some "owner")
+            )
+            Assert.That(
+                CanvasTerminalLink.effectiveSessionId
+                    liveness
+                    "r/target"
+                    systemView,
+                Is.EqualTo(Some "system-target")
+            ))
+
+    [<Test>]
+    member _.``Selecting a cross-worktree SystemView remembers its matching terminal without opening the pane``() =
+        let model, targetPath, _, linkedId =
+            linkedSystemViewModel ()
+
+        let selected, cmd =
+            update
+                (SelectCanvasDoc("r/target", "diff.html"))
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(selected.TerminalPaneOpen, Is.False)
+            Assert.That(selected.FocusedElement, Is.EqualTo(model.FocusedElement))
+            Assert.That(
+                selected.TerminalPaneTarget,
+                Is.EqualTo(Some targetPath)
+            )
+            Assert.That(
+                selected.EmbeddedTerminalViewStates
+                |> Map.values
+                |> Seq.exists _.FocusAfterLoad,
+                Is.False,
+                "Canvas selection must cancel pending terminal focus"
+            )
+            Assert.That(
+                TerminalPane.activeTerminalId
+                    (Some targetPath)
+                    selected.ActiveEmbeddedTerminals
+                    selected.EmbeddedTerminals,
+                Is.EqualTo(Some linkedId)
+            )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``TerminalHost update locking leaves terminal selection unchanged``() =
+        let model, targetPath, plainId, _ =
+            linkedSystemViewModel ()
+
+        let selected, cmd =
+            update
+                (SelectCanvasDoc("r/target", "diff.html"))
+                { model with
+                    TerminalHostUpdate =
+                        TerminalHostUpdateModel.RequestInFlight }
+
+        Assert.Multiple(fun () ->
+            Assert.That(selected.TerminalPaneTarget, Is.EqualTo(None))
+            Assert.That(
+                TerminalPane.activeTerminalId
+                    (Some targetPath)
+                    selected.ActiveEmbeddedTerminals
+                    selected.EmbeddedTerminals,
+                Is.EqualTo(Some plainId)
+            )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``Opening a cross-worktree diff selects its matching terminal without changing card focus``() =
+        let model, targetPath, _, linkedId =
+            linkedSystemViewModel ()
+        let initial =
+            { model with
+                Canvas.CanvasPaneOpen = true
+                Canvas.TargetWorktree = None }
+
+        let opened, _ =
+            update
+                (OpenWorktreeDiff "r/target")
+                initial
+
+        Assert.Multiple(fun () ->
+            Assert.That(opened.TerminalPaneOpen, Is.False)
+            Assert.That(opened.FocusedElement, Is.EqualTo(initial.FocusedElement))
+            Assert.That(opened.Canvas.TargetWorktree, Is.EqualTo(Some "r/target"))
+            Assert.That(opened.TerminalPaneTarget, Is.EqualTo(Some targetPath))
+            Assert.That(
+                TerminalPane.activeTerminalId
+                    (Some targetPath)
+                    opened.ActiveEmbeddedTerminals
+                    opened.EmbeddedTerminals,
+                Is.EqualTo(Some linkedId)
+            ))
+
+    [<Test>]
+    member _.``Opening an owned AgentDoc selects its matching terminal``() =
+        let focusWorktree = makeWorktree "r" "focus" []
+        let ownedDoc =
+            { makeDoc "status.html" "h1" with
+                OwnerSessionId = Some "owner" }
+        let targetWorktree =
+            makeWorktree "r" "target" [ ownedDoc ]
+        let targetPath = targetWorktree.Path
+        let plainId = EmbeddedTerminalId "plain"
+        let linkedId = EmbeddedTerminalId "linked"
+        let model =
+            { defaultModel with
+                Repos =
+                    [ makeRepo
+                          "r"
+                          [ focusWorktree
+                            targetWorktree ] ]
+                FocusedElement = Some(Card "r/focus")
+                Canvas.CanvasPaneOpen = true
+                EmbeddedTerminals =
+                    { Tabs =
+                        [ terminal
+                              "plain"
+                              targetPath
+                              []
+                              (EmbeddedTerminalLifecycle.Running
+                                  "http://127.0.0.1:61231/")
+                          terminal
+                              "linked"
+                              targetPath
+                              [ "owner" ]
+                              (EmbeddedTerminalLifecycle.Running
+                                  "http://127.0.0.1:61232/") ] }
+                ActiveEmbeddedTerminals =
+                    Map.ofList [ targetPath, plainId ] }
+
+        let opened, _ =
+            update
+                (OpenCanvasDoc("r/target", "status.html"))
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(opened.TerminalPaneOpen, Is.False)
+            Assert.That(opened.FocusedElement, Is.EqualTo(Some(Card "r/target")))
+            Assert.That(opened.TerminalPaneTarget, Is.EqualTo(Some targetPath))
+            Assert.That(
+                TerminalPane.activeTerminalId
+                    (Some targetPath)
+                    opened.ActiveEmbeddedTerminals
+                    opened.EmbeddedTerminals,
+                Is.EqualTo(Some linkedId)
+            ))
+
+    [<Test>]
+    member _.``Selecting an externally owned AgentDoc leaves terminal selection unchanged``() =
+        let doc =
+            { makeDoc "status.html" "h1" with
+                OwnerSessionId = Some "external-owner" }
+        let worktree = makeWorktree "r" "target" [ doc ]
+        let plainId = EmbeddedTerminalId "plain"
+        let snapshot =
+            { Tabs =
+                [ terminal
+                      "plain"
+                      worktree.Path
+                      []
+                      (EmbeddedTerminalLifecycle.Running
+                          "http://127.0.0.1:61231/") ] }
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "r" [ worktree ] ]
+                FocusedElement = Some(Card "r/target")
+                EmbeddedTerminals = snapshot
+                ActiveEmbeddedTerminals =
+                    Map.ofList [ worktree.Path, plainId ] }
+
+        let selected, cmd =
+            update
+                (SelectCanvasDoc("r/target", "status.html"))
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(selected.TerminalPaneTarget, Is.EqualTo(None))
+            Assert.That(
+                selected.ActiveEmbeddedTerminals,
+                Is.EqualTo(model.ActiveEmbeddedTerminals)
+            )
+            Assert.That(dispatchedMsgs cmd, Is.Empty))
+
 
 // ── unviewedDocsByScopedKey ──────────────────────────────────────────
 

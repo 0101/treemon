@@ -87,6 +87,22 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
             model.Canvas.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
         | _ -> []
 
+    let selectedTerminalSessionIds =
+        if model.TerminalPaneOpen then
+            let selectedWorktree =
+                TerminalPane.selectedWorktree
+                    model.TerminalPaneTarget
+                    model.FocusedElement
+
+            TerminalPane.activeTerminal
+                selectedWorktree
+                model.ActiveEmbeddedTerminals
+                model.EmbeddedTerminals
+            |> Option.map TerminalPane.liveSessionIds
+            |> Option.defaultValue Set.empty
+        else
+            Set.empty
+
     let canvasCallbacks: CanvasPane.CanvasPaneCallbacks =
         { SelectDoc = selectCanvasDoc
           OnOverviewClick = onOverviewClick
@@ -107,7 +123,8 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           PathCopyState = model.Canvas.PathCopyState
           ActiveScopedKey = activeCanvasScopedKey
           ShareState = model.Canvas.ShareState
-          BridgeLiveness = model.Canvas.BridgeLiveness }
+          BridgeLiveness = model.Canvas.BridgeLiveness
+          SelectedTerminalSessionIds = selectedTerminalSessionIds }
 
     let canvasAwareness: CanvasPane.CanvasPaneAwareness =
         { UnviewedByScopedKey = unviewedByScopedKey

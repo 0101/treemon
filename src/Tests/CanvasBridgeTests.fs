@@ -899,6 +899,121 @@ type SystemViewInteractionRoutingTests() =
             Assert.That(target, Is.EqualTo(Some(SessionId newer))))
 
     [<Test>]
+    member _.``Bridge liveness projects the activity-selected SystemView target, not the freshest registration``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-projection"
+            let active = uniqueSid "active"
+            let freshest = uniqueSid "freshest"
+
+            let activeIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:1/inject" (Some active)
+
+            Thread.Sleep 15
+
+            let freshestIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:2/inject" (Some freshest)
+
+            let statuses =
+                [ storedAt activeIdentity active path "2026-03-01T12:05:00Z"
+                  storedAt freshestIdentity freshest path "2026-03-01T12:00:00Z" ]
+
+            let instancesByWorktree =
+                statuses
+                |> Server.SchedulerState.groupInstancesByWorktree
+
+            let systemViewTarget worktreePath liveSessions =
+                instancesByWorktree
+                |> Map.tryFind (
+                    Server.PathUtils.normalizePath
+                        worktreePath
+                )
+                |> Option.defaultValue []
+                |> fun instances ->
+                    selectSystemViewTarget instances liveSessions
+                |> Option.map SessionId.value
+
+            let liveness =
+                getAllLivenessAt
+                    systemViewTarget
+                    DateTime.UtcNow
+                    [ path ]
+                |> Map.find path
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    liveness.SessionId,
+                    Is.EqualTo(Some freshest),
+                    "Aggregate status still reports the freshest bridge registration"
+                )
+                Assert.That(
+                    liveness.SystemViewTargetSessionId,
+                    Is.EqualTo(Some active),
+                    "SystemView metadata must use the same activity-aware selection as delivery"
+                )
+                Assert.That(
+                    liveness.LiveSessionIds,
+                    Is.EqualTo(List.sort [ active; freshest ])
+                )))
+
+    [<Test>]
+    member _.``A SystemView ignores presence-only rows when falling back to the freshest registration``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-presence-only"
+            let older = uniqueSid "z-older"
+            let newer = uniqueSid "a-newer"
+
+            let olderIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:1/inject" (Some older)
+
+            Thread.Sleep 15
+
+            let newerIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:2/inject" (Some newer)
+
+            let presence identity sessionId =
+                { storedAt identity sessionId path "2026-03-01T12:00:00Z" with
+                    UpdatedAt = DateTimeOffset.MinValue
+                    LifecycleAt = None }
+
+            let target =
+                runAsync (
+                    resolveTarget
+                        [ presence olderIdentity older
+                          presence newerIdentity newer ]
+                        path
+                        "diff.html"
+                )
+
+            Assert.That(target, Is.EqualTo(Some(SessionId newer))))
+
+    [<Test>]
+    member _.``A SystemView activity target uses canonical worktree path comparison``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-canonical"
+            let alias =
+                path
+                + string IO.Path.DirectorySeparatorChar
+            let active = uniqueSid "active"
+            let freshest = uniqueSid "freshest"
+
+            let activeIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:1/inject" (Some active)
+
+            Thread.Sleep 15
+
+            let freshestIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:2/inject" (Some freshest)
+
+            let statuses =
+                [ storedAt activeIdentity active path "2026-03-01T12:05:00Z"
+                  storedAt freshestIdentity freshest path "2026-03-01T12:00:00Z" ]
+
+            let target =
+                runAsync (resolveTarget statuses alias "diff.html")
+
+            Assert.That(target, Is.EqualTo(Some(SessionId active))))
+
+    [<Test>]
     member _.``A SystemView ignores a more recently active session that is not live``() =
         withTempCwd (fun () ->
             let path = uniquePath "sv-dead"
