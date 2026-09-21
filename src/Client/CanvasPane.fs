@@ -99,7 +99,16 @@ let focusActiveDoc () =
 /// Render a SystemView entry for the tab strip. SystemViews are deliberately not normal AgentDoc
 /// tabs: they use a distinct class, carry no liveness dot, and retain the shared double-click
 /// affordance for opening the exact iframe URL in a standalone browser tab.
-let private systemViewTab (wt: WorktreeStatus) (isActive: bool) (selectDoc: string -> unit) (doc: CanvasDoc) =
+let private terminalLinkTitleSuffix isLinked =
+    if isLinked then " — Connected to selected terminal" else ""
+
+let private systemViewTab
+    (wt: WorktreeStatus)
+    (isActive: bool)
+    (isTerminalLinked: bool)
+    (selectDoc: string -> unit)
+    (doc: CanvasDoc)
+    =
     let glyph, count, label =
         match doc.Filename.ToLowerInvariant() with
         | "beads.html" -> Html.text "BD", Some(string (beadsTotal wt.Beads)), "Beads issues"
@@ -107,10 +116,16 @@ let private systemViewTab (wt: WorktreeStatus) (isActive: bool) (selectDoc: stri
         | _ -> Html.text (doc.Filename.Replace(".html", "")), None, doc.Filename
 
     Html.button [
-        prop.className (if isActive then "canvas-system-tab active" else "canvas-system-tab")
+        prop.className (
+            [ "canvas-system-tab"
+              if isActive then "active"
+              if isTerminalLinked then "canvas-terminal-linked" ]
+            |> String.concat " ")
         prop.onClick (fun _ -> selectDoc doc.Filename)
         prop.onDoubleClick (fun _ -> openDocInBrowserTab wt doc)
-        prop.title $"{label} — double-click to open in a browser tab"
+        prop.title (
+            $"{label} — double-click to open in a browser tab"
+            + terminalLinkTitleSuffix isTerminalLinked)
         prop.children [
             Html.span [
                 prop.className "canvas-system-tab-glyph"
@@ -241,7 +256,8 @@ type CanvasPaneState =
       PathCopyState: CanvasPathCopyState
       ActiveScopedKey: string option
       ShareState: CanvasShareState
-      BridgeLiveness: Map<string, BridgeLiveness> }
+      BridgeLiveness: Map<string, BridgeLiveness>
+      SelectedTerminalSessionIds: Set<string> }
 
 /// The awareness/doc slices `view` renders from, bundled into one record for the same reason as
 /// `CanvasPaneState`/`CanvasPaneCallbacks`: to stop `view`'s signature growing a fresh positional
@@ -261,7 +277,8 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
           PathCopyState = pathCopyState
           ActiveScopedKey = activeScopedKey
           ShareState = shareState
-          BridgeLiveness = bridgeLiveness } = state
+          BridgeLiveness = bridgeLiveness
+          SelectedTerminalSessionIds = selectedTerminalSessionIds } = state
     let { SelectDoc = selectDoc
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
@@ -407,12 +424,20 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
         match focusedDoc with
         | Some (wt, doc) ->
             let isFocusedDocAlive = isDocAlive bridgeLiveness doc
+            let scopedKey = WorktreePath.value wt.Path
+            let isTerminalLinked linkedDoc =
+                CanvasTerminalLink.effectiveSessionId
+                    bridgeLiveness
+                    scopedKey
+                    linkedDoc
+                |> Option.exists selectedTerminalSessionIds.Contains
             // The SystemView (beads) entry gets a distinct affordance pinned to the far left of the
             // strip; AgentDocs keep the normal tab treatment. The strip always renders the active
             // doc's tab — including a lone AgentDoc (so it gets a labeled tab instead of a bare
             // iframe) and a lone SystemView (so its beads-count badge stays visible).
             let agentTab (d: CanvasDoc) =
                 let isActive = d.Filename = doc.Filename
+                let isLinked = isTerminalLinked d
                 let isViewed = not (Set.contains d.Filename unviewedFilenames)
                 let isCopied = CanvasPathCopyState.isCopied activeScopedKey d.Filename pathCopyState
                 let isShareActive = shareState <> CanvasShareState.Idle
@@ -425,7 +450,8 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                 let cls =
                     [ "canvas-tab"
                       if isActive then "active"
-                      if isViewed && not isActive then "canvas-tab-viewed" ]
+                      if isViewed && not isActive then "canvas-tab-viewed"
+                      if isLinked then "canvas-terminal-linked" ]
                     |> String.concat " "
                 Html.div [
                     prop.className "canvas-tab-shell"
@@ -434,7 +460,9 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                             prop.className cls
                             prop.onClick (fun _ -> selectDoc d.Filename)
                             prop.onDoubleClick (fun _ -> openDocInBrowserTab wt d)
-                            prop.title $"{d.Filename} — double-click to open in a browser tab (for full-page screenshots)"
+                            prop.title (
+                                $"{d.Filename} — double-click to open in a browser tab (for full-page screenshots)"
+                                + terminalLinkTitleSuffix isLinked)
                             prop.children [
                                 livenessDotFor bridgeLiveness d
                                 Html.text (d.Filename.Replace(".html", ""))
@@ -466,7 +494,13 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                 |> List.sortBy (fun d -> match d.Kind with SystemView -> 0 | AgentDoc -> 1)
                 |> List.map (fun d ->
                     match d.Kind with
-                    | SystemView -> systemViewTab wt (d.Filename = doc.Filename) selectDoc d
+                    | SystemView ->
+                        systemViewTab
+                            wt
+                            (d.Filename = doc.Filename)
+                            (isTerminalLinked d)
+                            selectDoc
+                            d
                     | AgentDoc -> agentTab d)
             // Render iframes for all visited docs; active is visible, others are hidden.
             // Ensure the active doc is always included even if not yet in visitedDocs.

@@ -112,8 +112,11 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 - The pane normally follows the focused worktree. An explicit card-level SystemView action may target another worktree without moving dashboard card focus; the next explicit card selection clears that override.
 - The worktree diff is explicit-only when another canvas document exists. Automatic fallback and explicit card selection prefer another document; `diff.html` is selected automatically only when it is the worktree's sole canvas document. The card Diff action — through button activation or an unmodified `d` or `D` keypress while the card is focused — and direct tab selection still open it. The server omits the generated `diff.html` from a confirmed-clean worktree's inventory (`docs/spec/worktree-diff-viewer.md`), so a clean worktree shows no diff tab — the tab strip needs no per-view visibility rule of its own.
 - Worktrees with multiple docs show tab buttons. The active doc's tab always renders — a lone `AgentDoc` gets a labeled tab instead of a bare iframe, and a lone `SystemView` still shows its `.canvas-system-tab` entry so its beads-count badge stays visible. Each `AgentDoc` tab reserves a fixed-width metadata slot: it shows compact last-modified age normally, then swaps in an outlined Copy button only while hovered. Copy writes the doc's full on-disk path using the worktree path's separator; success replaces the rectangles with a green checkmark for 1.2 seconds, while failure uses the existing actionable error banner. Path copy and Canvas Share disable each other until the active clipboard workflow settles. The overlay changes opacity only, so tab dimensions stay fixed.
-- Selecting a tab marks that doc viewed.
-- Viewed but inactive tabs render at 0.5 opacity. The active tab stays full opacity.
+- Selecting a tab marks that doc viewed. When its effective session matches a terminal in the
+  targeted worktree, selection also selects that terminal without opening, revealing, or focusing
+  the Terminal pane.
+- Viewed but inactive tabs render at 0.5 opacity, preserving the original whole-tab treatment. The
+  active tab stays full opacity.
 - The archive button moves the active doc to `.agents/canvas/archive/`. It is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-regenerated, not user-owned, so it has no archive button.
 - The share button publishes the active doc to an unguessable, auto-expiring authenticated-viewer URL and copies a rich titled link to the clipboard. Like archive, it is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-generated, not shareable, so it has no share button. Clipboard success uses the dismissible `ClipboardNotice` channel (green), independent of the send `Waiting` and delivery-`Failed` banners: a successful publish shows `Shared — link copied` (or `Shared — link ready, copy it manually: <url>` when the async clipboard write is rejected), while a *failed* publish reuses the existing red `CanvasSendState.Failed` error banner. Success and failure are mutually exclusive — each result arm clears the other channel — so a red + green stack never renders. Share cannot start while a path copy is pending, and path copy cannot start until Share has completed its publish and clipboard phases. See `docs/spec/canvas-sharing.md` for the full publish/viewer/clipboard flow.
 
@@ -147,9 +150,18 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   `SessionId` lookup keeps multiple sessions in one worktree and multiple physical processes for one
   durable session without overwriting either. Canvas ownership collapses same-`SessionId` duplicates
   to the freshest live physical registration (see `docs/spec/canvas-interaction-routing.md`).
-- Each canvas filename has a persistent routing target in `CanvasDocOwnership.fs`; AgentDocs assign it from authoring writes, while SystemViews assign it from their affinity policy.
-- `BridgeLiveness.LiveSessionIds` exposes every identified session whose registration is within the liveness TTL. The worktree-level `SessionId` remains the freshest registration for aggregate status and SystemView fallback behavior, but it does not decide authored-document liveness.
+- Only AgentDocs have a persistent routing target in `CanvasDocOwnership.fs`, assigned from
+  authoring writes. A SystemView target is computed from current live bridge registrations and is
+  never stored.
+- `BridgeLiveness.LiveSessionIds` exposes every identified session whose registration is within
+  the liveness TTL. It also exposes the exact current activity-aware SystemView target for each
+  worktree, or none when no live registration exists. Heartbeat and usage timestamps do not choose
+  that target.
 - The liveness dot shown in tabs and overview checks the doc's `OwnerSessionId` against `LiveSessionIds`, so two concurrently heartbeating sessions in one worktree both keep their own documents alive regardless of heartbeat order. It renders only for `AgentDoc` docs (via `livenessDotFor`); a `SystemView` has no owner session and shows no liveness dot.
+- A canvas tab's effective session is its AgentDoc owner or its SystemView target. A dark green
+  background tint and green primary text appear only when that session is present in the selected
+  running terminal and the Terminal pane is visible. Unowned tabs retain their original colors;
+  read opacity and selected borders remain unchanged.
 - The pane shows `▶ Start session` only when the active doc is an `AgentDoc` whose recorded owner is not live. A `SystemView` never has this button.
 - `LaunchCanvasSession` starts an embedded terminal through the shared action-launch flow and sends
   a cold-start prompt built by `CanvasSessionPrompt.forAgentDoc` in
@@ -158,11 +170,11 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   `filename`, and read `.agents/canvas/<filename>` beneath the JSON `worktreePath` before handling
   user interactions through the doc. The direct action opens the terminal pane and selects the
   exact new terminal.
-- Canvas messages route to the author session for the selected doc.
+- AgentDoc messages route to the selected doc's author session.
 - If the recorded owner is unreachable, the message queues. After a replacement session claims the doc, its next bridge registration can deliver the waiting message; doc identity never changes.
-- SystemView interactions store no target. Each one resolves to the worktree's most recently active
-  session that currently holds a live bridge registration, so nothing is surfaced as
-  `OwnerSessionId` and liveness UI is unaffected. If no session can receive the interaction, the
+- SystemView interactions resolve the current effective session at send time. It is not surfaced as
+  `OwnerSessionId`, so authored-document liveness UI is unaffected. If no session can receive the
+  interaction, the
   server starts one embedded session with a SystemView-specific prompt without stealing dashboard
   focus: load the canvas skill for its interaction protocol, but do not apply its authoring
   instructions because the view is generated and must not be edited or claimed; the queued user
@@ -323,6 +335,9 @@ changed rows already use).
 
 - Relative `.html` links and same-origin canvas doc links are intercepted and converted into `navigate-canvas-doc` messages for tab switching.
 - The interceptor resolves a same-origin `.html` link to a bare filename even when the href carries a `?query` or `#hash` suffix, so `status.html?tab=errors` and `status.html#top` both navigate to the `status.html` tab.
+- Selecting a canvas doc with a matching running terminal applies the same effective-session
+  terminal selection as selecting its tab. A missing, stale, external, or plain-shell session has
+  no terminal effect.
 - External links open in the system browser.
 
 ## Technical Approach
@@ -338,7 +353,7 @@ changed rows already use).
 
 | File | Purpose |
 |---|---|
-| `src/Shared/Types.fs` | Shared canvas domain types (including `CanvasDocKind`), API methods, bridge liveness, send results, workspace width, and the JSON document-identity/prompt builder used by both startup flows |
+| `src/Shared/Types.fs` | Shared canvas domain types (including `CanvasDocKind`), API methods, bridge liveness with effective SystemView targets, send results, workspace width, and the JSON document-identity/prompt builder used by both startup flows |
 | `src/Extension/canvas-filename-contract.json` | Authoritative cross-runtime canvas filename pattern |
 | `src/Extension/canvas-filename.mjs` | Extension-side loader and exact-match validator for the shared filename pattern |
 | `src/Extension/canvas-doc-kinds.mjs` | Shared extension-side SystemView classification for fallback rendering and edit reminders |
@@ -347,10 +362,10 @@ changed rows already use).
 | `src/Client/CanvasSessionPrompt.fs` | AgentDoc replacement-session prompt using the shared JSON document identity |
 | `src/Client/App.fs` | Elmish `init`/`update` logic and the top-level `view` wiring (the `Model`/`Msg` types and shared plumbing live in `AppTypes.fs`; the canvas model slice in `CanvasState.fs`; the canvas `update`-arm bodies in `CanvasUpdate.fs`; the canvas pane view wiring in `CanvasView.fs` — each canvas arm here is a one-line delegation) |
 | `src/Client/AppTypes.fs` | Foundation module: the Elmish `Model` + `Msg` types plus shared plumbing (`worktreeApi` lazy proxy, `findWorktree`, `saveCollapsedReposCmd`) used by both `App.fs` and the canvas update arms. Compiled after `CanvasState.fs` and before `CanvasUpdate.fs`/`App.fs` so canvas update logic can be lifted out of `App.fs` without a cyclic reference. Type relocation only — `update` stays a single function in `App.fs`. |
-| `src/Client/CanvasUpdate.fs` | Canvas `update`-arm bodies extracted from `App.fs` (Toggle/SetWorkspaceWidth/Select/Open/Archive(+Result)/CopyPath(+Result+Reset)/Share(+Result)/ClipboardWriteResult/DismissClipboardNotice/Navigate/MessageReceived/SendResult/Dismiss/LaunchCanvasSession/Morph*), the shared canvas helpers (`activeVisibleDoc`, `reconcileMountedDocs`, `syncVisibleDocCmd`, `applyFocus`), and the `messageListener` subscription glue. App.fs delegates one arm → one function. Compiled after `AppTypes.fs` and before `App.fs`. Body extraction only — `update` stays one function (no sub-`Msg`/`Cmd.map`). |
+| `src/Client/CanvasUpdate.fs` | Canvas `update`-arm bodies extracted from `App.fs` (Toggle/SetWorkspaceWidth/Select/Open/Archive(+Result)/CopyPath(+Result+Reset)/Share(+Result)/ClipboardWriteResult/DismissClipboardNotice/Navigate/MessageReceived/SendResult/Dismiss/LaunchCanvasSession/Morph*), effective-session terminal selection, the shared canvas helpers (`activeVisibleDoc`, `reconcileMountedDocs`, `syncVisibleDocCmd`, `applyFocus`), and the `messageListener` subscription glue. App.fs delegates one arm → one function. Compiled after `AppTypes.fs` and before `App.fs`. Body extraction only — `update` stays one function (no sub-`Msg`/`Cmd.map`). |
 | `src/Client/CanvasState.fs` | Canvas pane model slice — the `CanvasState` record (compiled before `App.fs`, nested as `Model.Canvas`) plus pure active-doc, rendered-iframe, mounted-hash reconciliation, and LRU helpers |
-| `src/Client/CanvasView.fs` | Canvas pane view wiring extracted from `App.fs`'s `view`: `focusedWorktreeCanvasDoc` plus the block that builds `CanvasPaneState` + `CanvasPaneCallbacks` and renders `CanvasPane.view`. Compiled after `CanvasUpdate.fs`, before `App.fs`. |
-| `src/Client/CanvasPane.fs` | Pane layout, overview, tab bar, liveness dot, iframe, banners, and message listener |
+| `src/Client/CanvasView.fs` | Canvas pane view wiring extracted from `App.fs`'s `view`: `focusedWorktreeCanvasDoc` plus the block that builds `CanvasPaneState` + `CanvasPaneCallbacks`, links effective sessions to terminal selection, and renders `CanvasPane.view`. Compiled after `CanvasUpdate.fs`, before `App.fs`. |
+| `src/Client/CanvasPane.fs` | Pane layout, overview, tab bar, effective-session terminal links, liveness dot, iframe, banners, and message listener |
 | `src/Client/Navigation.fs` | `CanvasSendState` DU |
 | `src/Client/CanvasAwareness.fs` | Pure helpers for doc awareness: recording/seeding viewed hashes (`markDocViewed`, `seedLastViewedHashes`), unviewed detection (`unviewedDocsByScopedKey`, `mostRecentUnviewedDoc`), canvas events, auto-display |
 | `src/Client/index.html` | Canvas layout, badge, tab, banner, liveness, and overview styling |
@@ -404,6 +419,6 @@ changed rows already use).
 - `docs/spec/worktree-monitor.md` — parent dashboard architecture spec
 - `docs/spec/beadspace-canvas.md` — beads dashboard integration in the canvas pane
 - `docs/spec/canvas-sharing.md` — one-click Share of a focused `AgentDoc` to an unguessable, auto-expiring authenticated-viewer URL (the tab-bar Share button, private-Blob publisher, and clipboard rich link)
-- `docs/spec/canvas-interaction-routing.md` — ownership, generated-view affinity, queueing, and session routing
+- `docs/spec/canvas-interaction-routing.md` — ownership, computed SystemView targets, queueing, and session routing
 - `docs/spec/worktree-diff-viewer.md` — generated worktree diff SystemView
 - `docs/spec/future/canvas-templates.md` — proposed reusable AgentDoc templates and scaffolding

@@ -36,6 +36,7 @@ let private startResult path id =
             [ { Id = id
                 Worktree = path
                 ReportedActivity = None
+                SessionIds = []
                 Lifecycle =
                     EmbeddedTerminalLifecycle.Running
                         $"http://127.0.0.1:41001/{EmbeddedTerminalId.value id}/" } ] }

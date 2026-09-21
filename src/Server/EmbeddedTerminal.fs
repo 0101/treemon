@@ -89,6 +89,7 @@ let private tabForRecord (terminal: TerminalHostClient.TerminalRecord) =
     { Id = EmbeddedTerminalId terminal.SessionId
       Worktree = PathUtils.toWorktreePath terminal.WorktreePath
       ReportedActivity = None
+      SessionIds = []
       Lifecycle = EmbeddedTerminalLifecycle.Running terminal.AttachmentEndpoint }
 
 let private reconcileSnapshot mode previousHost currentHost (records: TerminalHostClient.TerminalRecord list) (snapshot: EmbeddedTerminalSnapshot) =
