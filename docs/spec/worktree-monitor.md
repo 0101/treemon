@@ -265,6 +265,12 @@ native Windows Terminal tab. See `docs/spec/native-session-management.md` and
 - API responses are instant reads from in-memory state
 - Client polls every 1–15s depending on activity level (see `docs/spec/user-idle-detection.md`)
 
+### Build Toolchain
+
+`global.json` pins the repository to .NET SDK `10.0.401` with SDK roll-forward disabled. Both CI
+jobs install from that file before restore and build, so changing the compiler or SDK feature band
+requires an explicit repository policy change.
+
 ### Refresh Intervals
 
 Intervals adapt to user activity level (Active / Idle / Deep Idle). See `docs/spec/user-idle-detection.md` for the full interval table and activity state definitions. The Idle column matches the original fixed values shown here historically.
@@ -322,6 +328,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 
 | File | Purpose |
 |------|---------|
+| `global.json` and `.github/workflows/ci.yml` | Exact .NET SDK policy shared by local builds and both CI jobs |
 | `src/Shared/Types.fs` | Domain types: `DashboardResponse`, `CodingToolStatus`, `CodingToolProvider`, `CommentSummary` |
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
 | `src/Server/SchedulerState.fs` | Dashboard state model, `StateMsg` protocol, and the MailboxProcessor state agent |
@@ -389,6 +396,9 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
   receives any fallback prompt itself instead of triggering an unnecessary second session.
 - Generic `SessionBridge` under canvas routing: session registration, liveness, queueing, and prompt forwarding are shared infrastructure; `CanvasBridge` retains only document ownership and canvas-specific message semantics.
 - New session fallback: wait briefly for a selected session's bridge registration, then launch a new prompted session only when no live bridge exists; delivery failures to known live bridges stay queued for that session rather than creating parallel agents.
+- Exact SDK policy over feature-band roll-forward: local and CI builds select `10.0.401` through
+  `global.json`, so compiler and bundled dependency changes cannot enter a TerminalHost publication
+  silently.
 - net10.0 with Fable pinned to 5.0.0: Fable 4.x deadlocks when the compiled project targets net10.0, so the client needs Fable 5 (which in turn requires Feliz 3 — the Feliz 2 compiler plugin targets the Fable 4 AST). Later Fable 5 releases each break the client: 5.1.0 made F# reflection report `option` as a union, which `Fable.SimpleJson` classifies before its option case, so every `option` field in a remoting response fails to deserialize; 5.5.0 does the same for `list` and additionally rejects `Fable.Remoting.MsgPack`'s `inline private` helpers with a check stricter than `fsc`'s own. 5.0.0 predates all three. Revisit when `Fable.SimpleJson` and `Fable.Remoting` publish fixes.
 - Windows Terminal per-window tracking via HWND is retained only for the explicit native card
   action; tabs are not independently addressable, so one tracked window per worktree remains the
