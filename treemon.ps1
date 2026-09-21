@@ -554,12 +554,14 @@ function Install-TtydRuntime {
     & (Join-Path $ScriptDir "scripts\setup-ttyd.ps1")
 }
 
-function Publish-ServerCandidate {
+function Publish-ServerCandidate([string[]]$AdditionalPublishArguments = @()) {
     $candidate = "$PublishDir.candidate-$([Guid]::NewGuid().ToString('N'))"
     try {
         Install-TtydRuntime
         Write-Host "Publishing server candidate..." -ForegroundColor Cyan
-        dotnet publish -c Release -o $candidate (Join-Path $ScriptDir "src\Server\Server.fsproj") |
+        dotnet publish -c Release -o $candidate @AdditionalPublishArguments (
+            Join-Path $ScriptDir "src\Server\Server.fsproj"
+        ) |
             Out-Host
         if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
 
