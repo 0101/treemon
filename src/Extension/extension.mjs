@@ -13,7 +13,6 @@ import {
 import { isTrustedInjectionHeaders } from "./injection-request.mjs";
 import { readBody } from "./request-body.mjs";
 import {
-  promptForBrowserFallback,
   promptForCanvasMessage,
   promptForSession,
 } from "./session-prompt.mjs";
@@ -332,10 +331,9 @@ function startHeartbeat(registration) {
 
 // React to a successful canvas-doc write. Monitored: declare ownership (the authoritative
 // attribution path; the server's file-watcher is fallback-only) — the extension stamps in its own
-// sessionId, the agent only supplied the filename. Browser mode always serves the doc locally, but
-// only an unreachable Treemon sends the session a clickable URL; a known unmonitored worktree stays
-// silent so it does not compete with a host-native canvas.
-async function handleCanvasWrite(session, state, registration, filename) {
+// sessionId, the agent only supplied the filename. Browser mode serves the doc locally without
+// injecting write notifications into the agent session.
+async function handleCanvasWrite(state, filename) {
   if (!isValidCanvasFilename(filename)) {
     log(`canvas write: ignoring unsafe filename ${JSON.stringify(filename)}`);
     return;
@@ -351,10 +349,6 @@ async function handleCanvasWrite(session, state, registration, filename) {
 
   const url = `http://127.0.0.1:${state.port}/canvas/${encodeURIComponent(filename)}`;
   log(`canvas write: serving ${filename} in browser mode → ${url}`);
-  const fallbackPrompt = promptForBrowserFallback(registration, filename, url);
-  if (fallbackPrompt) {
-    enqueueSend(session, fallbackPrompt.kind, fallbackPrompt.prompt);
-  }
 }
 
 const worktreePath = process.cwd();
@@ -459,7 +453,7 @@ extensionState.browserMode = browserMode;
 Object.freeze(extensionState);
 
 // State is frozen and valid; start handling canvas writes (flushing any buffered during startup).
-canvasWrites.activate((write) => handleCanvasWrite(session, extensionState, registered, write));
+canvasWrites.activate((write) => handleCanvasWrite(extensionState, write));
 
 if (browserMode) {
   const reason = !registered.reachable ? "Treemon unreachable" : "directory not monitored by Treemon";
