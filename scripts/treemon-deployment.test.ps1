@@ -170,11 +170,19 @@ try {
     }
 
     $PublishDir = Join-Path $root "candidate-active"
-    $candidateServer = Publish-ServerCandidate
+    $candidateBuildRoot = Join-Path $root "candidate-build"
+    $candidateServer = Publish-ServerCandidate -AdditionalPublishArguments @(
+        "-p:UseArtifactsOutput=true"
+        "-p:ArtifactsPath=$candidateBuildRoot"
+        "-p:PathMap=$candidateBuildRoot=/_/artifacts"
+    )
     Assert-True ($candidateServer -is [string]) "Server candidate path was not scalar"
     $candidateHost = Join-Path $candidateServer "terminal-host"
+    Assert-True (
+        -not (Test-Path -LiteralPath (Join-Path $candidateHost "Shared.dll") -PathType Leaf)
+    ) "Published TerminalHost bundle still contained Shared.dll"
     $revisionStampedHostAssemblies = @(
-        @("TerminalHost.exe", "TerminalHost.dll", "Shared.dll", "TerminalHostLayout.dll") |
+        @("TerminalHost.exe", "TerminalHost.dll", "TerminalHostLayout.dll") |
             Where-Object {
                 $version = [Diagnostics.FileVersionInfo]::GetVersionInfo(
                     (Join-Path $candidateHost $_)
@@ -186,10 +194,6 @@ try {
         $revisionStampedHostAssemblies.Count -eq 0
     ) "Published TerminalHost assemblies included repository revision metadata"
     Write-Host "PASS: published host identity excludes repository revision metadata"
-
-    Publish-TestProject (
-        Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
-    ) $baseline "1.0.0-deployment-test"
 
     $env:TREEMON_TERMINAL_HOST_STATE_DIR = $emptyState
     $layoutProbe = Test-TerminalHostDeployment $candidateServer
@@ -210,6 +214,30 @@ try {
         [IO.Path]::GetFullPath($emptyState)
     ) "PowerShell did not consume the candidate's state-directory authority"
     Write-Host "PASS: candidate layout owns the non-default state and staging paths"
+
+    $repeatCandidateBuildRoot = Join-Path $root "repeat-candidate-build"
+    $repeatCandidateServer = Publish-ServerCandidate -AdditionalPublishArguments @(
+        "-p:UseArtifactsOutput=true"
+        "-p:ArtifactsPath=$repeatCandidateBuildRoot"
+        "-p:PathMap=$repeatCandidateBuildRoot=/_/artifacts"
+    )
+    $repeatCandidateHost = Join-Path $repeatCandidateServer "terminal-host"
+    Assert-True (
+        -not (Test-Path -LiteralPath (Join-Path $repeatCandidateHost "Shared.dll") -PathType Leaf)
+    ) "Repeated TerminalHost publish contained Shared.dll"
+    Assert-True (
+        (Get-TerminalHostBundleDigest $candidateHost $layoutProbe.Layout) -ceq
+        (Get-TerminalHostBundleDigest $repeatCandidateHost $layoutProbe.Layout)
+    ) "Repeated identical nested TerminalHost publications produced different bundle digests"
+    Write-Host "PASS: identical nested TerminalHost publications have a stable bundle digest"
+
+    Publish-TestProject (
+        Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
+    ) $baseline "1.0.0-deployment-test"
+    Assert-True (
+        -not (Test-Path -LiteralPath (Join-Path $baseline "Shared.dll") -PathType Leaf)
+    ) "Direct TerminalHost publish still contained Shared.dll"
+    Write-Host "PASS: TerminalHost publish excludes Shared.dll"
 
     $fingerprintDirectory = Join-Path $root "fingerprints"
     $fingerprintNestedDirectory = Join-Path $fingerprintDirectory "nested"

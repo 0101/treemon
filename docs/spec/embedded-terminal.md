@@ -411,6 +411,16 @@ bundle members. Server and host reference that contract directly; deployment Pow
 the candidate server's serialized layout rather than reconstructing it. Treemon publish output
 carries the independent host under `terminal-host\`.
 
+The terminal-page `postMessage` vocabulary lives in
+`src/Shared/TerminalPageMessage.fs`, which is compiled directly into both `Shared` and
+`TerminalHost`. The client retains the `Shared.TerminalPageMessage` API while TerminalHost has no
+project or runtime dependency on `Shared.dll`; dashboard-only shared types therefore cannot change
+the host bundle.
+
+`global.json` selects the exact .NET SDK `10.0.401` with roll-forward disabled, and both CI jobs
+install the SDK from that repository policy. An SDK change is therefore deliberate and changes the
+published host bundle when its compiler or bundled dependencies produce different bytes.
+
 Deployment fingerprints the complete non-PDB TerminalHost bundle. The nested host publish excludes
 repository source-revision metadata, so an unrelated Treemon commit does not change that fingerprint;
 any changed host assembly or runtime file does. An equal live fingerprint skips staging, while a
@@ -503,6 +513,11 @@ and dynamically allocated non-production ports. Tests never bind production port
   focus, and queued-launch suppression while locked.
 - Existing launch-routing tests prove every embedded and agent-bearing API route reaches the shared
   `TerminalLaunch`/`EmbeddedTerminal` boundary.
+- `TerminalRuntimeBudgetTests` asserts that the terminal-page protocol file is the only source
+  compiled into both Shared and TerminalHost, and that TerminalHost has no Shared project reference.
+- `scripts/treemon-deployment.test.ps1` asserts that host publication omits `Shared.dll`, two
+  identical publications have the same complete non-PDB digest, and changed runtime content still
+  changes the digest and stages an update.
 - Run the focused tests first, then `dotnet test src/Tests/Tests.fsproj --filter "Category=Fast"`.
 
 ## Decisions
@@ -548,6 +563,12 @@ and dynamically allocated non-production ports. Tests never bind production port
 - **Bundle content over repository revision:** staging uses the complete non-PDB host fingerprint,
   while source-revision metadata is excluded from the nested publish. Unrelated commits cannot offer
   an update, but a changed host assembly or runtime file does.
+- **Shared source over a Shared runtime dependency:** the terminal-page literals are linked into both
+  assemblies from one source file. The client API stays stable, protocol edits rebuild the host, and
+  unrelated dashboard shared-model edits cannot add `Shared.dll` or stage a host update.
+- **Exact SDK over feature-band roll-forward:** the repository and CI use SDK `10.0.401` from
+  `global.json`. Toolchain changes require an explicit policy edit and remain covered by the full
+  bundle fingerprint.
 - **Native-only card session state:** embedded terminals do not change `HasActiveSession`; coding-tool
   activity remains the agent indicator.
 - **Cleanup sequencing before host-wide replacement:** delete/archive retains its canonical-path
@@ -561,7 +582,9 @@ and dynamically allocated non-production ports. Tests never bind production port
 | File | Purpose |
 |---|---|
 | `src/TerminalHostLayout/Layout.fs` | Shared state/staging paths, version-directory grammar, executable names, and required host bundle members |
+| `src/Shared/TerminalPageMessage.fs` | Single source of truth for terminal-page messages, compiled into both Shared and TerminalHost without a runtime assembly dependency |
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
+| `global.json` and `.github/workflows/ci.yml` | Exact repository SDK policy and CI installation from that policy |
 | `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, authenticated control client, staged-executable selection, and the one-pass update sequence |
 | `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, cleanup reservation, command-capable start, and authoritative snapshot reconciliation |
