@@ -2681,6 +2681,7 @@ type DashboardTests() =
                 { Id = thirdTerminal
                   Worktree = worktreePath
                   ReportedActivity = Some "Third terminal"
+                  SessionIds = []
                   Lifecycle =
                     EmbeddedTerminalLifecycle.Running
                         $"{ServerFixture.canvasUrl}/fixture-terminal-third" }
@@ -2690,12 +2691,14 @@ type DashboardTests() =
                     [ { Id = firstTerminal
                         Worktree = worktreePath
                         ReportedActivity = Some "First terminal"
+                        SessionIds = []
                         Lifecycle =
                             EmbeddedTerminalLifecycle.Running
                                 $"{ServerFixture.canvasUrl}/fixture-terminal-first" }
                       { Id = secondTerminal
                         Worktree = worktreePath
                         ReportedActivity = Some "Second terminal"
+                        SessionIds = []
                         Lifecycle =
                             EmbeddedTerminalLifecycle.Running
                                 $"{ServerFixture.canvasUrl}/fixture-terminal-second" } ] }
@@ -3057,6 +3060,7 @@ type DashboardTests() =
                     [ { Id = terminalId
                         Worktree = worktreePath
                         ReportedActivity = Some "Background agent"
+                        SessionIds = []
                         Lifecycle =
                             EmbeddedTerminalLifecycle.Running
                                 $"{ServerFixture.canvasUrl}/fixture-terminal" } ] }

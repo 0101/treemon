@@ -162,6 +162,7 @@ type FormatEmbeddedTerminalReportTests() =
         { Id = EmbeddedTerminalId id
           Worktree = WorktreePath path
           ReportedActivity = activity
+          SessionIds = []
           Lifecycle = lifecycle }
 
     [<Test>]

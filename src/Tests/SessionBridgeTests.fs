@@ -121,7 +121,10 @@ let private livenessScenarios =
         { Name = name; SessionAge = sessionAge; Poll = poll; Expected = expected }
 
     let liveness isAlive sessionId liveSessionIds =
-        { IsAlive = isAlive; SessionId = sessionId; LiveSessionIds = liveSessionIds }
+        { IsAlive = isAlive
+          SessionId = sessionId
+          LiveSessionIds = liveSessionIds
+          SystemViewTargetSessionId = None }
 
     [ case "no session and no poll registration is unregistered" None (false, 0) None
       case "a poll heartbeat alone reports poll liveness with no session id" None (true, 10) (Some(10.0, liveness true None []))

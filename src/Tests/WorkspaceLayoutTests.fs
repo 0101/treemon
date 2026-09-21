@@ -379,6 +379,7 @@ let private runningTerminal terminalId path port =
     { Id = terminalId
       Worktree = path
       ReportedActivity = None
+      SessionIds = []
       Lifecycle =
         EmbeddedTerminalLifecycle.Running
             $"http://127.0.0.1:{port}/" }
@@ -393,12 +394,14 @@ let private initialTerminalSnapshot =
           { Id = EmbeddedTerminalId "00000000000000000000000000000004"
             Worktree = failedTerminalPath
             ReportedActivity = None
+            SessionIds = []
             Lifecycle =
                 EmbeddedTerminalLifecycle.Interrupted
                     "ttyd exited with code 1" }
           { Id = EmbeddedTerminalId "00000000000000000000000000000005"
             Worktree = WorktreePath "Q:/code/TestProject/feature-stale"
             ReportedActivity = None
+            SessionIds = []
             Lifecycle =
                 EmbeddedTerminalLifecycle.Running
                     "https://example.com/unsafe-terminal" } ] }

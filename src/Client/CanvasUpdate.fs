@@ -117,12 +117,60 @@ let setWorkspaceWidth (width: WorkspaceWidth) (model: Model) =
     { model with Canvas.WorkspaceWidth = width },
     Cmd.OfAsync.attempt worktreeApi.Value.saveWorkspaceWidth width (fun _ -> NoOp)
 
-let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
+let private selectMatchingCanvasTerminal
+    allowTerminalSelection
+    (scopedKey: string)
+    (filename: string)
+    (model: Model)
+    =
+    if not allowTerminalSelection then
+        model
+    else
+        findWorktree scopedKey model
+        |> Option.bind (fun worktree ->
+            worktree.CanvasDocs
+            |> List.tryFind (fun doc -> doc.Filename = filename)
+            |> Option.bind (
+                CanvasTerminalLink.effectiveSessionId
+                    model.Canvas.BridgeLiveness
+                    scopedKey
+            )
+            |> Option.bind (fun sessionId ->
+                TerminalPane.tryFindSessionTerminal
+                    worktree.Path
+                    sessionId
+                    model.ActiveEmbeddedTerminals
+                    model.EmbeddedTerminals)
+            |> Option.map (fun terminalId ->
+                { model with
+                    TerminalPaneTarget = Some worktree.Path
+                    ActiveEmbeddedTerminals =
+                        TerminalPane.selectTerminal
+                            terminalId
+                            model.EmbeddedTerminals
+                            model.ActiveEmbeddedTerminals
+                    EmbeddedTerminalViewStates =
+                        model.EmbeddedTerminalViewStates
+                        |> TerminalPane.cancelAllViewFocus }))
+        |> Option.defaultValue model
+
+let selectCanvasDoc
+    allowTerminalSelection
+    (scopedKey: string)
+    (filename: string)
+    (model: Model)
+    =
+
     let targeted =
         { model with
             Canvas.TargetWorktree =
                 if model.Canvas.TargetWorktree.IsSome then Some scopedKey
                 else None }
+        |> selectMatchingCanvasTerminal
+            allowTerminalSelection
+            scopedKey
+            filename
+
     revealCanvasDoc
         (if model.Canvas.CanvasPaneOpen then Visible else Hidden)
         scopedKey
@@ -172,7 +220,12 @@ let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : 
         | None, _ -> reconcileMountedDocs model focused, Cmd.none
     | _ -> reconcileMountedDocs model focused, Cmd.none
 
-let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
+let openCanvasDoc
+    allowTerminalSelection
+    (scopedKey: string)
+    (filename: string)
+    (model: Model)
+    =
     let openPane = not model.Canvas.CanvasPaneOpen
     let repos, expanded = expandRepoOwning scopedKey model.Repos
     let focused, focusCmd =
@@ -180,13 +233,19 @@ let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
             Repos = repos
             Canvas.CanvasPaneOpen = true }
         |> applyFocus false (Some (Card scopedKey))
+    let terminalSelected =
+        focused
+        |> selectMatchingCanvasTerminal
+            allowTerminalSelection
+            scopedKey
+            filename
     let opened, revealCmd =
         revealCanvasDoc
             Visible
             scopedKey
             filename
             model
-            focused
+            terminalSelected
     opened,
     Cmd.batch [
         if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
@@ -195,19 +254,29 @@ let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         revealCmd
     ]
 
-let openWorktreeDiff (scopedKey: string) (model: Model) =
+let openWorktreeDiff
+    allowTerminalSelection
+    (scopedKey: string)
+    (model: Model)
+    =
     let filename = CanvasState.WorktreeDiffFilename
     if CanvasState.isKnownSystemView model.Repos scopedKey filename then
         let openPane = not model.Canvas.CanvasPaneOpen
+        let terminalSelected =
+            { model with
+                Canvas.CanvasPaneOpen = true
+                Canvas.TargetWorktree = Some scopedKey }
+            |> selectMatchingCanvasTerminal
+                allowTerminalSelection
+                scopedKey
+                filename
         let opened, revealCmd =
             revealCanvasDoc
                 Visible
                 scopedKey
                 filename
                 model
-                { model with
-                    Canvas.CanvasPaneOpen = true
-                    Canvas.TargetWorktree = Some scopedKey }
+                terminalSelected
         opened,
         Cmd.batch [
             if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
