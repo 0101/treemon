@@ -380,8 +380,13 @@ type TerminalRuntimeBudgetTests() =
             item.Attribute(XName.Get "Include")
             |> Option.ofObj
             |> Option.map (fun includeAttribute ->
+                let normalizedInclude =
+                    includeAttribute.Value
+                        .Replace('\\', Path.DirectorySeparatorChar)
+                        .Replace('/', Path.DirectorySeparatorChar)
+
                 Path.GetFullPath(
-                    Path.Combine(projectDirectory, includeAttribute.Value)
+                    Path.Combine(projectDirectory, normalizedInclude)
                 )))
         |> Set.ofSeq
 
