@@ -931,6 +931,26 @@ type CanvasPaneTests() =
                 this.Page.Locator(
                     ".canvas-pane .canvas-tab",
                     PageLocatorOptions(HasText = "dashboard"))
+            let tabPresentation (tab: ILocator) =
+                task {
+                    let! _ =
+                        tab.EvaluateAsync<bool>(
+                            "tab => Promise.all(tab.getAnimations().map(animation => animation.finished)).then(() => true)"
+                        )
+                    return!
+                        tab.EvaluateAsync<string array>(
+                            """tab => {
+                                const style = getComputedStyle(tab);
+                                return [
+                                    style.backgroundColor,
+                                    style.borderColor,
+                                    style.boxShadow,
+                                    style.color,
+                                    style.opacity
+                                ];
+                            }"""
+                        )
+                }
 
             do! dashboardTab.ClickAsync()
             do! Assertions.Expect(dashboardTab).ToBeFocusedAsync()
@@ -949,12 +969,15 @@ type CanvasPaneTests() =
             let! dashboardClass = dashboardTab.GetAttributeAsync("class")
             Assert.That(dashboardClass, Does.Contain("active"))
             Assert.That(dashboardClass, Does.Contain("canvas-terminal-linked"))
+            let! ownedSelectedPresentation =
+                tabPresentation dashboardTab
 
             let statusTab =
                 this.Page.Locator(
                     ".canvas-pane .canvas-tab",
                     PageLocatorOptions(HasText = "status"))
             let! statusClass = statusTab.GetAttributeAsync("class")
+            Assert.That(statusClass, Does.Contain("canvas-tab-viewed"))
             Assert.That(
                 statusClass,
                 Does.Not.Contain("canvas-terminal-linked"),
@@ -971,8 +994,59 @@ type CanvasPaneTests() =
             Assert.That(linkedViewedClass, Does.Contain("canvas-terminal-linked"))
             do!
                 Assertions.Expect(
-                    linkedViewedTab.Locator(".canvas-tab-content"))
+                    linkedViewedTab)
                     .ToHaveCSSAsync("opacity", "0.5")
+
+            let! unownedReadPresentation =
+                tabPresentation statusTab
+            let! ownedReadPresentation =
+                tabPresentation linkedViewedTab
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    ownedReadPresentation[0],
+                    Is.Not.EqualTo(unownedReadPresentation[0]),
+                    "Ownership must tint the background"
+                )
+                Assert.That(
+                    ownedReadPresentation[1],
+                    Is.EqualTo(unownedReadPresentation[1]),
+                    "Ownership must not change the border"
+                )
+                Assert.That(ownedReadPresentation[2], Is.EqualTo("none"))
+                Assert.That(
+                    ownedReadPresentation[3],
+                    Is.EqualTo("rgb(166, 227, 161)"),
+                    "Owned tabs must use the green session text color"
+                )
+                Assert.That(ownedReadPresentation[4], Is.EqualTo("0.5"))
+                Assert.That(unownedReadPresentation[0], Is.EqualTo("rgb(49, 50, 68)"))
+                Assert.That(unownedReadPresentation[1], Is.EqualTo("rgb(69, 71, 90)"))
+                Assert.That(unownedReadPresentation[4], Is.EqualTo("0.5")))
+
+            do! statusTab.ClickAsync()
+            let! unownedSelectedPresentation =
+                tabPresentation statusTab
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    ownedSelectedPresentation[0],
+                    Is.Not.EqualTo(unownedSelectedPresentation[0]),
+                    "Selected ownership must remain a background tint"
+                )
+                Assert.That(
+                    ownedSelectedPresentation[1],
+                    Is.EqualTo(unownedSelectedPresentation[1]),
+                    "Selected ownership must retain the normal blue border"
+                )
+                Assert.That(ownedSelectedPresentation[2], Is.EqualTo("none"))
+                Assert.That(
+                    ownedSelectedPresentation[3],
+                    Is.EqualTo("rgb(166, 227, 161)")
+                )
+                Assert.That(unownedSelectedPresentation[0], Is.EqualTo("rgb(46, 52, 82)"))
+                Assert.That(unownedSelectedPresentation[1], Is.EqualTo("rgb(137, 180, 250)"))
+                Assert.That(unownedSelectedPresentation[3], Is.EqualTo("rgb(137, 180, 250)")))
 
             let linkedSystemTabs =
                 this.Page.Locator(
@@ -989,9 +1063,20 @@ type CanvasPaneTests() =
 
             for systemTab in systemTabs do
                 let! title = systemTab.GetAttributeAsync("title")
+                let! presentation = tabPresentation systemTab
                 Assert.That(
                     title,
                     Does.EndWith("Connected to selected terminal")
+                )
+                Assert.That(
+                    presentation[2],
+                    Is.EqualTo("none"),
+                    "SystemView ownership must use a background tint, not an underline"
+                )
+                Assert.That(
+                    presentation[3],
+                    Is.EqualTo("rgb(166, 227, 161)"),
+                    "Owned SystemViews must use the green session text color"
                 )
         }
 

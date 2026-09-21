@@ -115,8 +115,8 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 - Selecting a tab marks that doc viewed. When its effective session matches a terminal in the
   targeted worktree, selection also selects that terminal without opening, revealing, or focusing
   the Terminal pane.
-- Viewed but inactive tab content renders at 0.5 opacity. The active tab stays full opacity, while
-  the terminal-link border and underline remain visible independently.
+- Viewed but inactive tabs render at 0.5 opacity, preserving the original whole-tab treatment. The
+  active tab stays full opacity.
 - The archive button moves the active doc to `.agents/canvas/archive/`. It is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-regenerated, not user-owned, so it has no archive button.
 - The share button publishes the active doc to an unguessable, auto-expiring authenticated-viewer URL and copies a rich titled link to the clipboard. Like archive, it is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-generated, not shareable, so it has no share button. Clipboard success uses the dismissible `ClipboardNotice` channel (green), independent of the send `Waiting` and delivery-`Failed` banners: a successful publish shows `Shared — link copied` (or `Shared — link ready, copy it manually: <url>` when the async clipboard write is rejected), while a *failed* publish reuses the existing red `CanvasSendState.Failed` error banner. Success and failure are mutually exclusive — each result arm clears the other channel — so a red + green stack never renders. Share cannot start while a path copy is pending, and path copy cannot start until Share has completed its publish and clipboard phases. See `docs/spec/canvas-sharing.md` for the full publish/viewer/clipboard flow.
 
@@ -158,9 +158,10 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   worktree, or none when no live registration exists. Heartbeat and usage timestamps do not choose
   that target.
 - The liveness dot shown in tabs and overview checks the doc's `OwnerSessionId` against `LiveSessionIds`, so two concurrently heartbeating sessions in one worktree both keep their own documents alive regardless of heartbeat order. It renders only for `AgentDoc` docs (via `livenessDotFor`); a `SystemView` has no owner session and shows no liveness dot.
-- A canvas tab's effective session is its AgentDoc owner or its SystemView target. The green
-  terminal-link cue appears only when that session is present in the selected running terminal and
-  the Terminal pane is visible.
+- A canvas tab's effective session is its AgentDoc owner or its SystemView target. A dark green
+  background tint and green primary text appear only when that session is present in the selected
+  running terminal and the Terminal pane is visible. Unowned tabs retain their original colors;
+  read opacity and selected borders remain unchanged.
 - The pane shows `▶ Start session` only when the active doc is an `AgentDoc` whose recorded owner is not live. A `SystemView` never has this button.
 - `LaunchCanvasSession` starts an embedded terminal through the shared action-launch flow and sends
   a cold-start prompt built by `CanvasSessionPrompt.forAgentDoc` in

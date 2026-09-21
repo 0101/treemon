@@ -1261,13 +1261,17 @@
         }
         .canvas-tab:hover { background: #45475a; border-color: #585b70; }
         .canvas-tab.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
-        .canvas-tab-viewed .canvas-tab-content { opacity: 0.5; }
-        .canvas-terminal-linked { box-shadow: inset 0 -2px 0 #a6e3a1; }
+        .canvas-tab-viewed { opacity: 0.5; }
         .canvas-tab.canvas-terminal-linked:not(.active) {
-            background: rgba(166, 227, 161, 0.08); border-color: #a6e3a1;
+            background: color-mix(in srgb, #a6e3a1 7%, #313244);
+            color: #a6e3a1;
         }
         .canvas-tab.canvas-terminal-linked:not(.active):hover {
-            background: rgba(166, 227, 161, 0.14);
+            background: color-mix(in srgb, #a6e3a1 9%, #45475a);
+        }
+        .canvas-tab.active.canvas-terminal-linked {
+            background: color-mix(in srgb, #a6e3a1 6%, #2e3452);
+            color: #a6e3a1;
         }
         .canvas-tab-meta {
             position: relative; display: inline-block;
@@ -1308,6 +1312,17 @@
         }
         .canvas-system-tab:hover { background: #353050; border-color: #cba6f7; }
         .canvas-system-tab.active { background: #322a4a; border-color: #cba6f7; color: #cba6f7; }
+        .canvas-system-tab.canvas-terminal-linked {
+            background: color-mix(in srgb, #a6e3a1 6%, #2b2440);
+            color: #a6e3a1;
+        }
+        .canvas-system-tab.canvas-terminal-linked:hover {
+            background: color-mix(in srgb, #a6e3a1 8%, #353050);
+        }
+        .canvas-system-tab.active.canvas-terminal-linked {
+            background: color-mix(in srgb, #a6e3a1 6%, #322a4a);
+            color: #a6e3a1;
+        }
         .canvas-system-tab-glyph {
             display: inline-grid; place-items: center;
             font-size: var(--fs-sm); font-weight: 600; letter-spacing: 0.06em; opacity: 0.85;

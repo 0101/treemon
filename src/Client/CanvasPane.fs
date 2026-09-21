@@ -464,19 +464,14 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                                 $"{d.Filename} — double-click to open in a browser tab (for full-page screenshots)"
                                 + terminalLinkTitleSuffix isLinked)
                             prop.children [
+                                livenessDotFor bridgeLiveness d
+                                Html.text (d.Filename.Replace(".html", ""))
                                 Html.span [
-                                    prop.className "canvas-tab-content"
+                                    prop.className "canvas-tab-meta"
                                     prop.children [
-                                        livenessDotFor bridgeLiveness d
-                                        Html.text (d.Filename.Replace(".html", ""))
                                         Html.span [
-                                            prop.className "canvas-tab-meta"
-                                            prop.children [
-                                                Html.span [
-                                                    prop.className "canvas-tab-age"
-                                                    prop.text (Components.relativeTimeCompact System.DateTimeOffset.Now d.LastModified)
-                                                ]
-                                            ]
+                                            prop.className "canvas-tab-age"
+                                            prop.text (Components.relativeTimeCompact System.DateTimeOffset.Now d.LastModified)
                                         ]
                                     ]
                                 ]
