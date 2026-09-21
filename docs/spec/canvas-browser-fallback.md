@@ -9,14 +9,13 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 1. **Treemon mode (unchanged)**: Extension registers with Treemon, heartbeats; canvas docs display in the Treemon canvas pane as today.
 2. **Browser fallback mode**: When Treemon is unreachable **or** reports that the current directory is not monitored, the extension:
    - Serves contract-valid `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
-   - When Treemon is unreachable, sends the serving URL to the session via `session.send()` after the agent writes a canvas file.
-   - When Treemon explicitly reports the directory as unmonitored, does not post a write notification to the session, so a host-native canvas can handle the file without a competing agent prompt.
+   - Does not post canvas-write notifications to the session, avoiding repeated or competing agent prompts while fallback mode is active.
    - Receives `postMessage`-originated interactions at `POST /_message` and forwards them to the agent session via `session.send()`.
 3. **Same HTML, same API**: `canvasSend` is the primary authoring API and raw
    `window.parent.postMessage(...)` is its transport substrate. In a top-level fallback window, the
    transport shim intercepts self-posted messages and forwards them via HTTP. Zero agent-side
    changes.
-4. **Host-aware UX**: An unreachable Treemon gives the agent a browser URL to open or share; an explicitly unmonitored directory stays silent.
+4. **Host-aware UX**: Browser fallback remains session-silent whether Treemon is unreachable or the directory is explicitly unmonitored.
 
 ## Technical Approach
 
@@ -82,9 +81,8 @@ internal `session.resume`), so Canvas writes are observed via **session events**
 event carries neither the tool name nor its arguments, so supported canvas targets are captured from
 the **start** event (keyed by `toolCallId`) and acted on once the matching completion reports success.
 Create/edit arguments contribute one destination; `apply_patch` contributes canvas HTML destinations
-from Add/Update/Move headers. In browser mode the extension sends serving URLs for written docs via
-`session.send()` only when Treemon is unreachable; an explicit unmonitored response suppresses that
-notification. In Treemon mode it declares ownership instead.
+from Add/Update/Move headers. In browser mode the extension serves written docs without injecting a
+session notification. In Treemon mode it declares ownership instead.
 
 ### Path Security
 
@@ -99,7 +97,7 @@ accepts only the bare filename rather than stripping a path down to its final se
 
 - **Event-driven, not file-watcher**: `session.on("tool.execution_*")` detects writes instead of
   `fs.watch`, avoiding OS-specific watcher behavior.
-- **No auto-open**: When Treemon is unreachable, the agent opens the browser or outputs the URL. An explicitly unmonitored directory produces no fallback prompt.
+- **No write notification**: Browser fallback serves canvas docs without injecting prompts into the session.
 - **Content polling over SSE**: 3s polling is simpler than SSE and adequate for agent file writes.
 - **Detect once at startup**: v1 does not switch modes mid-session. If Treemon starts later, it won't be detected until the extension restarts.
 
