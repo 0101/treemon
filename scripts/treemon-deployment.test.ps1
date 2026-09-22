@@ -6,6 +6,57 @@ function Assert-True($Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
+$requiredSdkVersion = Get-RequiredDotNetSdkVersion
+$requiredSdkMajorVersion = ($requiredSdkVersion -split "\.")[0]
+$script:sdkProbeCount = 0
+$script:sdkInstallArguments = @()
+try {
+    function dotnet {
+        if (($args -join "|") -cne "--list-sdks") {
+            throw "Unexpected dotnet arguments in SDK prerequisite test: $($args -join ' ')"
+        }
+
+        $script:sdkProbeCount++
+        $global:LASTEXITCODE = 0
+        if ($script:sdkProbeCount -eq 1) {
+            return "10.0.400 [C:\Program Files\dotnet\sdk]"
+        }
+        return "$requiredSdkVersion [C:\Program Files\dotnet\sdk]"
+    }
+    function winget {
+        $script:sdkInstallArguments = @($args)
+        $global:LASTEXITCODE = 0
+    }
+    function Read-Host {
+        return ""
+    }
+
+    Ensure-DotNetSdk
+    Assert-True ($script:sdkProbeCount -eq 2) `
+        "SDK prerequisite did not recheck after installation"
+    Assert-True (
+        ($script:sdkInstallArguments -join "|") -ceq (
+            @(
+                "install"
+                "--exact"
+                "--id"
+                "Microsoft.DotNet.SDK.$requiredSdkMajorVersion"
+                "--version"
+                $requiredSdkVersion
+                "--source"
+                "winget"
+                "--accept-package-agreements"
+                "--accept-source-agreements"
+            ) -join "|"
+        )
+    ) "SDK prerequisite did not install the exact global.json version"
+    Write-Host "PASS: missing repository SDK is installed and rechecked"
+} finally {
+    Remove-Item Function:\dotnet -ErrorAction SilentlyContinue
+    Remove-Item Function:\winget -ErrorAction SilentlyContinue
+    Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
+}
+
 function Publish-TestProject([string]$Project, [string]$Destination, [string]$Version) {
     $buildRoot = "$Destination-build"
     dotnet publish $Project `
@@ -501,6 +552,9 @@ try {
     function Ensure-WwwRoot {
         $script:deploymentWorkflowEvents += "ensure-frontend"
     }
+    function Ensure-DotNetSdk {
+        $script:deploymentWorkflowEvents += "ensure-dotnet"
+    }
     function Build-Frontend([string]$Destination) {
         $script:builtFrontendCandidate = $Destination
         $script:deploymentWorkflowEvents += "build-frontend"
@@ -586,7 +640,7 @@ try {
     Start-ProductionServer @("Q:\fixture-worktree")
     Assert-True (
         ($script:deploymentWorkflowEvents -join "|") -ceq
-        "ensure-frontend|publish-server|preflight|stage-host|install-server|start-server"
+        "ensure-dotnet|ensure-frontend|publish-server|preflight|stage-host|install-server|start-server"
     ) "Start-ProductionServer did not use the shared deployment workflow"
     Assert-True (
         $script:startedHostExecutable -ceq
@@ -611,7 +665,7 @@ try {
     Deploy-Frontend
     Assert-True (
         ($script:deploymentWorkflowEvents -join "|") -ceq
-        "build-frontend|publish-server|preflight|stop-listeners|stage-host|install-server|install-frontend|install-tm|install-skill|install-extension|install-reporting|start-server"
+        "ensure-dotnet|build-frontend|publish-server|preflight|stop-listeners|stage-host|install-server|install-frontend|install-tm|install-skill|install-extension|install-reporting|start-server"
     ) "Deploy-Frontend did not preserve candidate-first deployment ordering"
     Assert-True (
         $script:installedFrontendCandidate -ceq $script:builtFrontendCandidate -and
