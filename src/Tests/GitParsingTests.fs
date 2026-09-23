@@ -297,12 +297,12 @@ type ParseDiffStatsTests() =
         Assert.That(result, Is.EqualTo((Undetermined, 0, 0)))
 
     [<Test>]
-    member _.``Empty string reports no committed diff``() =
+    member _.``Empty string reports no tracked diff``() =
         let result = parseDiffStats (Some "")
         Assert.That(result, Is.EqualTo((Clean, 0, 0)))
 
     [<Test>]
-    member _.``Whitespace-only string reports no committed diff``() =
+    member _.``Whitespace-only string reports no tracked diff``() =
         let result = parseDiffStats (Some "   ")
         Assert.That(result, Is.EqualTo((Clean, 0, 0)))
 

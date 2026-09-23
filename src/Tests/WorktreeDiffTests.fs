@@ -722,7 +722,7 @@ type WorktreeDiffIntegrationTests() =
             Assert.That(GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync, Is.EqualTo(GitWorktree.HasContent)))
 
     [<Test>]
-    member _.``Comparison_net follows committed comparison content``() =
+    member _.``Comparison_net follows tracked base comparison``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
         writeText repoDir "tracked.txt" "base"
@@ -752,6 +752,68 @@ type WorktreeDiffIntegrationTests() =
             Assert.That(reverted.Comparison, Is.EqualTo(GitWorktree.Clean))
             Assert.That(reverted.IsDirty, Is.False)
             Assert.That(reverted.WorkMetrics, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``GitMetrics include committed staged and unstaged tracked changes but exclude untracked files``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+
+        [ "committed.txt"; "staged.txt"; "unstaged.txt" ]
+        |> List.iter (fun path -> writeText repoDir path "keep\nold\n")
+
+        gitOk repoDir [ "add"; "--"; "." ]
+        gitOk repoDir [ "commit"; "-m"; "base files" ]
+        gitOk repoDir [ "checkout"; "-b"; "feature" ]
+
+        writeText repoDir "committed.txt" "keep\ncommitted\n"
+        gitOk repoDir [ "add"; "--"; "committed.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "committed change" ]
+
+        writeText repoDir "staged.txt" "keep\nstaged\n"
+        gitOk repoDir [ "add"; "--"; "staged.txt" ]
+        writeText repoDir "unstaged.txt" "keep\nunstaged\n"
+        writeText repoDir "untracked.txt" "one\ntwo\nthree\nfour\n"
+
+        let gitData =
+            collectWorktreeGitData repoDir (Some "feature") "origin" "main"
+            |> TestUtils.runAsync
+
+        Assert.Multiple(fun () ->
+            Assert.That(gitData.IsDirty, Is.True)
+            Assert.That(
+                gitData.WorkMetrics,
+                Is.EqualTo(
+                    Some
+                        { CommitCount = 1
+                          LinesAdded = 3
+                          LinesRemoved = 3 }
+                )
+            ))
+
+    [<Test>]
+    member _.``GitMetrics report tracked line changes without branch commits``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        writeText repoDir "tracked.txt" "keep\nold\n"
+        gitOk repoDir [ "add"; "--"; "tracked.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "base file" ]
+        gitOk repoDir [ "checkout"; "-b"; "feature" ]
+
+        writeText repoDir "tracked.txt" "keep\nnew\n"
+
+        let gitData =
+            collectWorktreeGitData repoDir (Some "feature") "origin" "main"
+            |> TestUtils.runAsync
+
+        Assert.That(
+            gitData.WorkMetrics,
+            Is.EqualTo(
+                Some
+                    { CommitCount = 0
+                      LinesAdded = 1
+                      LinesRemoved = 1 }
+            )
+        )
 
     [<Test>]
     member _.``provisioned untracked diff viewer does not dirty a clean summary without an agents ignore``() =
@@ -975,7 +1037,7 @@ type WorktreeDiffIntegrationTests() =
             "An unresolvable base hides committed work, so the worktree is not known to be clean")
 
     [<Test>]
-    member _.``GitMetrics_missing_base keeps local changes without committed metrics``() =
+    member _.``GitMetrics_missing_base keeps local changes without work metrics``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
         writeText repoDir "untracked.txt" "local"

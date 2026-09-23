@@ -269,6 +269,11 @@ let private committedWorkMetrics =
       LinesAdded = 12
       LinesRemoved = 3 }
 
+let private localWorkMetrics =
+    { CommitCount = 0
+      LinesAdded = 4
+      LinesRemoved = 2 }
+
 let private withDiffDocs (response: DashboardResponse) =
     let addDiff wt =
         let withFixtureState =
@@ -287,7 +292,7 @@ let private withDiffDocs (response: DashboardResponse) =
                 { wt with
                     IsDirty = true
                     HasDiff = true
-                    WorkMetrics = None }
+                    WorkMetrics = Some localWorkMetrics }
             | "feature-idle" ->
                 { wt with
                     IsDirty = false
@@ -578,6 +583,25 @@ type WorktreeDiffActionTests() =
                 Assert.That(prOrder, Is.True, "PR details, metrics, and Diff should follow the requested order")
                 Assert.That(diffInMainBehind, Is.Zero, "Diff should no longer render in the main-behind row")
                 Assert.That(createPrOrder, Is.True, "Create PR should follow Diff at the end of the PR row"))
+        }
+
+    [<Test>]
+    member this.``Tracked-only line metrics render without commit squares while untracked-only work has no metrics``() =
+        task {
+            do! this.NavigateWithDiffDocs()
+
+            let trackedCard = cardByBranch this.Page "feature-stale"
+            let! added = trackedCard.Locator(".diff-added").TextContentAsync()
+            let! removed = trackedCard.Locator(".diff-removed").TextContentAsync()
+            let! trackedCommitGridCount = trackedCard.Locator(".commit-grid").CountAsync()
+            let! untrackedMetricCount =
+                (cardByBranch this.Page "feature-active").Locator(".card-work-metrics").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(added, Is.EqualTo("+4"))
+                Assert.That(removed, Is.EqualTo("-2"))
+                Assert.That(trackedCommitGridCount, Is.Zero)
+                Assert.That(untrackedMetricCount, Is.Zero))
         }
 
     [<Test>]
