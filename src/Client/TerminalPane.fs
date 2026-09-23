@@ -424,19 +424,66 @@ let private documentIsForeground () =
     emitJsExpr<bool> () "document.visibilityState==='visible'&&document.hasFocus()"
 
 let private withTerminalFrame terminalId acceptsFrame action onMissing =
-    let rec tryResolve remainingAttempts =
-        Dom.window?requestAnimationFrame(fun (_: float) ->
-            match
-                Dom.document.getElementById(terminalFrameId terminalId)
-                |> Option.ofObj
-            with
-            | Some frame when acceptsFrame frame -> action frame
-            | _ when remainingAttempts > 1 ->
-                tryResolve (remainingAttempts - 1)
-            | _ -> onMissing ())
-        |> ignore
+    let activeFrame () =
+        Dom.document.querySelector ".terminal-iframe-active"
+        |> Option.ofObj
+        |> Option.map (fun frame ->
+            frame.id, (frame.getAttribute("data-terminal-view-generation") |> Option.ofObj))
 
-    tryResolve 2
+    let interactionBlocked () =
+        Dom.document.querySelector ".terminal-pane[hidden], .modal-overlay"
+        |> Option.ofObj
+        |> Option.isSome
+
+    let initialFrame = activeFrame ()
+    let initiallyBlocked = interactionBlocked ()
+    let cancellation = emitJsExpr<obj> () "new AbortController()"
+    let cancelled () = emitJsExpr<bool> cancellation "$0.signal.aborted"
+
+    let finish observer continuation =
+        if not (cancelled ()) then
+            emitJsExpr<unit> observer "$0.disconnect()"
+            emitJsExpr<unit> cancellation "$0.abort()"
+            continuation ()
+
+    let tryResolve observer =
+        match
+            Dom.document.getElementById(terminalFrameId terminalId)
+            |> Option.ofObj
+        with
+        | Some frame when acceptsFrame frame ->
+            finish observer (fun () -> action frame)
+        | _ when interactionBlocked () && not initiallyBlocked ->
+            finish observer ignore
+        | _ when activeFrame () <> initialFrame ->
+            finish observer onMissing
+        | _ -> ()
+
+    // React may commit after several animation frames; observe readiness instead of counting frames.
+    let observer =
+        emitJsExpr<obj>
+            (System.Action<obj, obj>(fun _ observer -> tryResolve observer))
+            "new MutationObserver($0)"
+    observer?observe(
+        Dom.document,
+        createObj [ "attributes" ==> true; "childList" ==> true; "subtree" ==> true ])
+
+    for eventName in [ "pointerdown"; "keydown" ] do
+        Dom.document?addEventListener(
+            eventName,
+            (fun (_: Event) -> finish observer ignore),
+            createObj [ "capture" ==> true; "signal" ==> cancellation?signal ])
+
+    let timeout =
+        Fable.Core.JS.setTimeout (fun () -> finish observer onMissing) 10_000
+    let animationFrame =
+        Dom.window?requestAnimationFrame(fun (_: float) -> tryResolve observer)
+    cancellation?signal?addEventListener(
+        "abort",
+        (fun (_: Event) ->
+            Fable.Core.JS.clearTimeout timeout
+            Dom.window?cancelAnimationFrame(animationFrame)),
+        createObj [ "once" ==> true ])
 
 let private focusTerminalFrame frame =
     emitJsExpr<unit>

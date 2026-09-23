@@ -864,6 +864,65 @@ type TerminalPaneDomTests() =
                 Assert.That(restoredLayout, Is.EqualTo(originalLayout)))
         }
 
+    [<TestCase(false, false)>]
+    [<TestCase(false, true)>]
+    [<TestCase(true, false)>]
+    [<TestCase(true, true)>]
+    member this.``Deferred terminal focus waits for rendering and yields to newer input``(onePane: bool, cancelBeforeRender: bool) =
+        task {
+            if onePane then
+                do! usePhoneViewport this.Page 390 844
+                do! selectWorkspacePane this.Page WorkspaceLayout.Pane.Terminal
+                do! Assertions.Expect(this.Page.Locator("#workspace-terminal-tab")).ToBeFocusedAsync()
+
+            let terminalId = EmbeddedTerminalId.value firstAlternateTerminalId
+            let input =
+                this.Page.FrameLocator($"iframe[data-terminal-id='{terminalId}']")
+                    .Locator(".xterm-helper-textarea")
+            do! input.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Attached))
+
+            // Keep the selection uncommitted across several frames to model delayed React rendering.
+            let! _ =
+                this.Page.EvaluateAsync(
+                    """async terminalId => {
+                        const [{ focusTerminal }, { EmbeddedTerminalId }] = await Promise.all([
+                            import('/output/TerminalPane.js'),
+                            import('/output/Shared/Types.js')
+                        ]);
+                        focusTerminal(new EmbeddedTerminalId(terminalId));
+                        await new Promise(resolve => requestAnimationFrame(() =>
+                            requestAnimationFrame(() => requestAnimationFrame(resolve))));
+                    }""",
+                    terminalId)
+
+            let focusTarget =
+                if onePane then this.Page.Locator("#workspace-terminal-tab")
+                else selectedTab this.Page
+            if cancelBeforeRender then
+                do! focusTarget.ClickAsync()
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    """terminalId => {
+                        const previous = document.querySelector('.terminal-iframe-active');
+                        previous.classList.remove('terminal-iframe-active');
+                        previous.hidden = true;
+                        const next = document.querySelector(`[data-terminal-id="${terminalId}"]`);
+                        next.classList.add('terminal-iframe-active');
+                        next.hidden = false;
+                    }""",
+                    terminalId)
+
+            if cancelBeforeRender then
+                let! _ =
+                    this.Page.EvaluateAsync(
+                        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+                do! Assertions.Expect(focusTarget).ToBeFocusedAsync()
+                do! Assertions.Expect(input).Not.ToBeFocusedAsync()
+            else
+                do! Assertions.Expect(input).ToBeFocusedAsync()
+        }
+
     [<Test>]
     member this.``A late terminal iframe load cannot reclaim focus from another workspace pane``() =
         task {
