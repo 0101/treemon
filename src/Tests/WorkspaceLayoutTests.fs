@@ -220,15 +220,12 @@ type WorkspaceLayoutTests() =
             let dialog = this.Page.Locator(".modal-dialog")
             do! dialog.Locator(".modal-input").FillAsync("phone-prototype")
             do! this.Page.SetViewportSizeAsync(390, 300)
-            let! geometry =
-                dialog.EvaluateAsync<bool>(
-                    """dialog => {
-                        const box = dialog.getBoundingClientRect();
-                        const footer = dialog.querySelector('.modal-footer').getBoundingClientRect();
-                        return !dialog.closest('.dashboard') && box.top >= 0
-                            && box.bottom <= innerHeight && footer.bottom <= innerHeight;
-                    }""")
-            Assert.That(geometry, Is.True)
+            do! Assertions.Expect(this.Page.Locator(".dashboard .modal-dialog")).ToHaveCountAsync(0)
+            do! Assertions.Expect(dialog).ToBeInViewportAsync(LocatorAssertionsToBeInViewportOptions(Ratio = 1.0f))
+            do!
+                Assertions
+                    .Expect(dialog.Locator(".modal-footer"))
+                    .ToBeInViewportAsync(LocatorAssertionsToBeInViewportOptions(Ratio = 1.0f))
             do! dialog.GetByRole(AriaRole.Button, LocatorGetByRoleOptions(Name = "Cancel")).ClickAsync()
             let! _ = this.Page.WaitForFunctionAsync("() => !document.querySelector('.modal-overlay')")
             let! focused = this.Page.Locator(".dashboard").EvaluateAsync<bool>("element => element === document.activeElement")

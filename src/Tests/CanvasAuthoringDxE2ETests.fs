@@ -649,8 +649,9 @@ type CanvasAuthoringDxPaneE2ETests() =
 
     member private this.OpenMultiDocPane() =
         task {
-            do! focusCanvasCard this.Page MultiDocBranch
+            // Focusing a card mounts its doc immediately; on-load messages require a visible pane.
             do! ensureCanvasPaneOpen this.Page
+            do! focusCanvasCard this.Page MultiDocBranch
             do! (this.Page.Locator(".canvas-pane .canvas-iframe").First).WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
         }
 
