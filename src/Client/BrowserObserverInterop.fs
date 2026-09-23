@@ -23,3 +23,15 @@ let translatedY (element: Browser.Types.Element) : float = jsNative
 
 [<Emit("parseFloat(getComputedStyle($0).getPropertyValue($1))")>]
 let cssPixelValue (element: Browser.Types.Element) (propertyName: string) : float = jsNative
+
+[<Emit("window.matchMedia($0)")>]
+let matchMedia (query: string) : obj = jsNative
+
+[<Emit("window.innerWidth")>]
+let viewportWidth () : float = jsNative
+
+[<Emit("$0.addEventListener('change', $1)")>]
+let addMediaChangeListener (media: obj) (listener: obj -> unit) : unit = jsNative
+
+[<Emit("$0.removeEventListener('change', $1)")>]
+let removeMediaChangeListener (media: obj) (listener: obj -> unit) : unit = jsNative

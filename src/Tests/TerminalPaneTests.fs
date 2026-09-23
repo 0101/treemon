@@ -520,6 +520,7 @@ let private focusModel : Model =
       AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
+      Workspace = WorkspaceLayout.empty
       TerminalPaneOpen = true
       TerminalPaneTarget = None
       EmbeddedTerminals =
@@ -652,6 +653,177 @@ type TerminalFocusTests() =
     let subscriptionKeys model =
         App.appSubscriptions model
         |> List.map (fst >> String.concat "/")
+
+    [<Test>]
+    member _.``One-pane navigation preserves targets selections and saved desktop visibility``() =
+        let model =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                TerminalPaneOpen = false
+                TerminalPaneTarget = Some second
+                Canvas.CanvasPaneOpen = true
+                Canvas.TargetWorktree = Some (WorktreePath.value third)
+                Canvas.WorkspaceWidth = WorkspaceWidth.WideCanvas }
+
+        [ WorkspaceLayout.Pane.Terminal
+          WorkspaceLayout.Pane.Canvas
+          WorkspaceLayout.Pane.Worktrees ]
+        |> List.iter (fun pane ->
+            let updated, _ = App.update (SelectWorkspacePane pane) model
+            Assert.That(updated, Is.EqualTo({ model with Workspace.ActivePane = pane })))
+
+    [<Test>]
+    member _.``One-pane visibility ignores desktop flags without changing them``() =
+        let panes =
+            [ WorkspaceLayout.Pane.Worktrees
+              WorkspaceLayout.Pane.Terminal
+              WorkspaceLayout.Pane.Canvas ]
+        let visible state =
+            panes
+            |> List.filter (fun pane -> WorkspaceLayout.isVisible pane true state)
+        let results =
+            panes
+            |> List.map (fun pane ->
+                { WorkspaceLayout.empty with
+                    Mode = WorkspaceLayout.Mode.OnePane
+                    ActivePane = pane }
+                |> visible)
+
+        Assert.That(results, Is.EqualTo(panes |> List.map List.singleton))
+        Assert.That(visible WorkspaceLayout.empty, Is.EqualTo(panes))
+
+    [<Test>]
+    member _.``Viewport mode round trip restores desktop settings and remembers the chosen pane``() =
+        let model =
+            { focusModel with
+                Workspace.ActivePane = WorkspaceLayout.Pane.Terminal
+                TerminalPaneOpen = false
+                Canvas.WorkspaceWidth = WorkspaceWidth.WideCanvas }
+        let phone, _ =
+            App.update
+                (WorkspaceViewportChanged WorkspaceLayout.Mode.OnePane)
+                model
+        let desktop, _ =
+            App.update
+                (WorkspaceViewportChanged WorkspaceLayout.Mode.Desktop)
+                phone
+
+        Assert.That(desktop, Is.EqualTo(model))
+
+    [<Test>]
+    member _.``One-pane terminal launch reveals its target without saving desktop visibility``() =
+        let model =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                TerminalPaneOpen = false }
+        let updated, cmd = App.update (OpenEmbeddedTerminal third) model
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.Workspace.ActivePane, Is.EqualTo(WorkspaceLayout.Pane.Terminal))
+            Assert.That(updated.TerminalPaneOpen, Is.False)
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some third))
+            Assert.That(updated.FocusedElement, Is.EqualTo(model.FocusedElement))
+            Assert.That(cmd.Length, Is.EqualTo(1), "Only the launch request remains; desktop visibility is not persisted."))
+
+    [<Test>]
+    member _.``Terminal start finishing after a pane switch cannot request browser focus``() =
+        let model =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane }
+        let starting, _ = App.update (StartEmbeddedTerminal first) model
+        let hidden, _ = App.update (SelectWorkspacePane WorkspaceLayout.Pane.Worktrees) starting
+        let exact = terminalId "late-start"
+        let snapshot = { Tabs = model.EmbeddedTerminals.Tabs @ [ running exact first 61241 ] }
+        let updated, cmd =
+            App.update
+                (EmbeddedTerminalStarted(first, Ok { Snapshot = snapshot; TerminalId = exact }))
+                hidden
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.Workspace.ActivePane, Is.EqualTo(WorkspaceLayout.Pane.Worktrees))
+            Assert.That(updated.ActiveEmbeddedTerminals[first], Is.EqualTo(exact))
+            Assert.That(updated.EmbeddedTerminalStarts, Is.Empty)
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``Agent start finishing after a pane switch cannot request browser focus``() =
+        let model =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane }
+        let starting, _ = App.update (StartAgent first) model
+        let hidden, _ = App.update (SelectWorkspacePane WorkspaceLayout.Pane.Worktrees) starting
+        let exact = terminalId "late-agent"
+        let snapshot = { Tabs = model.EmbeddedTerminals.Tabs @ [ running exact first 61241 ] }
+        let updated, cmd =
+            App.update
+                (AgentStarted(first, Ok { Snapshot = snapshot; TerminalId = exact }))
+                hidden
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.Workspace.ActivePane, Is.EqualTo(WorkspaceLayout.Pane.Worktrees))
+            Assert.That(updated.ActiveEmbeddedTerminals[first], Is.EqualTo(exact))
+            Assert.That(updated.EmbeddedTerminalStarts, Is.Empty)
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``Canvas Escape reveals Worktrees before reclaiming dashboard focus``() =
+        let model =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Canvas }
+        let updated, cmd = App.update (KeyPressed("Escape", false)) model
+
+        Assert.That(updated.Workspace.ActivePane, Is.EqualTo(WorkspaceLayout.Pane.Worktrees))
+        Assert.That(cmd, Is.Not.Empty)
+
+    [<Test>]
+    member _.``One-pane search reveals its chosen worktree without opening another terminal``() =
+        let model =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Terminal
+                TerminalPaneOpen = false
+                TerminalPaneTarget = Some first }
+        let searching, _ =
+            App.update
+                (WorktreeSearchMsg (WorktreeSearch.Msg.OpenFromTerminal firstTwo))
+                model
+        let selected, _ =
+            App.update
+                (WorktreeSearchMsg (WorktreeSearch.Msg.ChooseResult second))
+                searching
+
+        Assert.Multiple(fun () ->
+            Assert.That(WorktreeSearch.isOpen selected.WorktreeSearch, Is.False)
+            Assert.That(selected.Workspace.ActivePane, Is.EqualTo(WorkspaceLayout.Pane.Worktrees))
+            Assert.That(selected.FocusedElement, Is.EqualTo(Some (Card (WorktreePath.value second))))
+            Assert.That(selected.TerminalPaneTarget, Is.EqualTo(None))
+            Assert.That(selected.TerminalPaneOpen, Is.False)
+            Assert.That(selected.EmbeddedTerminals, Is.EqualTo(model.EmbeddedTerminals))
+            Assert.That(selected.ActiveEmbeddedTerminals, Is.EqualTo(model.ActiveEmbeddedTerminals)))
+
+    [<Test>]
+    member _.``Terminal start completing behind worktree search does not request input focus``() =
+        let model =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane }
+        let starting, _ = App.update (StartEmbeddedTerminal first) model
+        let searching, _ =
+            App.update
+                (WorktreeSearchMsg (WorktreeSearch.Msg.OpenFromTerminal firstTwo))
+                starting
+        let exact = terminalId "search-pending-start"
+        let snapshot = { Tabs = model.EmbeddedTerminals.Tabs @ [ running exact first 61241 ] }
+        let completed, cmd =
+            App.update
+                (EmbeddedTerminalStarted(first, Ok { Snapshot = snapshot; TerminalId = exact }))
+                searching
+
+        Assert.Multiple(fun () ->
+            Assert.That(WorktreeSearch.isOpen completed.WorktreeSearch, Is.True)
+            Assert.That(completed.ActiveEmbeddedTerminals[first], Is.EqualTo(exact))
+            Assert.That(completed.EmbeddedTerminalStarts, Is.Empty)
+            Assert.That(cmd, Is.Empty))
 
     [<Test>]
     member _.``TerminalHost update lock ignores every user terminal entry point``() =
@@ -910,6 +1082,19 @@ type TerminalFocusTests() =
                 { focusModel with
                     TerminalPaneOpen = false }
 
+        let hiddenOnePane =
+            subscriptionKeys
+                { focusModel with
+                    Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                    Workspace.ActivePane = WorkspaceLayout.Pane.Worktrees }
+
+        let visibleOnePane =
+            subscriptionKeys
+                { focusModel with
+                    Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                    Workspace.ActivePane = WorkspaceLayout.Pane.Terminal
+                    TerminalPaneOpen = false }
+
         Assert.Multiple(fun () ->
             Assert.That(
                 initial,
@@ -926,6 +1111,16 @@ type TerminalFocusTests() =
             Assert.That(
                 closed,
                 Has.None.StartsWith("terminal-visible/")
+            )
+            Assert.That(
+                hiddenOnePane,
+                Has.None.StartsWith("terminal-visible/")
+            )
+            Assert.That(
+                visibleOnePane,
+                Does.Contain(
+                    $"terminal-visible/{EmbeddedTerminalId.value firstTwo}/http://127.0.0.1:61232"
+                )
             ))
 
     [<Test>]
@@ -1171,6 +1366,16 @@ type TerminalFocusTests() =
                 (ReconnectEmbeddedTerminalView firstTwo)
                 { focusModel with TerminalPaneOpen = false }
 
+        let hiddenOnePaneModel =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Worktrees }
+
+        let hiddenOnePane, hiddenOnePaneCmd =
+            App.update
+                (ReconnectEmbeddedTerminalView firstTwo)
+                hiddenOnePaneModel
+
         Assert.Multiple(fun () ->
             Assert.That(nonSelected, Is.EqualTo(focusModel))
             Assert.That(nonSelectedCmd, Is.Empty)
@@ -1178,7 +1383,42 @@ type TerminalFocusTests() =
                 hidden,
                 Is.EqualTo({ focusModel with TerminalPaneOpen = false })
             )
-            Assert.That(hiddenCmd, Is.Empty))
+            Assert.That(hiddenCmd, Is.Empty)
+            Assert.That(hiddenOnePane, Is.EqualTo(hiddenOnePaneModel))
+            Assert.That(hiddenOnePaneCmd, Is.Empty))
+
+    [<Test>]
+    member _.``One-pane navigation cancels pending reconnect focus when the terminal becomes hidden``() =
+        let model =
+            { focusModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Terminal }
+
+        let reconnecting, _ =
+            App.update
+                (ReconnectEmbeddedTerminalView firstTwo)
+                model
+
+        let hidden, _ =
+            App.update
+                (SelectWorkspacePane WorkspaceLayout.Pane.Worktrees)
+                reconnecting
+
+        let loaded, cmd =
+            App.update
+                (EmbeddedTerminalViewLoaded(firstTwo, 1))
+                hidden
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                hidden.EmbeddedTerminalViewStates[firstTwo].FocusAfterLoad,
+                Is.False
+            )
+            Assert.That(
+                loaded.EmbeddedTerminalViewStates[firstTwo].FocusAfterLoad,
+                Is.False
+            )
+            Assert.That(cmd, Is.Empty))
 
     [<Test>]
     member _.``Late reconnect load cannot focus after another terminal is selected``() =

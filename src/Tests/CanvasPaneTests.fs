@@ -65,6 +65,177 @@ type CanvasPaneTests() =
             return ()
         }
 
+    [<Test>]
+    member this.``Hidden one-pane Canvas preserves drafts but cannot navigate forward actions or reclaim focus``() =
+        task {
+            do! focusCanvasCard this.Page FixtureMultiDocBranch
+            do! ensureCanvasPaneOpen this.Page
+            let frame = this.Page.FrameLocator(".canvas-iframe-active")
+            let body = frame.Locator("body")
+            let! _ =
+                body.EvaluateAsync(
+                    """body => {
+                        const input = document.createElement('input');
+                        input.id = 'one-pane-draft';
+                        input.value = 'keep this reply';
+                        body.appendChild(input);
+                    }""")
+            let! originalSrc = this.Page.Locator(".canvas-iframe-active").GetAttributeAsync("src")
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => { window.onePaneOriginalFrame = document.querySelector('.canvas-iframe-active'); }")
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! this.Page.Locator(".canvas-pane:not(.open)").WaitForAsync()
+            let navigationDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let actionDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let focusDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let searchDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let sent = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            // The request counter is confined to this browser's observable transport boundary.
+            let mutable sends = 0
+            this.Page.Console.Add(fun message ->
+                if message.Text.Contains("navigate-canvas-doc DROPPED") then navigationDropped.TrySetResult(()) |> ignore
+                if message.Text.Contains("postMessage DROPPED") && message.Text.Contains("one-pane-probe") then actionDropped.TrySetResult(()) |> ignore
+                if message.Text.Contains("reclaim-focus DROPPED") then focusDropped.TrySetResult(()) |> ignore
+                if message.Text.Contains("open-worktree-search DROPPED") then searchDropped.TrySetResult(()) |> ignore)
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/sendCanvasMessage",
+                    fun route ->
+                        sends <- sends + 1
+                        sent.TrySetResult(()) |> ignore
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = JsonConvert.SerializeObject(CanvasMessageResult.Ok, Fable.Remoting.Json.FableJsonConverter()))))
+            do! this.Page.SetViewportSizeAsync(390, 844)
+            do! this.Page.Locator(".app-layout.workspace-single").WaitForAsync()
+            do! this.Page.Locator("#workspace-terminal-tab").ClickAsync()
+            let! _ =
+                body.EvaluateAsync(
+                    """() => {
+                        parent.postMessage({ action: 'navigate-canvas-doc', filename: 'metrics.html' }, '*');
+                        parent.postMessage({ action: 'one-pane-probe' }, '*');
+                        parent.postMessage({ action: 'reclaim-focus' }, '*');
+                        parent.postMessage({ action: 'open-worktree-search' }, '*');
+                    }""")
+            let! _ =
+                Task.WhenAll([| navigationDropped.Task; actionDropped.Task; focusDropped.Task; searchDropped.Task |])
+                    .WaitAsync(TimeSpan.FromSeconds(10.0))
+            let! focusId = this.Page.EvaluateAsync<string>("() => document.activeElement.id")
+            let! hiddenSrc = this.Page.Locator(".canvas-iframe-active").GetAttributeAsync("src")
+            Assert.Multiple(fun () ->
+                Assert.That(sends, Is.Zero)
+                Assert.That(focusId, Is.EqualTo("workspace-terminal-tab"))
+                Assert.That(hiddenSrc, Is.EqualTo(originalSrc)))
+
+            do! this.Page.Locator("#workspace-canvas-tab").ClickAsync()
+            let! sameFrame =
+                this.Page.EvaluateAsync<bool>(
+                    "() => document.querySelector('.canvas-iframe-active') === window.onePaneOriginalFrame")
+            let! draft = frame.Locator("#one-pane-draft").InputValueAsync()
+            Assert.That(sameFrame, Is.True)
+            Assert.That(draft, Is.EqualTo("keep this reply"))
+            let! _ = body.EvaluateAsync("() => parent.postMessage({ action: 'one-pane-probe' }, '*')")
+            do! sent.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+            Assert.That(sends, Is.EqualTo(1), "Visible Canvas retains its normal message transport.")
+
+            let desktopNavigationDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let desktopActionDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let desktopFocusDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let desktopSearchDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            this.Page.Console.Add(fun message ->
+                if message.Text.Contains("navigate-canvas-doc DROPPED") then desktopNavigationDropped.TrySetResult(()) |> ignore
+                if message.Text.Contains("postMessage DROPPED") && message.Text.Contains("desktop-hidden-probe") then desktopActionDropped.TrySetResult(()) |> ignore
+                if message.Text.Contains("reclaim-focus DROPPED") then desktopFocusDropped.TrySetResult(()) |> ignore
+                if message.Text.Contains("open-worktree-search DROPPED") then desktopSearchDropped.TrySetResult(()) |> ignore)
+            do! this.Page.Locator(".canvas-iframe-active").FocusAsync()
+            do! this.Page.SetViewportSizeAsync(1280, 720)
+            do! this.Page.Locator(".app-layout:not(.workspace-single)").WaitForAsync()
+            do! Assertions.Expect(this.Page.Locator(".dashboard")).ToBeFocusedAsync()
+            let! _ =
+                body.EvaluateAsync(
+                    """() => {
+                        parent.postMessage({ action: 'navigate-canvas-doc', filename: 'metrics.html' }, '*');
+                        parent.postMessage({ action: 'desktop-hidden-probe' }, '*');
+                        parent.postMessage({ action: 'reclaim-focus' }, '*');
+                        parent.postMessage({ action: 'open-worktree-search' }, '*');
+                    }""")
+            let! _ =
+                Task.WhenAll(
+                    [| desktopNavigationDropped.Task
+                       desktopActionDropped.Task
+                       desktopFocusDropped.Task
+                       desktopSearchDropped.Task |])
+                    .WaitAsync(TimeSpan.FromSeconds(10.0))
+            let! desktopHiddenSrc = this.Page.Locator(".canvas-iframe-active").GetAttributeAsync("src")
+            Assert.Multiple(fun () ->
+                Assert.That(sends, Is.EqualTo(1))
+                Assert.That(desktopHiddenSrc, Is.EqualTo(originalSrc)))
+        }
+
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member this.``Idle document refresh changes desktop focus but only adds a badge in one-pane mode``(onePane: bool) =
+        task {
+            do! this.Page.Clock.InstallAsync()
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            // The route models one new document revision after the initial snapshot.
+            let mutable publish = false
+            let changedTime = DateTimeOffset.UtcNow.AddMinutes(1.0)
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getWorktrees",
+                    Func<IRoute, Task>(fun route ->
+                        task {
+                            let! upstream = route.FetchAsync()
+                            let! json = upstream.TextAsync()
+                            let response = JsonConvert.DeserializeObject<DashboardResponse>(json, converter)
+                            let updated =
+                                { response with
+                                    Repos =
+                                        response.Repos
+                                        |> List.map (fun repo ->
+                                            { repo with
+                                                Worktrees =
+                                                    repo.Worktrees
+                                                    |> List.map (fun worktree ->
+                                                        if publish && worktree.Branch = FixtureMultiDocBranch then
+                                                            { worktree with
+                                                                CanvasDocs =
+                                                                    worktree.CanvasDocs
+                                                                    |> List.mapi (fun index doc ->
+                                                                        if index = 0 then
+                                                                            { doc with ContentHash = "one-pane-fresh"; LastModified = changedTime }
+                                                                        else doc) }
+                                                        else worktree) }) }
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = JsonConvert.SerializeObject(updated, converter)))
+                        }))
+            let! _ = this.Page.ReloadAsync()
+            do! focusCanvasCard this.Page FixtureCanvasBranch
+            if onePane then
+                do! this.Page.SetViewportSizeAsync(390, 844)
+                do! this.Page.Locator(".app-layout.workspace-single").WaitForAsync()
+            let! focusedBefore = this.Page.Locator(".wt-card.focused .branch-name").TextContentAsync()
+            publish <- true
+            do! this.Page.Clock.FastForwardAsync(61_000)
+
+            if onePane then
+                do! this.Page.Locator(".workspace-tab .canvas-badge").WaitForAsync()
+                let! focusedAfter = this.Page.Locator(".wt-card.focused .branch-name").TextContentAsync()
+                let! visible = this.Page.Locator(".app-layout > :visible").EvaluateAllAsync<string[]>("panes => panes.map(pane => pane.id)")
+                Assert.That(focusedAfter, Is.EqualTo(focusedBefore))
+                Assert.That(visible, Is.EqualTo([| "workspace-worktrees" |]))
+            else
+                do! this.Page.Locator(".canvas-pane.open").WaitForAsync()
+                let! focusedAfter = this.Page.Locator(".wt-card.focused .branch-name").TextContentAsync()
+                Assert.That(focusedAfter, Is.Not.EqualTo(focusedBefore))
+        }
+
     // ── Step 4: Canvas Pane Toggle ──────────────────────────────────────
 
     [<Test>]

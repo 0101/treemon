@@ -649,8 +649,9 @@ type CanvasAuthoringDxPaneE2ETests() =
 
     member private this.OpenMultiDocPane() =
         task {
-            do! focusCanvasCard this.Page MultiDocBranch
+            // Focusing a card mounts its doc immediately; on-load messages require a visible pane.
             do! ensureCanvasPaneOpen this.Page
+            do! focusCanvasCard this.Page MultiDocBranch
             do! (this.Page.Locator(".canvas-pane .canvas-iframe").First).WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
         }
 
@@ -769,11 +770,17 @@ type CanvasAuthoringDxPaneE2ETests() =
                 "a well-formed string action must route normally and never raise the missing-action banner")
         }
 
-    [<Test>]
-    member this.``active canvas doc can open global worktree search``() =
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member this.``active canvas doc can open global worktree search``(onePane: bool) =
         task {
             do! this.RouteDocs ""
             do! this.OpenMultiDocPane()
+
+            if onePane then
+                do! this.Page.SetViewportSizeAsync(390, 844)
+                do! this.Page.Locator(".app-layout.workspace-single").WaitForAsync()
+                do! this.Page.Locator("#workspace-canvas-tab").ClickAsync()
 
             let activeDoc = this.Page.FrameLocator(".canvas-iframe-active").Locator("body")
             let! _ =

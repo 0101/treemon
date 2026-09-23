@@ -14,6 +14,9 @@ open Elmish
 open Browser
 open AppTypes
 
+let isPaneVisible (model: Model) =
+    WorkspaceLayout.isVisible WorkspaceLayout.Pane.Canvas model.Canvas.CanvasPaneOpen model.Workspace
+
 let activeVisibleDoc (model: Model) : (string * string) option =
     CanvasState.activeVisibleDoc model.Repos model.FocusedElement model.Canvas.TargetWorktree model.Canvas.ActiveCanvasDoc
 
@@ -57,11 +60,15 @@ let visibleDocSyncMsg (model: Model) =
             MarkDocViewed key)
 
 let syncVisibleDocCmd model =
-    visibleDocSyncMsg model |> Option.map Cmd.ofMsg |> Option.defaultValue Cmd.none
+    if isPaneVisible model then
+        visibleDocSyncMsg model |> Option.map Cmd.ofMsg |> Option.defaultValue Cmd.none
+    else
+        Cmd.none
 
 type private RevealMode =
     | Visible
     | Hidden
+    | ShowSelected
 
 let private revealCanvasDoc
     mode
@@ -81,14 +88,17 @@ let private revealCanvasDoc
         | _ -> current.Canvas.VisitedCanvasDocs
     let selected =
         { current with
-            Canvas.DocError = None
+            Canvas.DocError =
+                match mode with
+                | ShowSelected -> current.Canvas.DocError
+                | Visible | Hidden -> None
             Canvas.ActiveCanvasDoc = current.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
             Canvas.VisitedCanvasDocs =
                 CanvasState.touchVisitedDoc scopedKey filename visitedWithPrevious }
         |> reconcileMountedDocs previous
     selected,
     match mode with
-    | Visible -> syncVisibleDocCmd selected
+    | Visible | ShowSelected -> syncVisibleDocCmd selected
     | Hidden -> Cmd.none
 
 let canvasSessionAction (scopedKey: string) (model: Model) =
@@ -102,16 +112,36 @@ let canvasSessionAction (scopedKey: string) (model: Model) =
         Some(wt.Path, CanvasSession prompt)
     | None -> None
 
-let toggleCanvasPane (model: Model) =
-    let newState = not model.Canvas.CanvasPaneOpen
+let openCanvasPane (model: Model) =
+    let desktop = model.Workspace.Mode = WorkspaceLayout.Mode.Desktop
     let updated =
-        { model with Canvas.CanvasPaneOpen = newState }
-        |> reconcileMountedDocs model
+        { model with
+            Workspace.ActivePane = WorkspaceLayout.Pane.Canvas
+            Canvas.CanvasPaneOpen = desktop || model.Canvas.CanvasPaneOpen }
     updated,
-    Cmd.batch [
-        Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen newState (fun _ -> NoOp)
-        if newState then syncVisibleDocCmd updated else Cmd.none
-    ]
+    if desktop && not model.Canvas.CanvasPaneOpen then
+        Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
+    else
+        Cmd.none
+
+let toggleCanvasPane (model: Model) =
+    match model.Workspace.Mode with
+    | WorkspaceLayout.Mode.OnePane ->
+        let updated, _ = openCanvasPane model
+        match activeVisibleDoc updated with
+        | Some (scopedKey, filename) ->
+            revealCanvasDoc ShowSelected scopedKey filename model updated
+        | None -> updated, Cmd.none
+    | WorkspaceLayout.Mode.Desktop ->
+        let newState = not model.Canvas.CanvasPaneOpen
+        let updated =
+            { model with Canvas.CanvasPaneOpen = newState }
+            |> reconcileMountedDocs model
+        updated,
+        Cmd.batch [
+            Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen newState (fun _ -> NoOp)
+            if newState then syncVisibleDocCmd updated else Cmd.none
+        ]
 
 let setWorkspaceWidth (width: WorkspaceWidth) (model: Model) =
     { model with Canvas.WorkspaceWidth = width },
@@ -172,7 +202,7 @@ let selectCanvasDoc
             filename
 
     revealCanvasDoc
-        (if model.Canvas.CanvasPaneOpen then Visible else Hidden)
+        (if isPaneVisible model then Visible else Hidden)
         scopedKey
         filename
         model
@@ -214,7 +244,7 @@ let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : 
                 |> Option.filter (fun doc -> not (CanvasState.isWorktreeDiffFilename doc.Filename))
                 |> Option.map _.Filename
             | _ -> None
-        match unviewedDoc |> Option.orElse nonDiffFallback, focused.Canvas.CanvasPaneOpen with
+        match unviewedDoc |> Option.orElse nonDiffFallback, isPaneVisible focused with
         | Some filename, true -> revealCanvasDoc Visible scopedKey filename model focused
         | Some filename, false -> revealCanvasDoc Hidden scopedKey filename model focused
         | None, _ -> reconcileMountedDocs model focused, Cmd.none
@@ -226,12 +256,10 @@ let openCanvasDoc
     (filename: string)
     (model: Model)
     =
-    let openPane = not model.Canvas.CanvasPaneOpen
+    let paneModel, paneCmd = openCanvasPane model
     let repos, expanded = expandRepoOwning scopedKey model.Repos
     let focused, focusCmd =
-        { model with
-            Repos = repos
-            Canvas.CanvasPaneOpen = true }
+        { paneModel with Repos = repos }
         |> applyFocus false (Some (Card scopedKey))
     let terminalSelected =
         focused
@@ -248,7 +276,7 @@ let openCanvasDoc
             terminalSelected
     opened,
     Cmd.batch [
-        if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
+        paneCmd
         if expanded then saveCollapsedReposCmd repos
         focusCmd
         revealCmd
@@ -261,11 +289,9 @@ let openWorktreeDiff
     =
     let filename = CanvasState.WorktreeDiffFilename
     if CanvasState.isKnownSystemView model.Repos scopedKey filename then
-        let openPane = not model.Canvas.CanvasPaneOpen
+        let paneModel, paneCmd = openCanvasPane model
         let terminalSelected =
-            { model with
-                Canvas.CanvasPaneOpen = true
-                Canvas.TargetWorktree = Some scopedKey }
+            { paneModel with Canvas.TargetWorktree = Some scopedKey }
             |> selectMatchingCanvasTerminal
                 allowTerminalSelection
                 scopedKey
@@ -279,7 +305,7 @@ let openWorktreeDiff
                 terminalSelected
         opened,
         Cmd.batch [
-            if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
+            paneCmd
             revealCmd
         ]
     else
@@ -327,7 +353,7 @@ let archiveCanvasDocResult (scopedKey: string) (filename: string) (result: Resul
         match remainingDocs with
         | Some (first :: _) ->
             revealCanvasDoc
-                (if model.Canvas.CanvasPaneOpen then Visible else Hidden)
+                (if isPaneVisible model then Visible else Hidden)
                 scopedKey
                 first.Filename
                 model
@@ -647,7 +673,7 @@ let morphComplete (morph: CanvasMorph) (model: Model) =
                 Canvas.MountedAgentDocHashes =
                     model.Canvas.MountedAgentDocHashes |> Map.add key currentHash }
         let markViewedCmd =
-            if updated.Canvas.CanvasPaneOpen && activeVisibleDoc updated = Some key then
+            if isPaneVisible updated && activeVisibleDoc updated = Some key then
                 Cmd.ofMsg (MarkDocViewed key)
             else
                 Cmd.none

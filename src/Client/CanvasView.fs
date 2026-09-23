@@ -68,7 +68,7 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
     // overview highlight and the Canvas badge can never disagree. Only the pane UI consumes it, so
     // the repo/worktree/doc walk is skipped entirely while the pane is closed.
     let unviewedByScopedKey =
-        if model.Canvas.CanvasPaneOpen then
+        if CanvasUpdate.isPaneVisible model then
             unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
             |> Map.map (fun _ filenames -> Set.ofList filenames)
         else Map.empty
@@ -116,7 +116,8 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           LaunchSession = launchCanvasSession }
 
     let canvasState: CanvasPane.CanvasPaneState =
-        { IsOpen = model.Canvas.CanvasPaneOpen
+        { IsOpen = CanvasUpdate.isPaneVisible model
+          WorkspaceMode = model.Workspace.Mode
           SendState = model.Canvas.CanvasSendState
           DocError = model.Canvas.DocError
           ClipboardNotice = model.Canvas.ClipboardNotice

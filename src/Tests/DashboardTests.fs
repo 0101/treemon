@@ -2639,8 +2639,9 @@ type DashboardTests() =
                 ))
         }
 
-    [<Test>]
-    member this.``Embedded terminal translates input and forwards supported shortcuts``() =
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member this.``Embedded terminal translates input and forwards supported shortcuts in both layouts``(onePane: bool) =
         task {
             do! this.Context.GrantPermissionsAsync([| "clipboard-read"; "clipboard-write" |])
             let! page = this.Context.NewPageAsync()
@@ -2811,6 +2812,11 @@ type DashboardTests() =
                     PageLocatorOptions(HasText = "Terminal")
                 )
             do! terminalToggle.ClickAsync()
+
+            if onePane then
+                do! page.SetViewportSizeAsync(390, 844)
+                do! page.Locator(".app-layout.workspace-single").WaitForAsync()
+                do! page.Locator("#workspace-terminal-tab").ClickAsync()
 
             let firstIframe =
                 page.Locator(
@@ -4870,8 +4876,9 @@ type DashboardTests() =
                 "The global Escape reclaim must skip editable fields and leave their focus intact")
         }
 
-    [<Test>]
-    member this.``Ctrl P finds a worktree across repository and branch then reveals its collapsed card``() =
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member this.``Ctrl P finds a worktree across repository and branch then reveals its collapsed card``(onePane: bool) =
         task {
             let expandedSection = this.Page.Locator(".repo-section:has(.wt-card)").First
             let! sectionIndex =
@@ -4894,6 +4901,11 @@ type DashboardTests() =
             let! collapsedGridCount = section.Locator(".card-grid").CountAsync()
             Assert.That(collapsedGridCount, Is.Zero, "The target repository should be collapsed before search")
 
+            if onePane then
+                do! this.Page.SetViewportSizeAsync(390, 844)
+                do! this.Page.Locator(".app-layout.workspace-single").WaitForAsync()
+                do! this.Page.Locator("#workspace-terminal-tab").ClickAsync()
+
             let! _ =
                 this.Page.EvaluateAsync(
                     "() => { const input = document.createElement('input'); input.id = 'worktree-search-shortcut-probe'; document.body.appendChild(input); input.focus(); }")
@@ -4903,6 +4915,10 @@ type DashboardTests() =
             let dialog = this.Page.Locator(".worktree-search-dialog")
             let input = this.Page.Locator("#worktree-search-input")
             do! dialog.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! overlayOutsidePanes =
+                dialog.EvaluateAsync<bool>("element => !element.closest('.app-layout')")
+            Assert.That(overlayOutsidePanes, Is.True, "Search must remain visible when a workspace pane is hidden")
 
             let! inputFocused =
                 input.EvaluateAsync<bool>("element => document.activeElement === element")

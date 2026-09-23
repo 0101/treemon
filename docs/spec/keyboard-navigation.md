@@ -93,6 +93,11 @@ returns DOM focus to the surface that opened the palette; a palette opened from 
 terminal restores that exact terminal input. Selection is stored by `WorktreePath`, not list index,
 so polling-driven reorder does not move the user to a different worktree.
 
+In automatic One-pane mode (viewport width up to `900px`), the search overlay stays outside the
+switchable panes. Choosing a result reveals Worktrees before focusing its card; dismissing search
+opened from Canvas or Terminal restores that pane's input without changing the retained Desktop
+visibility flags or ratios. Hidden pane iframes cannot open search or cycle terminals.
+
 ### Global Shortcut Reach
 
 Navigation only works while DOM focus is on (or inside) the `.dashboard` div, since that element

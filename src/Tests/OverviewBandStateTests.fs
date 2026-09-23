@@ -60,6 +60,7 @@ let private modelWith repos =
       ActionCooldowns = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
+      Workspace = WorkspaceLayout.empty
       TerminalPaneOpen = false
       TerminalPaneTarget = None
       EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
@@ -104,6 +105,18 @@ let private reviewing =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type OverviewBandStateTests() =
+
+    [<Test>]
+    member _.``Escape from one-pane Canvas reveals Worktrees instead of closing its hidden drilldown``() =
+        let model =
+            { modelWith [ repo reviewingWorktree ] with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Canvas
+                SelectedOverviewGroup = Some reviewing }
+        let updated, _ = update (KeyPressed("Escape", false)) model
+
+        Assert.That(updated.Workspace.ActivePane, Is.EqualTo(WorkspaceLayout.Pane.Worktrees))
+        Assert.That(updated.SelectedOverviewGroup, Is.EqualTo(Some reviewing))
 
     [<Test>]
     member _.``Sticky boundary requires the sentinel to pass above the dashboard``() =

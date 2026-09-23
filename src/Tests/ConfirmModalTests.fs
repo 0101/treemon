@@ -71,6 +71,7 @@ let private defaultModel : Model =
       AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
+      Workspace = WorkspaceLayout.empty
       TerminalPaneOpen = false
       TerminalPaneTarget = None
       EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
