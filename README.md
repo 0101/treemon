@@ -35,7 +35,7 @@ Point Treemon at one or more directories, and it runs a lightweight background p
 
 ## Getting started
 
-Prerequisites: [.NET SDK 10.0.401](https://dotnet.microsoft.com/download) (pinned by `global.json`), [Node.js](https://nodejs.org) (`winget install OpenJS.NodeJS.LTS`), git. Optional: `az` CLI (for Azure DevOps PR/build data), `gh` CLI (for GitHub PR/build data), `bd` CLI (for [beads](https://github.com/steveyegge/beads) counts). Fable and other dotnet tools are restored automatically on first build.
+Prerequisites: git. Build-capable lifecycle commands check the [.NET SDK version pinned by `global.json`](https://dotnet.microsoft.com/download) and offer to install the exact version through `winget` when it is missing. Frontend builds do the same for [Node.js](https://nodejs.org). Optional: `az` CLI (for Azure DevOps PR/build data), `gh` CLI (for GitHub PR/build data), `bd` CLI (for [beads](https://github.com/steveyegge/beads) counts). Fable and other dotnet tools are restored automatically on first build.
 
 ```powershell
 git clone https://github.com/0101/treemon.git
