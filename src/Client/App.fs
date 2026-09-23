@@ -145,11 +145,6 @@ let init () =
       OverviewHistoryRequestInFlight = None
       EmbeddedTerminalPollInFlight = false },
     Cmd.batch [
-        Cmd.OfFunc.either
-            WorkspaceLayout.readMode
-            ()
-            WorkspaceModeLoaded
-            (fun _ -> WorkspacePreferenceFailed "Could not restore the view preference. Desktop layout is being used.")
         fetchWorktrees ()
         fetchSyncStatus ()
         Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp)
@@ -654,28 +649,13 @@ let update msg model =
         when terminalHostUpdateLocksInteraction model ->
         model, Cmd.none
 
-    | SetWorkspaceMode mode ->
-        let updated =
-            { model with
-                Workspace.Mode = mode
-                Workspace.PreferenceError = None }
-            |> cancelTerminalViewFocusWhenHidden
-        updated,
-        Cmd.batch [
-            Cmd.OfFunc.either
-                WorkspaceLayout.saveMode
-                mode
-                (fun () -> NoOp)
-                (fun _ -> WorkspacePreferenceFailed "Could not save the view preference. This layout will not be remembered after reloading.")
-            CanvasUpdate.syncVisibleDocCmd updated
-        ]
-    | WorkspaceModeLoaded mode ->
+    | WorkspaceViewportChanged mode when mode = model.Workspace.Mode ->
+        model, Cmd.none
+    | WorkspaceViewportChanged mode ->
         let updated =
             { model with Workspace.Mode = mode }
             |> cancelTerminalViewFocusWhenHidden
         updated, CanvasUpdate.syncVisibleDocCmd updated
-    | WorkspacePreferenceFailed error ->
-        { model with Workspace.PreferenceError = Some error }, Cmd.none
     | SelectWorkspacePane pane ->
         let updated, syncCmd =
             match pane, model.Workspace.Mode with
@@ -1777,6 +1757,9 @@ let appSubscriptions (model: Model) : Sub<Msg> =
     let overviewSticky (dispatch: Dispatch<Msg>) =
         OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
 
+    let workspaceViewport (dispatch: Dispatch<Msg>) =
+        WorkspaceLayout.observeMode (WorkspaceViewportChanged >> dispatch)
+
     let visibleTerminal =
         if terminalHostUpdateLocksInteraction model then
             None
@@ -1792,6 +1775,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
     let baseSubs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
+          [ "workspace-viewport" ], workspaceViewport
           [ "canvas-messages" ], CanvasUpdate.messageListener ]
         @ (if terminalHostUpdateLocksInteraction model then
                []
@@ -1988,19 +1972,7 @@ let viewAppHeader model dispatch =
         prop.children [
             Html.div [
                 prop.className "header-left"
-                prop.children [
-                    if onePane then WorkspaceView.context model
-                    else viewSystemMetrics model.SystemMetrics
-                    match model.Workspace.PreferenceError with
-                    | Some error ->
-                        Html.span [
-                            prop.className "workspace-preference-error"
-                            prop.role "alert"
-                            prop.title error
-                            prop.text error
-                        ]
-                    | None -> ()
-                ]
+                prop.children [ viewSystemMetrics model.SystemMetrics ]
             ]
             Html.div [
                 prop.className "header-center"
@@ -2022,7 +1994,6 @@ let viewAppHeader model dispatch =
                     Html.div [
                         prop.className "header-controls"
                         prop.children [
-                            WorkspaceView.modeButton model dispatch
                             match model.TerminalHostUpdate with
                             | TerminalHostUpdateModel.Observed
                                 TerminalHostUpdateState.Available ->
@@ -2106,7 +2077,7 @@ let viewAppHeader model dispatch =
                     ]
                 ]
             ]
-            WorkspaceView.tabs model dispatch
+            if onePane then WorkspaceView.tabs model dispatch
         ]
     ]
 

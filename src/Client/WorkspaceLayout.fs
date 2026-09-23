@@ -1,6 +1,7 @@
 module WorkspaceLayout
 
 open Browser
+open BrowserObserverInterop
 
 [<RequireQualifiedAccess>]
 type Mode =
@@ -15,13 +16,18 @@ type Pane =
 
 type State =
     { Mode: Mode
-      ActivePane: Pane
-      PreferenceError: string option }
+      ActivePane: Pane }
 
 let empty =
     { Mode = Mode.Desktop
-      ActivePane = Pane.Worktrees
-      PreferenceError = None }
+      ActivePane = Pane.Worktrees }
+
+[<Literal>]
+let PhoneMaxWidth = 900
+
+let modeForViewportWidth width =
+    if width <= float PhoneMaxWidth then Mode.OnePane
+    else Mode.Desktop
 
 let isVisible pane desktopOpen state =
     match state.Mode with
@@ -57,18 +63,17 @@ let focusTab pane =
     |> Option.ofObj
     |> Option.iter _.focus()
 
-let private preferenceKey = "treemon.workspace.mode"
+let observeMode dispatch =
+    let media = matchMedia $"(max-width: {PhoneMaxWidth}px)"
+    let report () =
+        viewportWidth ()
+        |> modeForViewportWidth
+        |> dispatch
+    let handler = fun (_: obj) -> report ()
 
-let readMode () =
-    match Dom.window.sessionStorage.getItem preferenceKey |> Option.ofObj with
-    | None
-    | Some "desktop" -> Mode.Desktop
-    | Some "one-pane" -> Mode.OnePane
-    | Some _ -> invalidOp "The saved workspace layout is not recognized."
+    addMediaChangeListener media handler
+    report ()
 
-let saveMode mode =
-    let value =
-        match mode with
-        | Mode.Desktop -> "desktop"
-        | Mode.OnePane -> "one-pane"
-    Dom.window.sessionStorage.setItem (preferenceKey, value)
+    { new System.IDisposable with
+        member _.Dispose() =
+            removeMediaChangeListener media handler }

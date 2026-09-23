@@ -9,14 +9,35 @@ open Microsoft.Playwright.NUnit
 open Shared
 open Tests.CanvasTestHelpers
 
-let private useOnePane (page: IPage) =
+let private usePhoneViewport (page: IPage) width height =
     task {
-        do! page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use one-pane layout")).ClickAsync()
+        do! page.SetViewportSizeAsync(width, height)
         do! page.Locator(".app-layout.workspace-single").WaitForAsync()
+    }
+
+let private useDesktopViewport (page: IPage) width height =
+    task {
+        do! page.SetViewportSizeAsync(width, height)
+        do! page.Locator(".app-layout:not(.workspace-single)").WaitForAsync()
     }
 
 let private selectWorkspacePane (page: IPage) pane =
     page.Locator($"#{WorkspaceLayout.tabId pane}").ClickAsync()
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type WorkspaceViewportStateTests() =
+
+    [<TestCase(540.0, true)>]
+    [<TestCase(900.0, true)>]
+    [<TestCase(901.0, false)>]
+    member _.``Viewport width selects the responsive workspace mode``(width: float, onePane: bool) =
+        let actual =
+            WorkspaceLayout.modeForViewportWidth width
+            |> (=) WorkspaceLayout.Mode.OnePane
+
+        Assert.That(actual, Is.EqualTo(onePane))
 
 [<TestFixture>]
 [<Category("E2E")>]
@@ -98,8 +119,7 @@ type WorkspaceLayoutTests() =
             let! fontSizes =
                 this.Page.EvaluateAsync<string[]>(
                     "() => ['--fs-sm', '--fs-base', '--fs-lg'].map(name => getComputedStyle(document.documentElement).getPropertyValue(name))")
-            do! this.Page.SetViewportSizeAsync(390, 844)
-            do! useOnePane this.Page
+            do! usePhoneViewport this.Page 390 844
 
             for pane in [ WorkspaceLayout.Pane.Worktrees; WorkspaceLayout.Pane.Terminal; WorkspaceLayout.Pane.Canvas ] do
                 do! selectWorkspacePane this.Page pane
@@ -107,16 +127,28 @@ type WorkspaceLayoutTests() =
                     this.Page.Locator(".app-layout > :visible").EvaluateAllAsync<string[]>(
                         "panes => panes.map(pane => pane.id)")
                 let! geometry =
-                    this.Page.EvaluateAsync<bool>(
+                    this.Page.EvaluateAsync<float[]>(
                         """() => {
+                            const header = document.querySelector('.workspace-single-header').getBoundingClientRect();
                             const tabs = document.querySelector('.workspace-tabs').getBoundingClientRect();
                             const layout = document.querySelector('.app-layout').getBoundingClientRect();
-                            return tabs.top >= 0 && tabs.bottom <= layout.top
-                                && layout.bottom <= innerHeight
-                                && document.documentElement.scrollWidth <= innerWidth;
+                            return [
+                                header.top, header.bottom, header.height,
+                                tabs.top, tabs.bottom, tabs.height,
+                                layout.top, layout.bottom,
+                                innerHeight,
+                                document.documentElement.scrollWidth,
+                                innerWidth
+                            ];
                         }""")
                 Assert.That(visible, Is.EqualTo([| WorkspaceLayout.paneId pane |]))
-                Assert.That(geometry, Is.True)
+                Assert.Multiple(fun () ->
+                    Assert.That(geometry[2], Is.EqualTo(36.0).Within(0.5), "phone header height")
+                    Assert.That(geometry[3], Is.EqualTo(geometry[0]).Within(0.5), "tab strip top")
+                    Assert.That(geometry[4], Is.EqualTo(geometry[1] - 1.0).Within(0.5), "tabs stop above header border")
+                    Assert.That(geometry[6], Is.EqualTo(geometry[1]).Within(0.5), "workspace starts below tabs")
+                    Assert.That(geometry[7], Is.LessThanOrEqualTo(geometry[8]), "workspace fits viewport")
+                    Assert.That(geometry[9], Is.LessThanOrEqualTo(geometry[10]), "no horizontal overflow"))
 
             do! this.Page.SetViewportSizeAsync(390, 420)
             let! fitsShortViewport =
@@ -130,23 +162,16 @@ type WorkspaceLayoutTests() =
         }
 
     [<Test>]
-    member this.``One-pane preference survives reload without changing another browser tab``() =
+    member this.``Viewport width restores one-pane and desktop modes across reloads``() =
         task {
-            do! useOnePane this.Page
+            do! usePhoneViewport this.Page 540 922
             let! _ = this.Page.ReloadAsync()
             do! this.Page.Locator(".app-layout.workspace-single").WaitForAsync()
-            let! other = this.Context.NewPageAsync()
-            let! _ = other.GotoAsync(ServerFixture.viteUrl)
-            do! other.Locator(".wt-card").First.WaitForAsync()
-            let! otherMode = other.Locator(".app-layout.workspace-single").CountAsync()
-            do! other.CloseAsync()
-            Assert.That(otherMode, Is.Zero)
-
-            do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use desktop layout")).ClickAsync()
+            do! useDesktopViewport this.Page 901 922
             let! _ = this.Page.ReloadAsync()
             do! this.Page.Locator(".wt-card").First.WaitForAsync()
-            let! restored = this.Page.Locator(".app-layout.workspace-single").CountAsync()
-            Assert.That(restored, Is.Zero)
+            do! Assertions.Expect(this.Page.Locator(".app-layout.workspace-single")).ToHaveCountAsync(0)
+            do! Assertions.Expect(this.Page.Locator(".workspace-mode-toggle")).ToHaveCountAsync(0)
         }
 
     [<Test>]
@@ -155,10 +180,8 @@ type WorkspaceLayoutTests() =
             do!
                 this.Page.RouteAsync(
                     "**/IWorktreeApi/getBranches",
-                    fun route ->
-                        route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = """["main"]""")))
-            do! useOnePane this.Page
-            do! this.Page.SetViewportSizeAsync(390, 420)
+                    _.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = """["main"]""")))
+            do! usePhoneViewport this.Page 390 420
             do! this.Page.Locator(".create-wt-btn").First.ClickAsync()
             let dialog = this.Page.Locator(".modal-dialog")
             do! dialog.Locator(".modal-input").FillAsync("phone-prototype")
@@ -311,17 +334,12 @@ type WorkspaceLayoutTests() =
                     "buttons => buttons.length === 3 && buttons.every(button => button.tabIndex === 0)")
             let! legacyHeaderButtonsStayOutOfTabOrder =
                 this.Page
-                    .Locator(".header-controls > .ctrl-btn:not(.workspace-mode-toggle)")
+                    .Locator(".header-controls > .ctrl-btn")
                     .EvaluateAllAsync<bool>(
                         "buttons => buttons.length > 0 && buttons.every(button => button.tabIndex === -1)")
-            let! modeButtonIsFocusable =
-                this.Page
-                    .Locator(".workspace-mode-toggle")
-                    .EvaluateAsync<bool>("button => button.tabIndex === 0")
             Assert.Multiple(fun () ->
                 Assert.That(ratioButtonsAreFocusable, Is.True)
-                Assert.That(legacyHeaderButtonsStayOutOfTabOrder, Is.True)
-                Assert.That(modeButtonIsFocusable, Is.True))
+                Assert.That(legacyHeaderButtonsStayOutOfTabOrder, Is.True))
 
             do! Assertions.Expect(buttons.First).ToHaveAttributeAsync("aria-pressed", "true")
             do! Assertions.Expect(buttons.Nth(2)).ToHaveAttributeAsync("aria-pressed", "false")
@@ -401,35 +419,19 @@ type WorkspaceLayoutTests() =
             do! Assertions.Expect(this.Page.Locator(".app-layout")).ToHaveCSSAsync("flex-direction", "row")
         }
 
-    [<TestCase(0)>]
-    [<TestCase(1)>]
-    [<TestCase(2)>]
-    member this.``Narrow workspace stacks panes without horizontal overflow``(index: int) =
+    [<TestCase(900, true)>]
+    [<TestCase(901, false)>]
+    member this.``900 pixel breakpoint selects one-pane instead of stacking desktop panes``(width: int, onePane: bool) =
         task {
-            do! this.Page.SetViewportSizeAsync(720, 900)
-            do! focusFirstCard this.Page
-            do! ensureCanvasPaneOpen this.Page
-            do! showTerminal this.Page
-            do! (widthButtons this.Page).Nth(index).ClickAsync()
-            do! assertShares this.Page [
-                ".terminal-pane", 1.0
-                ".canvas-pane", 1.0
-                ".dashboard", 1.0
-            ]
+            do! this.Page.SetViewportSizeAsync(width, 900)
+            let selector =
+                if onePane then ".app-layout.workspace-single"
+                else ".app-layout:not(.workspace-single)"
+            do! this.Page.Locator(selector).WaitForAsync()
 
-            let! tops =
-                this.Page.EvaluateAsync<float[]>(
-                    "() => ['.terminal-pane', '.canvas-pane', '.dashboard'].map(s => document.querySelector(s).getBoundingClientRect().top)")
-            Assert.That(tops[0], Is.LessThan(tops[1]))
-            Assert.That(tops[1], Is.LessThan(tops[2]))
-
-            let! overflow =
-                this.Page.EvaluateAsync<bool>(
-                    "() => document.documentElement.scrollWidth > document.documentElement.clientWidth")
-            Assert.That(overflow, Is.False)
-
-            for selector in [ ".terminal-pane"; ".canvas-pane"; ".dashboard" ] do
-                do! Assertions.Expect(this.Page.Locator(selector)).ToHaveCSSAsync("flex", "1 1 0px")
+            let! tabsVisible =
+                this.Page.Locator(".workspace-tabs").IsVisibleAsync()
+            Assert.That(tabsVisible, Is.EqualTo(onePane))
         }
 
     [<Test>]
@@ -795,7 +797,7 @@ type TerminalPaneDomTests() =
         }
 
     [<Test>]
-    member this.``One-pane switching preserves terminal frames and never writes desktop layout preferences``() =
+    member this.``Responsive switching preserves terminal frames and never writes desktop pane preferences``() =
         task {
             do! rememberFrames this.Page
             let! originalLayout = this.Page.Locator(".app-layout").GetAttributeAsync("class")
@@ -809,8 +811,7 @@ type TerminalPaneDomTests() =
                    |> List.exists (fun name -> request.Url.EndsWith(name, StringComparison.Ordinal)) then
                     layoutWrites <- layoutWrites + 1)
 
-            do! useOnePane this.Page
-            do! this.Page.SetViewportSizeAsync(390, 844)
+            do! usePhoneViewport this.Page 390 844
             do! selectWorkspacePane this.Page WorkspaceLayout.Pane.Terminal
             do! (tabFor this.Page firstAlternateTerminalActivity).ClickAsync()
             do! selectWorkspacePane this.Page WorkspaceLayout.Pane.Canvas
@@ -819,7 +820,7 @@ type TerminalPaneDomTests() =
             let! mounted = framesStillMounted this.Page
             let! selected = (selectedTab this.Page).Locator(".terminal-tab-label").TextContentAsync()
             let! preserved = originalBody.GetAttributeAsync("data-pane-round-trip")
-            do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use desktop layout")).ClickAsync()
+            do! useDesktopViewport this.Page 1280 720
             let! restoredLayout = this.Page.Locator(".app-layout").GetAttributeAsync("class")
 
             Assert.Multiple(fun () ->
@@ -846,7 +847,7 @@ type TerminalPaneDomTests() =
                             do! release.Task
                         }))
             try
-                do! useOnePane this.Page
+                do! usePhoneViewport this.Page 390 844
                 do! selectWorkspacePane this.Page WorkspaceLayout.Pane.Terminal
                 do! this.Page.Locator(".terminal-new-btn").ClickAsync()
                 let! route = requested.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
@@ -895,6 +896,8 @@ type TerminalPaneDomTests() =
             let! selectedAria = selected.GetAttributeAsync("aria-selected")
             let! reconnectCount = reconnect.CountAsync()
             let! reconnectText = reconnect.TextContentAsync()
+            let! reconnectIconCount =
+                reconnect.Locator("svg.btn-icon").CountAsync()
             let! reconnectLabel = reconnect.GetAttributeAsync("aria-label")
             let! reconnectTitle = reconnect.GetAttributeAsync("title")
             let! reconnectClass = reconnect.GetAttributeAsync("class")
@@ -931,7 +934,8 @@ type TerminalPaneDomTests() =
                 Assert.That(selectedLabel, Is.EqualTo(firstTerminalActivity))
                 Assert.That(selectedAria, Is.EqualTo("true"))
                 Assert.That(reconnectCount, Is.EqualTo(1))
-                Assert.That(reconnectText, Is.EqualTo("Reconnect view"))
+                Assert.That(reconnectText, Is.Empty)
+                Assert.That(reconnectIconCount, Is.EqualTo(1))
                 Assert.That(
                     reconnectLabel,
                     Is.EqualTo(

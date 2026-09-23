@@ -1106,43 +1106,23 @@
             .app-layout.terminal-hidden:is(.workspace-wide-canvas, .workspace-wide-panes) > .canvas-pane.open,
             .app-layout:not(.canvas-open):is(.workspace-wide-canvas, .workspace-wide-panes) > .terminal-pane { flex: 0 0 66.667%; }
         }
-        @media (max-width: 900px) {
-            .app-layout { flex-direction: column; }
-            .app-layout > .terminal-pane,
-            .app-layout > .dashboard { flex: 1 1 0; width: 100%; }
-            .canvas-pane { flex: 0 0 0; width: 100%; }
-            .app-layout.canvas-open > .canvas-pane.open {
-                border-left: none;
-                border-right: none;
-                border-top: 1px solid #313244;
-                border-bottom: 1px solid #313244;
-            }
-        }
-        .workspace-tabs[hidden] { display: none; }
         .workspace-single-header {
-            height: 72px;
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
-            grid-template-rows: 36px 36px;
-            gap: 0 8px;
+            height: 36px;
             padding: 0 8px;
         }
-        .workspace-single-header .header-left { min-width: 0; overflow: hidden; }
-        .workspace-single-header .header-center,
-        .workspace-single-header .deploy-branch,
-        .workspace-single-header .header-controls > :not(.workspace-mode-toggle) { display: none; }
-        .workspace-context { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .workspace-preference-error { color: #f38ba8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .workspace-tabs { grid-column: 1 / -1; display: flex; gap: 4px; align-items: center; min-width: 0; }
+        .workspace-single-header > .header-left,
+        .workspace-single-header > .header-center,
+        .workspace-single-header > .header-right { display: none; }
+        .workspace-tabs { display: flex; gap: 4px; align-items: center; min-width: 0; }
+        .workspace-single-header > .workspace-tabs { flex: 1 1 auto; height: 100%; }
         .workspace-tab { flex: 1 1 0; min-width: 0; }
         .workspace-tab .canvas-badge { margin-left: 4px; }
-        .workspace-tab:focus-visible,
-        .workspace-mode-toggle:focus-visible { outline: 2px solid #89b4fa; outline-offset: 1px; }
+        .workspace-tab:focus-visible { outline: 2px solid #89b4fa; outline-offset: 1px; }
         .app-layout.workspace-single {
             flex-direction: row;
-            height: calc(100vh - 72px);
-            height: calc(100dvh - 72px);
-            margin-top: 72px;
+            height: calc(100vh - 36px);
+            height: calc(100dvh - 36px);
+            margin-top: 36px;
         }
         .app-layout.workspace-single > .canvas-pane.open { flex: 1 1 0; min-width: 0; min-height: 0; }
         .app-layout.workspace-single > .canvas-pane:not(.open),

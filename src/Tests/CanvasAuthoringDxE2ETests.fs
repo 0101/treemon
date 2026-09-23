@@ -777,8 +777,8 @@ type CanvasAuthoringDxPaneE2ETests() =
             do! this.OpenMultiDocPane()
 
             if onePane then
-                do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use one-pane layout")).ClickAsync()
                 do! this.Page.SetViewportSizeAsync(390, 844)
+                do! this.Page.Locator(".app-layout.workspace-single").WaitForAsync()
                 do! this.Page.Locator("#workspace-canvas-tab").ClickAsync()
 
             let activeDoc = this.Page.FrameLocator(".canvas-iframe-active").Locator("body")

@@ -2814,8 +2814,8 @@ type DashboardTests() =
             do! terminalToggle.ClickAsync()
 
             if onePane then
-                do! page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use one-pane layout")).ClickAsync()
                 do! page.SetViewportSizeAsync(390, 844)
+                do! page.Locator(".app-layout.workspace-single").WaitForAsync()
                 do! page.Locator("#workspace-terminal-tab").ClickAsync()
 
             let firstIframe =
@@ -4902,8 +4902,8 @@ type DashboardTests() =
             Assert.That(collapsedGridCount, Is.Zero, "The target repository should be collapsed before search")
 
             if onePane then
-                do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use one-pane layout")).ClickAsync()
                 do! this.Page.SetViewportSizeAsync(390, 844)
+                do! this.Page.Locator(".app-layout.workspace-single").WaitForAsync()
                 do! this.Page.Locator("#workspace-terminal-tab").ClickAsync()
 
             let! _ =

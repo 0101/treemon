@@ -28,6 +28,23 @@ let cardTitle (wt: WorktreeStatus) =
     if wt.Branch = WorktreeStatus.DetachedBranchName then WorktreePath.displayName wt.Path
     else wt.Branch
 
+let refreshIcon () =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "2")
+        svg.custom ("strokeLinecap", "round")
+        svg.custom ("strokeLinejoin", "round")
+        svg.children [
+            Svg.path [ svg.d "M3 12a9 9 0 0 1 14.65-7" ]
+            Svg.path [ svg.d "M21 12a9 9 0 0 1-14.65 7" ]
+            Svg.path [ svg.d "M17 2v4h-4" ]
+            Svg.path [ svg.d "M7 22v-4h4" ]
+        ]
+    ]
+
 let stepStatusClassName (status: StepStatus option) =
     match status with
     | Some StepStatus.Running -> "event-status running"

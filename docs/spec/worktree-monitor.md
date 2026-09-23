@@ -29,8 +29,11 @@
   `1:2:1`, and `2:2:1`. With either Terminal or Canvas hidden, the controls become `1:1` and `2:1`
   for the remaining pane and Dashboard; both wide modes use `2:1` and retain their three-pane
   preference when the hidden pane returns. With both hidden, Dashboard fills the workspace and the
-  ratio controls disappear. The selection persists in global config. Narrow screens stack panes
-  in the same order, ignoring desktop ratios.
+  ratio controls disappear. The selection persists in global config. At viewport widths up to
+  `900px`, Treemon automatically uses One-pane mode; above `900px`, it automatically uses Desktop
+  mode. There is no user-selected or persisted layout mode. Transitions preserve mounted pane DOM
+  and state, retain the active One-pane tab, and leave Desktop pane visibility flags and ratios
+  unchanged.
 - Keyboard navigation: arrow keys move focus spatially, while Ctrl+P fuzzy-searches worktrees across repositories (see `docs/spec/keyboard-navigation.md`)
 - Canvas pane: per-worktree interactive HTML documents for agent-to-user rich content (see `docs/spec/canvas-pane.md`)
 
@@ -49,7 +52,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 - **Single serialized runtime writer, atomic on disk.** Every server mutation funnels through one in-process lock and writes via a temp-file-then-replace, so concurrent runtime updates can't interleave or leave a partially written file.
 - **Never destroy data.** An unparseable `config.json` is backed up to a timestamped `*.corrupt-<ts>` sibling before a fresh object is started, and each write touches only its own named keys — every unrelated key is left intact.
-- **Typed accessors over one store.** Watched roots (with the missing-vs-empty distinction the startup resolver depends on — see Multi-Repo above), pane visibility and workspace width, collapsed repos, last-viewed hashes, and the editor command/name reader are thin wrappers over the same locked store.
+- **Typed accessors over one store.** Watched roots (with the missing-vs-empty distinction the startup resolver depends on — see Multi-Repo above), pane visibility and Desktop workspace ratios, collapsed repos, last-viewed hashes, and the editor command/name reader are thin wrappers over the same locked store. The viewport-derived One-pane/Desktop mode is not persisted.
 
 ### Runtime Logging
 

@@ -693,14 +693,20 @@ type TerminalFocusTests() =
         Assert.That(visible WorkspaceLayout.empty, Is.EqualTo(panes))
 
     [<Test>]
-    member _.``Layout round trip restores desktop settings and remembers the chosen pane``() =
+    member _.``Viewport mode round trip restores desktop settings and remembers the chosen pane``() =
         let model =
             { focusModel with
                 Workspace.ActivePane = WorkspaceLayout.Pane.Terminal
                 TerminalPaneOpen = false
                 Canvas.WorkspaceWidth = WorkspaceWidth.WideCanvas }
-        let phone, _ = App.update (SetWorkspaceMode WorkspaceLayout.Mode.OnePane) model
-        let desktop, _ = App.update (SetWorkspaceMode WorkspaceLayout.Mode.Desktop) phone
+        let phone, _ =
+            App.update
+                (WorkspaceViewportChanged WorkspaceLayout.Mode.OnePane)
+                model
+        let desktop, _ =
+            App.update
+                (WorkspaceViewportChanged WorkspaceLayout.Mode.Desktop)
+                phone
 
         Assert.That(desktop, Is.EqualTo(model))
 

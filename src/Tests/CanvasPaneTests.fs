@@ -106,7 +106,8 @@ type CanvasPaneTests() =
                             RouteFulfillOptions(
                                 ContentType = "application/json",
                                 Body = JsonConvert.SerializeObject(CanvasMessageResult.Ok, Fable.Remoting.Json.FableJsonConverter()))))
-            do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use one-pane layout")).ClickAsync()
+            do! this.Page.SetViewportSizeAsync(390, 844)
+            do! this.Page.Locator(".app-layout.workspace-single").WaitForAsync()
             do! this.Page.Locator("#workspace-terminal-tab").ClickAsync()
             let! _ =
                 body.EvaluateAsync(
@@ -182,7 +183,8 @@ type CanvasPaneTests() =
             let! _ = this.Page.ReloadAsync()
             do! focusCanvasCard this.Page FixtureCanvasBranch
             if onePane then
-                do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Use one-pane layout")).ClickAsync()
+                do! this.Page.SetViewportSizeAsync(390, 844)
+                do! this.Page.Locator(".app-layout.workspace-single").WaitForAsync()
             let! focusedBefore = this.Page.Locator(".wt-card.focused .branch-name").TextContentAsync()
             publish <- true
             do! this.Page.Clock.FastForwardAsync(61_000)

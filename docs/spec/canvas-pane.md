@@ -106,6 +106,9 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 
 - The pane opens and closes from the header Canvas button and the `C` key.
 - Open or closed state persists in global config.
+- Viewport mode is automatic: One-pane at widths up to `900px`, Desktop above `900px`. Transitioning
+  modes does not unmount the Canvas pane or its rendered iframes; it preserves their DOM state and
+  the active One-pane tab while retaining saved Desktop pane visibility and ratio settings.
 - Workspace width controls live in the app header, not the canvas tab bar. The fixed
   `Terminal | Canvas | Dashboard` order, persisted ratios, and hidden-pane behavior are described
   in `docs/spec/worktree-monitor.md` (Dashboard Layout).
@@ -323,9 +326,12 @@ changed rows already use).
   (first open, worktree switch, past the 3-iframe LRU cap, or after a restart) shows none even if it
   changed. Accepted limitation; closing it would mean snapshotting each doc's last-seen body.
 
-**Level 4 — Tab switch persistence:**
+**Level 4 — Tab and viewport-mode persistence:**
 - When switching between canvas doc tabs in the same worktree, keep the previous iframe mounted but hidden (`display: none`) instead of unmounting it.
 - On switch back, unhide the existing iframe — all JS state, scroll, and form inputs are intact.
+- Automatic transitions between One-pane and Desktop preserve the same mounted iframe set, loaded
+  hashes, active document, and in-page state; mode changes reveal or hide existing panes rather than
+  remounting them.
 - `CanvasState.MountedAgentDocHashes` records the content hash actually loaded by every rendered AgentDoc iframe: the current canvas worktree's visited LRU plus its active doc. A fresh mount seeds the current on-disk hash; an iframe that remains mounted keeps its loaded hash across polls, tab switches, and pane collapse.
 - A visible AgentDoc morphs only when its loaded hash differs from the refreshed on-disk hash. Hidden or collapsed-pane iframes retain the mismatch until they are next shown; all reveal paths (tab selection, card/overview open, pane reopen, and archive fallback) use the same transition, so none can expose stale DOM while marking the new hash viewed.
 - Reconciliation derives residency from what the pane actually renders rather than historical visits. Worktree/overview switches, LRU eviction, archive, and document removal drop unmounted entries; fresh remounts seed current content. Because staleness is a hash comparison rather than a boolean bit, a disk change that reverts to the iframe's loaded hash cancels itself without a needless morph.

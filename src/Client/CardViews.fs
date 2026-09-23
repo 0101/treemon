@@ -193,22 +193,7 @@ let private providerDisplayName (provider: CodingToolProvider option) =
 /// Two arrows bent into a circle — the sync glyph. Circular rather than the straight swap arrows it
 /// replaced, because the same element turns while a sync is in flight: rotating a straight-arrow
 /// glyph reads as a symbol falling over, whereas rotation is the motion this shape already implies.
-let autoSyncIcon () =
-    Svg.svg [
-        svg.className "btn-icon"
-        svg.viewBox (0, 0, 24, 24)
-        svg.fill "none"
-        svg.stroke "currentColor"
-        svg.custom ("strokeWidth", "2")
-        svg.custom ("strokeLinecap", "round")
-        svg.custom ("strokeLinejoin", "round")
-        svg.children [
-            Svg.path [ svg.d "M3 12a9 9 0 0 1 14.65-7" ]
-            Svg.path [ svg.d "M21 12a9 9 0 0 1-14.65 7" ]
-            Svg.path [ svg.d "M17 2v4h-4" ]
-            Svg.path [ svg.d "M7 22v-4h4" ]
-        ]
-    ]
+let autoSyncIcon () = refreshIcon ()
 
 let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: string) =
     if not (canOpenWorktreeDiff wt) then

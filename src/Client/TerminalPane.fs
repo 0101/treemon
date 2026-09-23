@@ -7,6 +7,7 @@ open Feliz
 open Fable.Core.JsInterop
 open Shared
 open Navigation
+open Components
 
 [<RequireQualifiedAccess>]
 type TerminalStartState =
@@ -761,7 +762,7 @@ let private header state callbacks =
                 prop.title "Reload this terminal view without restarting its shell or agent."
                 prop.onClick (fun _ ->
                     callbacks.ReconnectView tab.Id)
-                prop.text "Reconnect view"
+                prop.children [ refreshIcon () ]
             ]
 
     let newTerminalButton =

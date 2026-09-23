@@ -87,9 +87,7 @@ type Msg =
     | TerminalHostUpdateCompleted of TerminalHostUpdateState
     | TerminalHostUpdateRequestFailed of exn
     | ToggleCompact
-    | SetWorkspaceMode of WorkspaceLayout.Mode
-    | WorkspaceModeLoaded of WorkspaceLayout.Mode
-    | WorkspacePreferenceFailed of string
+    | WorkspaceViewportChanged of WorkspaceLayout.Mode
     | SelectWorkspacePane of WorkspaceLayout.Pane
     | ToggleCollapse of repoId: RepoId
     | Tick of now: float
