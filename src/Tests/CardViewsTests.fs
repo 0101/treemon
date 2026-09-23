@@ -594,14 +594,16 @@ type WorktreeDiffActionTests() =
             let! added = trackedCard.Locator(".diff-added").TextContentAsync()
             let! removed = trackedCard.Locator(".diff-removed").TextContentAsync()
             let! trackedCommitGridCount = trackedCard.Locator(".commit-grid").CountAsync()
-            let! untrackedMetricCount =
-                (cardByBranch this.Page "feature-active").Locator(".card-work-metrics").CountAsync()
+            let! untrackedMetricElementCount =
+                (cardByBranch this.Page "feature-active")
+                    .Locator(".diff-added, .diff-removed, .commit-grid")
+                    .CountAsync()
 
             Assert.Multiple(fun () ->
                 Assert.That(added, Is.EqualTo("+4"))
                 Assert.That(removed, Is.EqualTo("-2"))
                 Assert.That(trackedCommitGridCount, Is.Zero)
-                Assert.That(untrackedMetricCount, Is.Zero))
+                Assert.That(untrackedMetricElementCount, Is.Zero))
         }
 
     [<Test>]

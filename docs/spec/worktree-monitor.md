@@ -91,7 +91,12 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 ### Per-Worktree Card
 
-- Active-card headers show the branch name, session status dots, and card chrome. Expanded cards place open PR details on the left and a right-aligned tail of tracked `+/-` line stats, commit grid, Diff, and Create PR when applicable; compact cards show the same metrics in compact detail; archive cards retain them in their header. Line stats compare the merge base of the resolved base ref and `HEAD` with the live tracked worktree, so committed, staged, and unstaged tracked changes contribute while untracked files do not. The commit grid remains the non-merge commit count.
+- Active-card headers show the branch name, session status dots, and card chrome. Expanded cards place
+  open PR details on the left and a right-aligned tail of tracked `+/-` line stats, commit grid,
+  Diff, and Create PR when applicable; compact cards show the same metrics in compact detail;
+  archive cards retain them in their header. Line stats compare the merge base of the resolved base
+  ref and `HEAD` with the live tracked worktree, so committed, staged, and unstaged tracked changes
+  contribute while untracked files do not. The commit grid remains the non-merge commit count.
 - Coding tool status dots — one per open physical process instance (Working / WaitingForUser /
   Idle), each keyed by its opaque exact identity and rendered as a context-usage donut when that
   process has reported usage, else a plain dot. Duplicate processes for one durable session remain
