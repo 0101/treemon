@@ -286,6 +286,8 @@ type DiffSummaryDetails =
 type DiffLayerCountResult =
     | Available of fileCount: int
     | BaseError
+    | TargetMissing
+    | NoCommonAncestor
     | TimedOut
     | GitError
 
@@ -301,6 +303,8 @@ type DiffSummaryResult =
     | FilteredEmpty
     | Stale
     | BaseError
+    | TargetMissing
+    | NoCommonAncestor
     | TimedOut
     | GitError
     | TooManyFiles of minimumFileCount: int

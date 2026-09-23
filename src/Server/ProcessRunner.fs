@@ -15,7 +15,8 @@ type ResponseDeadline =
     private
         { ExpiresAt: int64
           ResponseReserveMs: int
-          ShutdownReserveMs: int }
+          ShutdownReserveMs: int
+          CancellationToken: CancellationToken }
 
 type CaptureStream =
     | StandardOutput
@@ -103,7 +104,12 @@ let internal createResponseDeadline responseDeadlineMs =
         Stopwatch.GetTimestamp()
         + int64 durationMs * Stopwatch.Frequency / 1_000L
       ResponseReserveMs = responseReserveMs durationMs
-      ShutdownReserveMs = shutdownReserveMs durationMs }
+      ShutdownReserveMs = shutdownReserveMs durationMs
+      CancellationToken = CancellationToken.None }
+
+let internal withCancellationToken cancellationToken deadline =
+    { deadline with
+        CancellationToken = cancellationToken }
 
 let internal responseDeadlineRemainingMs deadline =
     let remainingTicks =
@@ -233,8 +239,8 @@ let private describeTruncation streams =
 let internal shouldLogCompletion exitCode wasTruncated elapsed =
     exitCode <> 0 || wasTruncated || Log.isSlowOperation elapsed
 
-/// Runs a process without shell argument parsing. Output capture is bounded and
-/// timeout cancellation terminates the complete process tree.
+/// Runs a process without shell argument parsing. Output capture is bounded, and deadline or caller
+/// cancellation terminates the complete process tree.
 let private runArgumentListCore
     (timeoutMs: int)
     (shutdownTimeoutMs: int)
@@ -244,6 +250,7 @@ let private runArgumentListCore
     (fileName: string)
     (arguments: string list)
     (workingDirectory: string option)
+    (cancellationToken: CancellationToken)
     : Async<Result<ArgumentListOutput, ArgumentListFailure>> =
     async {
         let executionStopwatch = Stopwatch.StartNew()
@@ -266,7 +273,10 @@ let private runArgumentListCore
             if not (proc.Start()) then
                 return Error(StartFailed "Process did not start")
             else
-                use cts = new CancellationTokenSource()
+                use cts =
+                    CancellationTokenSource.CreateLinkedTokenSource(
+                        [| cancellationToken |]
+                    )
 
                 let remainingTimeoutMs =
                     timeoutMs
@@ -333,8 +343,11 @@ let private runArgumentListCore
                             [| stdoutTask; stderrTask |]
                         |> Async.AwaitTask
 
-                    Log.log context $"{fileName} ({arguments.Length} args) -> timed out after {timeoutMs}ms"
-                    return Error TimedOut
+                    if cancellationToken.IsCancellationRequested then
+                        return raise (OperationCanceledException(cancellationToken))
+                    else
+                        Log.log context $"{fileName} ({arguments.Length} args) -> timed out after {timeoutMs}ms"
+                        return Error TimedOut
         with :? ComponentModel.Win32Exception as ex ->
             Log.log context $"{fileName} ({arguments.Length} args) -> failed to start"
             return Error(StartFailed ex.Message)
@@ -367,6 +380,11 @@ let private resolveDeadline deadline =
 
 /// The run plus the budget it was given, so failure messages can name the timeout that applied.
 let private runWithBudget (spawn: Spawn) (arguments: string list) =
+    let cancellationToken =
+        match spawn.Deadline with
+        | SharedDeadline deadline -> deadline.CancellationToken
+        | _ -> CancellationToken.None
+
     match resolveDeadline spawn.Deadline with
     | None -> 0, async.Return(Error TimedOut)
     | Some(timeoutMs, shutdownTimeoutMs) ->
@@ -380,6 +398,7 @@ let private runWithBudget (spawn: Spawn) (arguments: string list) =
             spawn.FileName
             arguments
             spawn.WorkingDirectory
+            cancellationToken
 
 /// Exit code with raw stdout/stderr bytes, for callers that parse machine output themselves.
 let capture (spawn: Spawn) (arguments: string list) =

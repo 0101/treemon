@@ -27,7 +27,9 @@ Interactive UI launches (terminal, editor) are a different concern and are **not
 - Stdout and stderr are captured as bytes up to caller-supplied limits. A stream that exceeds its
   limit is drained fully and reported as truncated on the output, not as a failed run: the child
   exited, so its exit code is preserved and each caller decides whether the missing bytes matter.
-- Timeout cancellation kills the complete process tree and returns `TimedOut`.
+- Timeout cancellation kills the complete process tree and returns `TimedOut`. A caller cancellation
+  attached to a shared response deadline kills the same tree and propagates cancellation rather
+  than being reported as a timeout.
 - Byte-oriented callers receive exit code, raw stdout/stderr, and which streams were truncated. The
   `text`/`textResult` functions return UTF-8-decoded, trailing-whitespace-trimmed stdout on exit 0
   and trimmed stderr (or a described runner failure) otherwise, and additionally fail when the
@@ -60,8 +62,9 @@ field rather than a separate entry point.
 
 `Deadline` is a DU: `DefaultTimeout` (60 s), `Timeout of ms`, `InteractiveDeadline` (a fresh 10 s
 response deadline per call), and `SharedDeadline` (a `ResponseDeadline` established before the call
-and spent across several sequential runs). Only `SharedDeadline` can be exhausted on arrival, which
-yields `TimedOut` without spawning anything.
+and spent across several sequential runs). A shared deadline may also carry its owning HTTP
+request's cancellation token. Only `SharedDeadline` can be exhausted on arrival, which yields
+`TimedOut` without spawning anything.
 
 `CaptureLimits` names the three byte-cap policies in use: `data` (16 MiB stdout / 64 KiB stderr) for
 status collectors, JSON output, and diff summaries; `small` (64 KiB / 64 KiB) for short single-value
