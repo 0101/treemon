@@ -419,6 +419,20 @@ let private focusDashboard: Cmd<Msg> =
             Dom.window?requestAnimationFrame(fun (_: float) -> tryFocusDashboard () |> ignore)
             |> ignore)
 
+let private restoreWorkspaceFocusAfterViewportChange (model: Model) =
+    Cmd.ofEffect (fun _ ->
+        Dom.window?requestAnimationFrame(fun (_: float) ->
+            match model.Workspace.Mode, WorkspaceLayout.focusedPane () with
+            | WorkspaceLayout.Mode.OnePane, Some focusedPane
+                when focusedPane <> model.Workspace.ActivePane ->
+                WorkspaceLayout.focusTab model.Workspace.ActivePane
+            | WorkspaceLayout.Mode.Desktop, Some focusedPane
+                when (focusedPane = WorkspaceLayout.Pane.Terminal && not model.TerminalPaneOpen)
+                     || (focusedPane = WorkspaceLayout.Pane.Canvas && not model.Canvas.CanvasPaneOpen) ->
+                tryFocusDashboard () |> ignore
+            | _ -> ())
+        |> ignore)
+
 let private focusCanvasOrDashboard: Cmd<Msg> =
     Cmd.ofEffect (fun dispatch ->
         if not (CanvasPane.focusActiveDoc ()) then
@@ -655,7 +669,11 @@ let update msg model =
         let updated =
             { model with Workspace.Mode = mode }
             |> cancelTerminalViewFocusWhenHidden
-        updated, CanvasUpdate.syncVisibleDocCmd updated
+        updated,
+        Cmd.batch [
+            CanvasUpdate.syncVisibleDocCmd updated
+            restoreWorkspaceFocusAfterViewportChange updated
+        ]
     | SelectWorkspacePane pane ->
         let updated, syncCmd =
             match pane, model.Workspace.Mode with
@@ -2143,6 +2161,12 @@ let view model dispatch =
             prop.id (WorkspaceLayout.paneId WorkspaceLayout.Pane.Worktrees)
             prop.className dashboardClass
             prop.hidden (not (WorkspaceLayout.isVisible WorkspaceLayout.Pane.Worktrees true model.Workspace))
+            yield!
+                if onePane then
+                    [ prop.role "tabpanel"
+                      prop.ariaLabelledBy (WorkspaceLayout.tabId WorkspaceLayout.Pane.Worktrees) ]
+                else
+                    []
             prop.tabIndex 0
             prop.autoFocus true
             prop.onKeyDown (fun e ->
@@ -2198,6 +2222,7 @@ let view model dispatch =
 
         let state: TerminalPane.TerminalPaneState =
             { IsOpen = terminalPaneOpen
+              WorkspaceMode = model.Workspace.Mode
               Snapshot = model.EmbeddedTerminals
               ActiveTerminal = activeTerminal
               SelectedWorktree = selectedWorktree

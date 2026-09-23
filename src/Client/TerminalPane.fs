@@ -28,6 +28,7 @@ type TerminalVisibilitySignal =
 
 type TerminalPaneState =
     { IsOpen: bool
+      WorkspaceMode: WorkspaceLayout.Mode
       Snapshot: EmbeddedTerminalSnapshot
       ActiveTerminal: EmbeddedTerminalId option
       SelectedWorktree: WorktreePath option
@@ -939,8 +940,14 @@ let view state callbacks =
         prop.id (WorkspaceLayout.paneId WorkspaceLayout.Pane.Terminal)
         prop.className paneClass
         prop.hidden (not state.IsOpen)
-        prop.role "region"
-        prop.ariaLabel "Embedded terminals"
+        yield!
+            match state.WorkspaceMode with
+            | WorkspaceLayout.Mode.OnePane ->
+                [ prop.role "tabpanel"
+                  prop.ariaLabelledBy (WorkspaceLayout.tabId WorkspaceLayout.Pane.Terminal) ]
+            | WorkspaceLayout.Mode.Desktop ->
+                [ prop.role "region"
+                  prop.ariaLabel "Embedded terminals" ]
         prop.children [
             Html.div [
                 prop.className "terminal-pane-shell"

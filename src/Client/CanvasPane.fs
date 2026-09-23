@@ -250,6 +250,7 @@ type CanvasPaneCallbacks =
 /// `Client.fsproj`, so that type isn't nameable here.
 type CanvasPaneState =
     { IsOpen: bool
+      WorkspaceMode: WorkspaceLayout.Mode
       SendState: CanvasSendState
       DocError: DocJsError option
       ClipboardNotice: string option
@@ -271,6 +272,7 @@ type CanvasPaneAwareness =
 
 let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (awareness: CanvasPaneAwareness) (callbacks: CanvasPaneCallbacks) =
     let { IsOpen = isOpen
+          WorkspaceMode = workspaceMode
           SendState = sendState
           DocError = docError
           ClipboardNotice = clipboardNotice
@@ -551,6 +553,12 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
     Html.div [
         prop.id (WorkspaceLayout.paneId WorkspaceLayout.Pane.Canvas)
         prop.className paneClass
+        yield!
+            if workspaceMode = WorkspaceLayout.Mode.OnePane then
+                [ prop.role "tabpanel"
+                  prop.ariaLabelledBy (WorkspaceLayout.tabId WorkspaceLayout.Pane.Canvas) ]
+            else
+                []
         prop.children [ content ]
     ]
 
@@ -590,15 +598,15 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                && Fable.Core.JsInterop.emitJsExpr<bool> me.data "$0 != null && typeof $0 === 'object'"
             then
                 // True when THIS message came from a mounted-but-HIDDEN canvas iframe (a visited doc that
-                // stays mounted and keeps running JS), including the selected doc in a hidden one-pane
-                // workspace. The origin check above
+                // stays mounted and keeps running JS), including the selected doc in a closed pane.
+                // The origin check above
                 // already proves the sender is a canvas doc iframe, so a hidden-iframe match means a
                 // background/co-resident doc is posting. Session forwarding and navigate-canvas-doc honor
                 // only the active doc, so such a message is dropped — a hidden doc can't inject a payload
                 // (or force a tab switch) attributed to the active doc's owner session. The per-doc error
                 // path is exempt: it self-identifies via wt/doc and may legitimately report from any iframe.
                 let isFromHiddenCanvasIframe () =
-                    Fable.Core.JsInterop.emitJsExpr<bool> me "Array.prototype.some.call(document.querySelectorAll('.canvas-iframe'), function(f){return f.contentWindow === $0.source && (!f.classList.contains('canvas-iframe-active') || !!f.closest('.app-layout.workspace-single > .canvas-pane:not(.open)'))})"
+                    Fable.Core.JsInterop.emitJsExpr<bool> me "Array.prototype.some.call(document.querySelectorAll('.canvas-iframe'), function(f){return f.contentWindow === $0.source && (!f.classList.contains('canvas-iframe-active') || !f.closest('.canvas-pane.open'))})"
                 // Positively identify the ACTIVE doc as sender: me.source must equal the active iframe's
                 // window. Unlike the negative hidden-iframe filter, this rejects any canvas-origin sender
                 // that isn't the active doc — a detached/stale iframe, or a synthetic message with no

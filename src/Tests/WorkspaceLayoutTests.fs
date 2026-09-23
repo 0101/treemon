@@ -175,6 +175,40 @@ type WorkspaceLayoutTests() =
         }
 
     [<Test>]
+    member this.``One-pane workspace tabs label their controlled tabpanels``() =
+        task {
+            do! usePhoneViewport this.Page 390 844
+
+            for pane in WorkspaceLayout.panes do
+                let tab = this.Page.Locator($"#{WorkspaceLayout.tabId pane}")
+                let panel = this.Page.Locator($"#{WorkspaceLayout.paneId pane}")
+                do! Assertions.Expect(tab).ToHaveAttributeAsync("aria-controls", WorkspaceLayout.paneId pane)
+                do! Assertions.Expect(panel).ToHaveAttributeAsync("role", "tabpanel")
+                do! Assertions.Expect(panel).ToHaveAttributeAsync("aria-labelledby", WorkspaceLayout.tabId pane)
+
+            do! useDesktopViewport this.Page 1280 720
+            do! Assertions.Expect(this.Page.Locator("[role='tabpanel']")).ToHaveCountAsync(0)
+            do! Assertions.Expect(this.Page.Locator(".terminal-pane")).ToHaveAttributeAsync("role", "region")
+        }
+
+    [<Test>]
+    member this.``Entering one-pane moves focus to the selected tab when another pane becomes hidden``() =
+        task {
+            do! focusCanvasCard this.Page "feature-active"
+            do! ensureCanvasPaneOpen this.Page
+            let frame = this.Page.Locator(".canvas-iframe-active")
+            do! frame.FocusAsync()
+            do! Assertions.Expect(frame).ToBeFocusedAsync()
+
+            do! usePhoneViewport this.Page 390 844
+
+            do!
+                Assertions
+                    .Expect(this.Page.Locator($"#{WorkspaceLayout.tabId WorkspaceLayout.Pane.Worktrees}"))
+                    .ToBeFocusedAsync()
+        }
+
+    [<Test>]
     member this.``One-pane dialogs stay outside hidden content and fit the typing viewport``() =
         task {
             do!

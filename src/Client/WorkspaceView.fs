@@ -16,7 +16,7 @@ let tabs model dispatch =
                 dispatch (SelectWorkspacePane pane)
             | None -> ())
         prop.children (
-            [ Pane.Worktrees; Pane.Terminal; Pane.Canvas ]
+            panes
             |> List.map (fun pane ->
                 let selected = model.Workspace.ActivePane = pane
                 Html.button [

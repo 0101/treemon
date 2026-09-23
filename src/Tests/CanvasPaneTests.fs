@@ -84,6 +84,8 @@ type CanvasPaneTests() =
             let! _ =
                 this.Page.EvaluateAsync(
                     "() => { window.onePaneOriginalFrame = document.querySelector('.canvas-iframe-active'); }")
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! this.Page.Locator(".canvas-pane:not(.open)").WaitForAsync()
             let navigationDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
             let actionDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
             let focusDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
@@ -137,6 +139,39 @@ type CanvasPaneTests() =
             let! _ = body.EvaluateAsync("() => parent.postMessage({ action: 'one-pane-probe' }, '*')")
             do! sent.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
             Assert.That(sends, Is.EqualTo(1), "Visible Canvas retains its normal message transport.")
+
+            let desktopNavigationDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let desktopActionDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let desktopFocusDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let desktopSearchDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            this.Page.Console.Add(fun message ->
+                if message.Text.Contains("navigate-canvas-doc DROPPED") then desktopNavigationDropped.TrySetResult(()) |> ignore
+                if message.Text.Contains("postMessage DROPPED") && message.Text.Contains("desktop-hidden-probe") then desktopActionDropped.TrySetResult(()) |> ignore
+                if message.Text.Contains("reclaim-focus DROPPED") then desktopFocusDropped.TrySetResult(()) |> ignore
+                if message.Text.Contains("open-worktree-search DROPPED") then desktopSearchDropped.TrySetResult(()) |> ignore)
+            do! this.Page.Locator(".canvas-iframe-active").FocusAsync()
+            do! this.Page.SetViewportSizeAsync(1280, 720)
+            do! this.Page.Locator(".app-layout:not(.workspace-single)").WaitForAsync()
+            do! Assertions.Expect(this.Page.Locator(".dashboard")).ToBeFocusedAsync()
+            let! _ =
+                body.EvaluateAsync(
+                    """() => {
+                        parent.postMessage({ action: 'navigate-canvas-doc', filename: 'metrics.html' }, '*');
+                        parent.postMessage({ action: 'desktop-hidden-probe' }, '*');
+                        parent.postMessage({ action: 'reclaim-focus' }, '*');
+                        parent.postMessage({ action: 'open-worktree-search' }, '*');
+                    }""")
+            let! _ =
+                Task.WhenAll(
+                    [| desktopNavigationDropped.Task
+                       desktopActionDropped.Task
+                       desktopFocusDropped.Task
+                       desktopSearchDropped.Task |])
+                    .WaitAsync(TimeSpan.FromSeconds(10.0))
+            let! desktopHiddenSrc = this.Page.Locator(".canvas-iframe-active").GetAttributeAsync("src")
+            Assert.Multiple(fun () ->
+                Assert.That(sends, Is.EqualTo(1))
+                Assert.That(desktopHiddenSrc, Is.EqualTo(originalSrc)))
         }
 
     [<TestCase(false)>]

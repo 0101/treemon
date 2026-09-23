@@ -22,6 +22,11 @@ let empty =
     { Mode = Mode.Desktop
       ActivePane = Pane.Worktrees }
 
+let panes =
+    [ Pane.Worktrees
+      Pane.Terminal
+      Pane.Canvas ]
+
 [<Literal>]
 let PhoneMaxWidth = 900
 
@@ -62,6 +67,16 @@ let focusTab pane =
     Dom.document.getElementById(tabId pane)
     |> Option.ofObj
     |> Option.iter _.focus()
+
+let focusedPane () =
+    Dom.document.activeElement
+    |> Option.ofObj
+    |> Option.bind (fun focused ->
+        panes
+        |> List.tryFind (fun pane ->
+            Dom.document.getElementById(paneId pane)
+            |> Option.ofObj
+            |> Option.exists (fun element -> element.contains(focused))))
 
 let observeMode dispatch =
     let media = matchMedia $"(max-width: {PhoneMaxWidth}px)"

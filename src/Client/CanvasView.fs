@@ -117,6 +117,7 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
 
     let canvasState: CanvasPane.CanvasPaneState =
         { IsOpen = CanvasUpdate.isPaneVisible model
+          WorkspaceMode = model.Workspace.Mode
           SendState = model.Canvas.CanvasSendState
           DocError = model.Canvas.DocError
           ClipboardNotice = model.Canvas.ClipboardNotice
