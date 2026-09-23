@@ -86,6 +86,7 @@ let private defaultModel : Model =
       AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
+      Workspace = WorkspaceLayout.empty
       TerminalPaneOpen = false
       TerminalPaneTarget = None
       EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
@@ -837,6 +838,26 @@ type CanvasSendStateTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type MarkDocViewedTests() =
+
+    [<Test>]
+    member _.``A queued viewed message cannot mark the hidden one-pane Canvas read``() =
+        let model =
+            { defaultModel with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Terminal
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "status.html" "new" ] ] ]
+                FocusedElement = Some (Card "r/feat")
+                Canvas.CanvasPaneOpen = true
+                Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "status.html", "old" ] ] }
+        let hidden, hiddenCmd = update (MarkDocViewed("r/feat", "status.html")) model
+        let shown = { model with Workspace.ActivePane = WorkspaceLayout.Pane.Canvas }
+        let viewed, viewedCmd = update (MarkDocViewed("r/feat", "status.html")) shown
+
+        Assert.Multiple(fun () ->
+            Assert.That(hidden.Canvas.LastViewedHashes, Is.EqualTo(model.Canvas.LastViewedHashes))
+            Assert.That(hiddenCmd, Is.Empty)
+            Assert.That(viewed.Canvas.LastViewedHashes["r/feat"]["status.html"], Is.EqualTo("new"))
+            Assert.That(viewedCmd, Is.Not.Empty))
 
     [<Test>]
     member _.``MarkDocViewed updates LastViewedHashes with current content hash``() =
@@ -1869,6 +1890,55 @@ type MountedAgentDocHashTests() =
     let morphRequests cmd =
         dispatchedMsgs cmd
         |> List.choose (function MorphActiveDoc request -> Some request | _ -> None)
+
+    [<Test>]
+    member _.``Revealing one-pane Canvas pins its default document against later background arrivals``() =
+        let m =
+            { model [ makeDoc "a.html" "ha" ] "a.html" with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Worktrees
+                Canvas.ActiveCanvasDoc = Map.empty
+                Canvas.DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "Document error" } }
+        let shown, _ = update (SelectWorkspacePane WorkspaceLayout.Pane.Canvas) m
+        let refreshed =
+            { shown with
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "new.html" "new"; makeDoc "a.html" "ha" ] ] ] }
+
+        Assert.That(CanvasUpdate.activeVisibleDoc refreshed, Is.EqualTo(Some ("r/feat", "a.html")))
+        Assert.That(shown.Canvas.DocError, Is.EqualTo(m.Canvas.DocError))
+
+    [<Test>]
+    member _.``One-pane Canvas catches up without changing the saved desktop open flag``() =
+        let m =
+            { model [ makeDoc "a.html" "new" ] "a.html" with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Worktrees
+                Canvas.CanvasPaneOpen = false
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html" ] ]
+                Canvas.MountedAgentDocHashes = Map.ofList [ ("r/feat", "a.html"), "old" ] }
+        let shown, cmd = update (OpenCanvasDoc("r/feat", "a.html")) m
+
+        Assert.Multiple(fun () ->
+            Assert.That(shown.Workspace.ActivePane, Is.EqualTo(WorkspaceLayout.Pane.Canvas))
+            Assert.That(shown.Canvas.CanvasPaneOpen, Is.False)
+            Assert.That(morphRequests cmd, Is.EqualTo([ morph "r/feat" "a.html" "new" ])))
+
+    [<Test>]
+    member _.``Morph completion while another pane is visible updates loaded hashes without clearing unread state``() =
+        let m =
+            { model [ makeDoc "a.html" "new" ] "a.html" with
+                Workspace.Mode = WorkspaceLayout.Mode.OnePane
+                Workspace.ActivePane = WorkspaceLayout.Pane.Terminal
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html" ] ]
+                Canvas.MountedAgentDocHashes = Map.ofList [ ("r/feat", "a.html"), "old" ]
+                Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "old" ] ] }
+        let updated, cmd = update (MorphComplete(morph "r/feat" "a.html" "new")) m
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.Canvas.MountedAgentDocHashes["r/feat", "a.html"], Is.EqualTo("new"))
+            Assert.That(updated.Canvas.LastViewedHashes, Is.EqualTo(m.Canvas.LastViewedHashes))
+            Assert.That(dispatchedMsgs cmd, Is.Empty)
+            Assert.That(syncVisibleDocCmd updated |> dispatchedMsgs, Is.Empty))
 
     [<Test>]
     member _.``switching back to a synchronized mounted doc does not morph``() =

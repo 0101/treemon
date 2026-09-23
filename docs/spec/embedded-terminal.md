@@ -85,8 +85,10 @@ Until either exists, the label falls back to `Terminal 1`, `Terminal 2`, and so 
 It remembers the selected terminal independently for each worktree. **New** starts another terminal
 for the targeted worktree; the empty state offers **Start terminal**. Selecting a canvas doc whose
 effective session matches a listed terminal changes this remembered selection without opening,
-revealing, or focusing the Terminal pane. Switching worktrees hides the other worktrees' tabs
-without closing their terminals, and running iframes stay mounted so their browser state survives.
+revealing, or focusing the Terminal pane. Switching worktrees or automatically transitioning
+between One-pane (viewport width up to `900px`) and Desktop (above `900px`) hides other terminal
+views without closing their terminals; running iframes stay mounted so browser state survives. The
+active One-pane tab is retained, and Desktop pane visibility flags and ratios are unchanged.
 Closing the last visible tab leaves the pane open in its empty state; only the persistent top-bar
 **Terminal** control hides or shows the pane, using the same active treatment as the **Canvas**
 control. Middle-clicking a tab or pressing Ctrl+W while its terminal has focus invokes the same
