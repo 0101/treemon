@@ -87,17 +87,9 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
   on Windows before constructing `RepoId` or `WorktreePath`. Raw-string indexes normalize at their
   own ingress before comparison.
 - Server resolves repo and branch from path internally; archive and auto-sync persistence store branch names per repo in `.treemon.json`
-- Confirmed deletion enters a path-scoped client state (`Deleting`, `Deleted`,
-  `DeletedWithWarning`, or `Failed`). Every state remains excluded from active and archived
-  dashboard projection for the browser session; ordinary worktree snapshots never clear or
-  downgrade it. Failures remain hidden with an explicit retry notice, while cleanup warnings are
-  dismissible without restoring the card.
-- Scheduler removal increments the repository worktree-list revision and records a path tombstone.
-  Discovery carries the revision captured before its Git read: an older result cannot restore or
-  clear a deleted path, and a fresh result must omit the path before releasing the tombstone.
-- Worktree deletion distinguishes a pre-removal failure from completed removal with an ancillary
-  cleanup warning. Once the directory is gone, scheduler state is removed even when deleting the
-  local branch fails, so a warning cannot resurrect the card.
+- Client optimistic state (`DeletedPaths: Set<string>`) filters by path for the browser session and
+  is not cleared by dashboard refreshes or delete failures, so confirmed worktrees cannot reappear
+  during that session.
 
 ### Per-Worktree Card
 

@@ -7,11 +7,6 @@ open Shared.EventUtils
 type PerRepoState =
     { WorktreeList: GitWorktree.WorktreeInfo list
       KnownPaths: Set<string>
-      /// Increments when an API deletion removes a path, invalidating discoveries that started
-      /// against an earlier worktree list.
-      WorktreeListRevision: int64
-      /// Deleted paths suppressed until a non-stale discovery confirms each path is absent.
-      DeletionTombstones: Set<string>
       GitData: Map<string, GitWorktree.GitData>
       BeadsData: Map<string, BeadsSummary>
       PlanningData: Map<string, BeadsPlanning>
@@ -26,8 +21,6 @@ module PerRepoState =
     let empty =
         { WorktreeList = []
           KnownPaths = Set.empty
-          WorktreeListRevision = 0L
-          DeletionTombstones = Set.empty
           GitData = Map.empty
           BeadsData = Map.empty
           PlanningData = Map.empty
@@ -85,8 +78,6 @@ module DashboardState =
 
 type RepositoryDiscovery =
     { Worktrees: GitWorktree.WorktreeInfo list option
-      /// Repository revision captured before the Git discovery began.
-      StartedAtRevision: int64
       UpstreamRemote: string
       BaseBranch: string }
 
@@ -144,7 +135,6 @@ let private updateRepo (repoId: RepoId) (repo: PerRepoState) (state: DashboardSt
 let private removeWorktreeData (path: string) (repo: PerRepoState) =
     { repo with
         WorktreeList = repo.WorktreeList |> List.filter (fun wt -> wt.Path <> path)
-        KnownPaths = repo.KnownPaths |> Set.remove path
         GitData = repo.GitData |> Map.remove path
         BeadsData = repo.BeadsData |> Map.remove path
         PlanningData = repo.PlanningData |> Map.remove path
@@ -303,29 +293,12 @@ let internal codingToolPushEvent
       Duration = None }
 
 let private updateWorktreeList
-    (startedAtRevision: int64)
     (repoId: RepoId)
     (worktrees: GitWorktree.WorktreeInfo list)
     (state: DashboardState)
     =
     let repo = getRepo repoId state
-    let discoveredPaths = worktrees |> List.map _.Path |> Set.ofList
-    let deletionTombstones =
-        if startedAtRevision < repo.WorktreeListRevision then
-            repo.DeletionTombstones
-        else
-            Set.intersect repo.DeletionTombstones discoveredPaths
-
-    let visibleWorktrees =
-        worktrees
-        |> List.filter (fun worktree ->
-            deletionTombstones
-            |> Set.contains worktree.Path
-            |> not)
-
-    let newPaths =
-        visibleWorktrees |> List.map _.Path |> Set.ofList
-
+    let newPaths = worktrees |> List.map _.Path |> Set.ofList
     let removedPaths = Set.difference repo.KnownPaths newPaths
 
     let cleaned =
@@ -334,9 +307,8 @@ let private updateWorktreeList
 
     let updated =
         { cleaned with
-            WorktreeList = visibleWorktrees
+            WorktreeList = worktrees
             KnownPaths = newPaths
-            DeletionTombstones = deletionTombstones
             IsReady = true }
 
     // Prune the GLOBAL status-transition stamps for removed worktrees. They hang off DashboardState
@@ -378,18 +350,12 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             updateRepo repoId PerRepoState.empty state
 
     | UpdateWorktreeList(repoId, worktrees) ->
-        let revision = (getRepo repoId state).WorktreeListRevision
-        updateWorktreeList revision repoId worktrees state
+        updateWorktreeList repoId worktrees state
 
     | UpdateRepositoryDiscovery(repoId, discovery) ->
         let discoveredState =
             discovery.Worktrees
-            |> Option.map (fun worktrees ->
-                updateWorktreeList
-                    discovery.StartedAtRevision
-                    repoId
-                    worktrees
-                    state)
+            |> Option.map (fun worktrees -> updateWorktreeList repoId worktrees state)
             |> Option.defaultValue state
 
         let repo = getRepo repoId discoveredState
@@ -453,13 +419,7 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
                 WorktreePath.value instance.WorktreePath <> path)
         // AutoSyncOperationsInFlight is left alone for the same reason as in updateWorktreeList: only
         // the operation that holds the guard may release it.
-        let updatedRepo =
-            { removeWorktreeData path repo with
-                WorktreeListRevision = repo.WorktreeListRevision + 1L
-                DeletionTombstones =
-                    repo.DeletionTombstones |> Set.add path }
-
-        updateRepo repoId updatedRepo
+        updateRepo repoId (removeWorktreeData path repo)
             { state with
                 SessionInstances = prunedInstances
                 CodingToolStatusByWorktree =

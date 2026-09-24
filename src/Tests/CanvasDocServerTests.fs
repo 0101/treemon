@@ -691,7 +691,6 @@ type DiffComparisonContextTests() =
 
             agent.Post(
                 RefreshScheduler.repositoryDiscoveryUpdate
-                    0L
                     repoId
                     (Some [ info ])
                     "upstream"

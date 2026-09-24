@@ -56,25 +56,8 @@ let deleteWorktreeCmd (api: Lazy<IWorktreeApi>) path =
     Cmd.OfAsync.either
         (fun path -> api.Value.deleteWorktree path)
         path
-        (fun result -> DeleteCompleted(path, result))
-        (fun error -> DeleteCompleted(path, Error error.Message))
-
-let killSessionForDeleteCmd (api: Lazy<IWorktreeApi>) path =
-    Cmd.OfAsync.either
-        (fun path -> api.Value.killSession path)
-        path
-        (function
-        | Ok () -> SessionKilledForDelete path
-        | Error error -> SessionKillForDeleteFailed(path, error))
-        (fun error ->
-            SessionKillForDeleteFailed(path, error.Message))
-
-let private worktreeDeletionCmd api operation path =
-    match operation with
-    | WorktreeDeletionOperation.DeleteDirectly ->
-        deleteWorktreeCmd api path
-    | WorktreeDeletionOperation.KillSessionFirst ->
-        killSessionForDeleteCmd api path
+        DeleteCompleted
+        (fun error -> DeleteCompleted(Error error.Message))
 
 let fetchOverviewHistory request =
     let loaded response = OverviewHistoryLoaded(request, Some response)
@@ -137,7 +120,7 @@ let init () =
       WorktreeSearch = WorktreeSearch.initial
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
-      WorktreeDeletions = Map.empty
+      DeletedPaths = Set.empty
       DeployBranch = None
       SystemMetrics = None
       ActionCooldowns = Set.empty
@@ -169,29 +152,18 @@ let init () =
         fetchEmbeddedTerminals worktreeApi
     ]
 
-let filterDeletedWorktrees
-    (deletions: Map<WorktreePath, WorktreeDeletionState>)
-    (repos: RepoModel list)
-    =
-    if Map.isEmpty deletions then repos
+let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
+    if Set.isEmpty deleted then repos
     else
-        let visible worktree =
-            deletions |> Map.containsKey worktree.Path |> not
-
         repos
         |> List.map (fun r ->
-            { r with
-                Worktrees = r.Worktrees |> List.filter visible
-                ArchivedWorktrees =
-                    r.ArchivedWorktrees |> List.filter visible })
+            { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains (WorktreePath.value wt.Path) deleted)) })
 
 let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
+    let pathStr = WorktreePath.value path
     repos
     |> List.map (fun r ->
-        { r with
-            Worktrees = r.Worktrees |> List.filter (fun wt -> wt.Path <> path)
-            ArchivedWorktrees =
-                r.ArchivedWorktrees |> List.filter (fun wt -> wt.Path <> path) })
+        { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
 
 let setAutoSyncEnabled (path: WorktreePath) enabled (repos: RepoModel list) =
     let update wt =
@@ -218,23 +190,15 @@ let preservePendingAutoSync (model: Model) repos =
         |> Option.map (fun enabled -> setAutoSyncEnabled path enabled refreshed)
         |> Option.defaultValue refreshed) repos
 
-let private setWorktreeDeletion path state model =
-    { model with
-        WorktreeDeletions =
-            model.WorktreeDeletions |> Map.add path state }
+let markDeleted (path: WorktreePath) (deletedPaths: Set<string>) =
+    deletedPaths |> Set.add (WorktreePath.value path)
 
-let removeWorktreeByPath
-    operation
-    (path: WorktreePath)
-    (model: Model)
-    =
+let removeWorktreeByPath (path: WorktreePath) (model: Model) =
     let updatedRepos = removeFromRepos path model.Repos
     let updatedModel =
-        { setWorktreeDeletion
-            path
-            (WorktreeDeletionState.Deleting operation)
-            model with
+        { model with
             Repos = updatedRepos
+            DeletedPaths = markDeleted path model.DeletedPaths
             TerminalPaneTarget =
                 if model.TerminalPaneTarget = Some path then None
                 else model.TerminalPaneTarget }
@@ -749,7 +713,7 @@ let update msg model =
                       Provider = r.Provider
                       BaseBranch = r.BaseBranch })
                 |> preservePendingAutoSync model
-                |> filterDeletedWorktrees model.WorktreeDeletions
+                |> filterDeletedPaths model.DeletedPaths
             let currentCanvasHashes = canvasHashesByScopedKey repos
             let currentCanvasModified = canvasModifiedByScopedKey repos
             let existingCanvasEvents =
@@ -1335,17 +1299,16 @@ let update msg model =
         | ConfirmModal.NoAction ->
             model, focusDashboard
         | ConfirmModal.Delete path ->
-            removeWorktreeByPath
-                WorktreeDeletionOperation.DeleteDirectly
-                path
-                model,
+            removeWorktreeByPath path model,
             deleteWorktreeCmd worktreeApi path
         | ConfirmModal.DeleteAfterKillSession path ->
-            removeWorktreeByPath
-                WorktreeDeletionOperation.KillSessionFirst
+            removeWorktreeByPath path model,
+            Cmd.OfAsync.perform
+                (fun path -> worktreeApi.Value.killSession path)
                 path
-                model,
-            killSessionForDeleteCmd worktreeApi path
+                (function
+                | Ok () -> SessionKilledForDelete path
+                | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
         | ConfirmModal.Archive path ->
             model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
         | ConfirmModal.ArchiveAfterKillSession path ->
@@ -1357,74 +1320,15 @@ let update msg model =
                 | Ok () -> SessionKilledForArchive path
                 | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
-    | DeleteCompleted(path, Ok DeleteWorktreeOutcome.Deleted) ->
-        setWorktreeDeletion
-            path
-            WorktreeDeletionState.Deleted
-            model,
-        fetchWorktrees ()
+    | DeleteCompleted (Ok _) ->
+        model, fetchWorktrees ()
 
-    | DeleteCompleted(path, Ok(DeleteWorktreeOutcome.DeletedWithWarning warning)) ->
-        setWorktreeDeletion
-            path
-            (WorktreeDeletionState.DeletedWithWarning warning)
-            model,
-        fetchWorktrees ()
-
-    | DeleteCompleted(path, Error error) ->
-        setWorktreeDeletion
-            path
-            (WorktreeDeletionState.Failed(
-                WorktreeDeletionOperation.DeleteDirectly,
-                error
-            ))
-            model,
-        fetchWorktrees ()
-
-    | RetryDeleteWorktree path ->
-        match model.WorktreeDeletions |> Map.tryFind path with
-        | Some(WorktreeDeletionState.Failed(operation, _)) ->
-            setWorktreeDeletion
-                path
-                (WorktreeDeletionState.Deleting operation)
-                model,
-            worktreeDeletionCmd worktreeApi operation path
-        | Some(WorktreeDeletionState.Deleting _)
-        | Some WorktreeDeletionState.Deleted
-        | Some(WorktreeDeletionState.DeletedWithWarning _)
-        | None ->
-            model, Cmd.none
-
-    | DismissDeleteWarning path ->
-        match model.WorktreeDeletions |> Map.tryFind path with
-        | Some(WorktreeDeletionState.DeletedWithWarning _) ->
-            setWorktreeDeletion
-                path
-                WorktreeDeletionState.Deleted
-                model,
-            Cmd.none
-        | Some(WorktreeDeletionState.Deleting _)
-        | Some WorktreeDeletionState.Deleted
-        | Some(WorktreeDeletionState.Failed _)
-        | None ->
-            model, Cmd.none
+    | DeleteCompleted (Error _) ->
+        model, fetchWorktrees ()
 
     | SessionKilledForDelete path ->
-        removeWorktreeByPath
-            WorktreeDeletionOperation.DeleteDirectly
-            path
-            model,
+        removeWorktreeByPath path model,
         deleteWorktreeCmd worktreeApi path
-
-    | SessionKillForDeleteFailed(path, error) ->
-        setWorktreeDeletion
-            path
-            (WorktreeDeletionState.Failed(
-                WorktreeDeletionOperation.KillSessionFirst,
-                error
-            ))
-            model,
-        fetchWorktrees ()
 
     | SessionKilledForArchive path ->
         model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
@@ -2194,75 +2098,6 @@ let private isEditableEventTarget (e: Browser.Types.KeyboardEvent) =
     | Some target -> isEditableElement (unbox target)
     | None -> false
 
-let viewDeletionNotices
-    (deletions: Map<WorktreePath, WorktreeDeletionState>)
-    dispatch
-    =
-    let notice path state =
-        let displayName = WorktreePath.displayName path
-        let fullPath = WorktreePath.value path
-
-        match state with
-        | WorktreeDeletionState.Failed(_, message) ->
-            Some(
-                Html.div [
-                    prop.className "status-bar deletion-notice deletion-error"
-                    prop.role "alert"
-                    prop.children [
-                        Html.span [
-                            prop.className "deletion-notice-text"
-                            prop.title $"{fullPath}: {message}"
-                            prop.text
-                                $"Could not remove {displayName}: {message}. The workspace stays hidden."
-                        ]
-                        Html.button [
-                            prop.className "action-btn"
-                            prop.onClick (fun _ ->
-                                dispatch (RetryDeleteWorktree path))
-                            prop.text "Retry"
-                        ]
-                    ]
-                ]
-            )
-        | WorktreeDeletionState.DeletedWithWarning message ->
-            Some(
-                Html.div [
-                    prop.className
-                        "status-bar deletion-notice deletion-warning"
-                    prop.role "status"
-                    prop.children [
-                        Html.span [
-                            prop.className "deletion-notice-text"
-                            prop.title $"{fullPath}: {message}"
-                            prop.text
-                                $"Removed {displayName}, but cleanup needs attention: {message}"
-                        ]
-                        Html.button [
-                            prop.className "action-btn"
-                            prop.onClick (fun _ ->
-                                dispatch (DismissDeleteWarning path))
-                            prop.text "Dismiss"
-                        ]
-                    ]
-                ]
-            )
-        | WorktreeDeletionState.Deleting _
-        | WorktreeDeletionState.Deleted ->
-            None
-
-    let notices =
-        deletions
-        |> Map.toList
-        |> List.choose (fun (path, state) -> notice path state)
-
-    if List.isEmpty notices then
-        Html.none
-    else
-        Html.div [
-            prop.className "deletion-notices"
-            prop.children notices
-        ]
-
 let view model dispatch =
     let onePane = model.Workspace.Mode = WorkspaceLayout.Mode.OnePane
     let terminalPaneOpen = terminalPaneVisible model
@@ -2348,8 +2183,6 @@ let view model dispatch =
                         (fun () -> dispatch (CycleOverviewChart System.DateTimeOffset.Now))
                         model.OverviewHistory
                         model.Repos
-
-                viewDeletionNotices model.WorktreeDeletions dispatch
 
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
                     Html.div [

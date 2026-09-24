@@ -468,31 +468,17 @@ let private tryPruneAndClean (repoRoot: string) (worktreePath: string) (removeMs
     }
 
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string option) =
-    async {
-        let! removal =
-            runGitResult repoRoot [ "worktree"; "remove"; "--force"; worktreePath ]
+    asyncResult {
+        do! runGitResult repoRoot [ "worktree"; "remove"; "--force"; worktreePath ]
             |> AsyncResult.ignore
             |> AsyncResult.orElseWith (tryPruneAndClean repoRoot worktreePath)
 
-        match removal, branch with
-        | Error error, _ ->
-            return Error error
-        | Ok (), None ->
-            return Ok DeleteWorktreeOutcome.Deleted
-        | Ok (), Some branch ->
-            let! branchRemoval =
-                runGitResult repoRoot [ "branch"; "-D"; "--"; branch ]
-
-            return
-                match branchRemoval with
-                | Ok _ ->
-                    Ok DeleteWorktreeOutcome.Deleted
-                | Error error ->
-                    Ok(
-                        DeleteWorktreeOutcome.DeletedWithWarning(
-                            $"Local branch cleanup failed: {error}"
-                        )
-                    )
+        match branch with
+        | None -> ()
+        | Some b ->
+            do! runGitResult repoRoot [ "branch"; "-D"; "--"; b ]
+                |> AsyncResult.mapError (fun msg -> $"Worktree removed but git branch -D failed: {msg}")
+                |> AsyncResult.ignore
     }
 
 let branchSortKey (baseBranch: string) (name: string) =

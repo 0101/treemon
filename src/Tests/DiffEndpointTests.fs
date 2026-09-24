@@ -2218,10 +2218,7 @@ type DiffIdentityLifecycleHttpTests() =
 
                 let result =
                     WorktreeApi.deleteWorktreeWith
-                        (fun _ _ _ ->
-                            async.Return(
-                                Ok DeleteWorktreeOutcome.Deleted
-                            ))
+                        (fun _ _ _ -> async.Return(Ok()))
                         (fun _ operation -> operation ())
                         WorktreeDiffApi.removeWorktree
                         deleteAgent
@@ -2230,11 +2227,7 @@ type DiffIdentityLifecycleHttpTests() =
                     |> TestUtils.runAsync
 
                 match result with
-                | Ok DeleteWorktreeOutcome.Deleted -> ()
-                | Ok(DeleteWorktreeOutcome.DeletedWithWarning warning) ->
-                    Assert.Fail(
-                        $"Expected deletion without warning, got {warning}"
-                    )
+                | Ok () -> ()
                 | Error error ->
                     Assert.Fail(
                         $"Expected successful worktree deletion, got {error}"

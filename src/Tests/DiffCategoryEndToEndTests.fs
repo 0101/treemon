@@ -202,7 +202,6 @@ let private agentKnowing (repoRoot: string) =
 
     agent.Post(
         RefreshScheduler.repositoryDiscoveryUpdate
-            0L
             (PathUtils.toRepoId repoRoot)
             (Some [ info ])
             "origin"

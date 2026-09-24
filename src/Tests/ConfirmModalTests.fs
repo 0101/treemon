@@ -64,7 +64,7 @@ let private defaultModel : Model =
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
-      WorktreeDeletions = Map.empty
+      DeletedPaths = Set.empty
       EditorName = "VS Code"
       WorktreeSkills = []
       ActionCooldowns = Set.empty
@@ -189,15 +189,8 @@ type DeleteWithSessionSequencingTests() =
 
         Assert.That(branches, Does.Not.Contain("feature-branch"),
             "Worktree should be removed optimistically from model on direct Delete")
-        Assert.That(
-            model.WorktreeDeletions[testPath],
-            Is.EqualTo(
-                WorktreeDeletionState.Deleting(
-                    WorktreeDeletionOperation.DeleteDirectly
-                )
-            ),
-            "Path should enter the explicit deletion state"
-        )
+        Assert.That(model.DeletedPaths, Does.Contain(WorktreePath.value testPath),
+            "Path should be added to DeletedPaths for ghost suppression")
         Assert.That(model.ConfirmModal, Is.EqualTo(ConfirmModal.NoConfirm),
             "Confirming deletion should dismiss the modal")
 
@@ -210,30 +203,14 @@ type DeleteWithSessionSequencingTests() =
 
         let recovered, refresh =
             update
-                (DeleteCompleted(
-                    testPath,
-                    Error "TerminalHost update is in progress"
-                ))
+                (DeleteCompleted(Error "TerminalHost update is in progress"))
                 pending
 
         Assert.Multiple(fun () ->
             Assert.That(
-                recovered.WorktreeDeletions[testPath],
-                Is.EqualTo(
-                    WorktreeDeletionState.Failed(
-                        WorktreeDeletionOperation.DeleteDirectly,
-                        "TerminalHost update is in progress"
-                    )
-                ),
-                "failure must remain an explicit hidden state"
-            )
-
-            Assert.That(
-                recovered.Repos
-                |> List.collect _.Worktrees
-                |> List.map _.Path,
-                Does.Not.Contain(testPath),
-                "failure must not restore the removed card"
+                recovered.DeletedPaths,
+                Does.Contain(WorktreePath.value testPath),
+                "confirmation keeps the worktree hidden for the browser session"
             )
 
             Assert.That(
@@ -277,160 +254,13 @@ type DeleteWithSessionSequencingTests() =
             Assert.That(
                 message,
                 Is.EqualTo(
-                    DeleteCompleted(
-                        testPath,
-                        Error "simulated transport failure"
-                    )
+                    DeleteCompleted(Error "simulated transport failure")
                 )
             )
         }
 
     [<Test>]
-    member _.``stale response cannot restore a confirmed deletion``() =
-        let firstSnapshotAt =
-            DateTimeOffset(
-                2026,
-                9,
-                24,
-                12,
-                0,
-                0,
-                TimeSpan.Zero
-            )
-
-        let deleting =
-            updateModel
-                (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
-                modelWithConfirmDelete
-
-        let withoutDeleted =
-            [ makeRepo "repo" [ makeWorktree "main" false ] ]
-            |> dashboardResponse
-
-        let withStaleDeleted =
-            defaultModel.Repos |> dashboardResponse
-
-        let afterAbsent =
-            updateModel
-                (DataLoaded(
-                    withoutDeleted,
-                    firstSnapshotAt
-                ))
-                deleting
-
-        let afterStale =
-            updateModel
-                (DataLoaded(
-                    withStaleDeleted,
-                    firstSnapshotAt.AddSeconds(1.0)
-                ))
-                afterAbsent
-
-        Assert.Multiple(fun () ->
-            Assert.That(
-                afterStale.Repos
-                |> List.collect _.Worktrees
-                |> List.map _.Path,
-                Does.Not.Contain(testPath)
-            )
-
-            Assert.That(
-                afterStale.WorktreeDeletions[testPath],
-                Is.EqualTo(
-                    WorktreeDeletionState.Deleting(
-                        WorktreeDeletionOperation.DeleteDirectly
-                    )
-                )
-            ))
-
-    [<Test>]
-    member _.``delete results update only their own workspace``() =
-        let otherPath = WorktreePath "/repo/feature-two"
-        let deleting =
-            { defaultModel with
-                WorktreeDeletions =
-                    Map.ofList [
-                        testPath,
-                        WorktreeDeletionState.Deleting(
-                            WorktreeDeletionOperation.DeleteDirectly
-                        )
-                        otherPath,
-                        WorktreeDeletionState.Deleting(
-                            WorktreeDeletionOperation.DeleteDirectly
-                        )
-                    ] }
-
-        let failed =
-            updateModel
-                (DeleteCompleted(testPath, Error "locked"))
-                deleting
-
-        Assert.Multiple(fun () ->
-            Assert.That(
-                failed.WorktreeDeletions[testPath],
-                Is.EqualTo(
-                    WorktreeDeletionState.Failed(
-                        WorktreeDeletionOperation.DeleteDirectly,
-                        "locked"
-                    )
-                )
-            )
-
-            Assert.That(
-                failed.WorktreeDeletions[otherPath],
-                Is.EqualTo(
-                    WorktreeDeletionState.Deleting(
-                        WorktreeDeletionOperation.DeleteDirectly
-                    )
-                )
-            ))
-
-    [<Test>]
-    member _.``cleanup warning stays hidden after dismissal``() =
-        let deleting =
-            updateModel
-                (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
-                modelWithConfirmDelete
-
-        let warned =
-            updateModel
-                (DeleteCompleted(
-                    testPath,
-                    Ok(
-                        DeleteWorktreeOutcome.DeletedWithWarning(
-                            "Local branch cleanup failed"
-                        )
-                    )
-                ))
-                deleting
-
-        let dismissed =
-            updateModel (DismissDeleteWarning testPath) warned
-
-        Assert.Multiple(fun () ->
-            Assert.That(
-                warned.WorktreeDeletions[testPath],
-                Is.EqualTo(
-                    WorktreeDeletionState.DeletedWithWarning(
-                        "Local branch cleanup failed"
-                    )
-                )
-            )
-
-            Assert.That(
-                dismissed.WorktreeDeletions[testPath],
-                Is.EqualTo(WorktreeDeletionState.Deleted)
-            )
-
-            Assert.That(
-                dismissed.Repos
-                |> List.collect _.Worktrees
-                |> List.map _.Path,
-                Does.Not.Contain(testPath)
-            ))
-
-    [<Test>]
-    member _.``ConfirmMsg DeleteAfterKillSession immediately hides worktree``() =
+    member _.``ConfirmMsg DeleteAfterKillSession immediately removes worktree from model``() =
         let model = updateModel (ConfirmMsg (ConfirmModal.DeleteAndCloseSession testPath)) modelWithConfirmDelete
 
         let branches =
@@ -438,60 +268,41 @@ type DeleteWithSessionSequencingTests() =
 
         Assert.That(branches, Does.Not.Contain("feature-branch"))
         Assert.That(
-            model.WorktreeDeletions[testPath],
-            Is.EqualTo(
-                WorktreeDeletionState.Deleting(
-                    WorktreeDeletionOperation.KillSessionFirst
-                )
-            )
+            model.DeletedPaths,
+            Does.Contain(WorktreePath.value testPath)
         )
 
     [<Test>]
-    member _.``failed session kill stays hidden and retries session cleanup``() =
+    member _.``stale response cannot restore a confirmed deletion``() =
         let deleting =
             updateModel
-                (ConfirmMsg(
-                    ConfirmModal.DeleteAndCloseSession testPath
-                ))
+                (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
                 modelWithConfirmDelete
 
-        let failed =
+        let absent =
             updateModel
-                (SessionKillForDeleteFailed(
-                    testPath,
-                    "window did not close"
+                (DataLoaded(
+                    dashboardResponse [
+                        makeRepo "repo" [ makeWorktree "main" false ]
+                    ],
+                    DateTimeOffset.UnixEpoch
                 ))
                 deleting
 
-        let retrying =
-            updateModel (RetryDeleteWorktree testPath) failed
+        let stale =
+            updateModel
+                (DataLoaded(
+                    dashboardResponse defaultModel.Repos,
+                    DateTimeOffset.UnixEpoch
+                ))
+                absent
 
-        Assert.Multiple(fun () ->
-            Assert.That(
-                failed.Repos
-                |> List.collect _.Worktrees
-                |> List.map _.Path,
-                Does.Not.Contain(testPath)
-            )
-
-            Assert.That(
-                failed.WorktreeDeletions[testPath],
-                Is.EqualTo(
-                    WorktreeDeletionState.Failed(
-                        WorktreeDeletionOperation.KillSessionFirst,
-                        "window did not close"
-                    )
-                )
-            )
-
-            Assert.That(
-                retrying.WorktreeDeletions[testPath],
-                Is.EqualTo(
-                    WorktreeDeletionState.Deleting(
-                        WorktreeDeletionOperation.KillSessionFirst
-                    )
-                )
-            ))
+        Assert.That(
+            stale.Repos
+            |> List.collect _.Worktrees
+            |> List.map _.Path,
+            Does.Not.Contain(testPath)
+        )
 
     [<Test>]
     member _.``SessionKilledForDelete removes worktree from model``() =
@@ -502,14 +313,7 @@ type DeleteWithSessionSequencingTests() =
 
         Assert.That(branches, Does.Not.Contain("feature-branch"),
             "Worktree should be removed after session kill confirmed")
-        Assert.That(
-            model.WorktreeDeletions[testPath],
-            Is.EqualTo(
-                WorktreeDeletionState.Deleting(
-                    WorktreeDeletionOperation.DeleteDirectly
-                )
-            )
-        )
+        Assert.That(model.DeletedPaths, Does.Contain(WorktreePath.value testPath))
 
     [<Test>]
     member _.``ConfirmMsg DismissConfirm preserves model repos``() =

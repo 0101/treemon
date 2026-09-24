@@ -4231,77 +4231,17 @@ type DashboardTests() =
     member this.``Delete removes card without ghost reappearance``() =
         task {
             let! page = this.Context.NewPageAsync()
-            let converter = Fable.Remoting.Json.FableJsonConverter()
-            let targetBranch = "feature-idle"
+
             let mutable deleteCallCount = 0
-            let mutable postDeleteRefreshCount = 0
-            let staleResponseDelivered =
-                TaskCompletionSource<unit>(
-                    TaskCreationOptions.RunContinuationsAsynchronously
-                )
-
-            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", routeHandler (fun route ->
-                task {
-                    let! upstream = route.FetchAsync()
-                    let! json = upstream.TextAsync()
-                    let response =
-                        JsonConvert.DeserializeObject<DashboardResponse>(
-                            json,
-                            converter
-                        )
-
-                    let response =
-                        if deleteCallCount = 0 then
-                            response
-                        else
-                            postDeleteRefreshCount <-
-                                postDeleteRefreshCount + 1
-
-                            if postDeleteRefreshCount = 1 then
-                                { response with
-                                    Repos =
-                                        response.Repos
-                                        |> List.map (fun repo ->
-                                            { repo with
-                                                Worktrees =
-                                                    repo.Worktrees
-                                                    |> List.filter (fun worktree ->
-                                                        worktree.Branch <> targetBranch) }) }
-                            else
-                                staleResponseDelivered.TrySetResult()
-                                |> ignore
-
-                                response
-
-                    do!
-                        route.FulfillAsync(
-                            RouteFulfillOptions(
-                                ContentType = "application/json",
-                                Body =
-                                    JsonConvert.SerializeObject(
-                                        response,
-                                        converter
-                                    )
-                            )
-                        )
-                }))
-
             do! page.RouteAsync("**/IWorktreeApi/deleteWorktree", fun route ->
                 deleteCallCount <- deleteCallCount + 1
-                let result : Result<DeleteWorktreeOutcome, string> =
-                    Ok DeleteWorktreeOutcome.Deleted
-
-                route.FulfillAsync(
-                    RouteFulfillOptions(
-                        ContentType = "application/json",
-                        Body = JsonConvert.SerializeObject(result, converter)
-                    )
-                )
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = "{\"Ok\":null}"))
             )
 
             let! _ = page.GotoAsync(baseUrl)
             do! page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
 
+            let targetBranch = "feature-idle"
             let targetCard = page.Locator($".wt-card:has(.branch-name:text-is('{targetBranch}'))")
             do! targetCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! preDeleteCount = targetCard.CountAsync()
@@ -4322,72 +4262,12 @@ type DashboardTests() =
             Assert.That(postDeleteCount, Is.EqualTo(0),
                 $"Card for {targetBranch} should be removed immediately after delete confirmation (optimistic removal)")
 
-            do!
-                staleResponseDelivered.Task.WaitAsync(
-                    TimeSpan.FromSeconds 5.0
-                )
+            do! page.WaitForTimeoutAsync(2000.0f)
 
             let! laterCount = targetCard.CountAsync()
             Assert.That(laterCount, Is.EqualTo(0),
-                $"Card for {targetBranch} should not reappear after an absent response followed by a stale present response")
+                $"Card for {targetBranch} should not reappear after polling (ghost suppression via DeletedPaths)")
 
-            do! page.CloseAsync()
-        }
-
-    [<Test>]
-    member this.``Delete failure stays hidden and exposes retry``() =
-        task {
-            let! page = this.Context.NewPageAsync()
-            let converter = Fable.Remoting.Json.FableJsonConverter()
-            let targetBranch = "feature-idle"
-            let mutable deleteCallCount = 0
-
-            do! page.RouteAsync("**/IWorktreeApi/deleteWorktree", fun route ->
-                deleteCallCount <- deleteCallCount + 1
-
-                let result : Result<DeleteWorktreeOutcome, string> =
-                    if deleteCallCount = 1 then
-                        Error "terminal cleanup was not confirmed"
-                    else
-                        Ok DeleteWorktreeOutcome.Deleted
-
-                route.FulfillAsync(
-                    RouteFulfillOptions(
-                        ContentType = "application/json",
-                        Body = JsonConvert.SerializeObject(result, converter)
-                    )
-                )
-            )
-
-            let! _ = page.GotoAsync(baseUrl)
-            let targetCard =
-                page.Locator(
-                    $".wt-card:has(.branch-name:text-is('{targetBranch}'))"
-                )
-            do! targetCard.WaitForAsync()
-            do! targetCard.Locator(".delete-btn").ClickAsync()
-
-            let modal = page.Locator(".modal-overlay .modal-dialog")
-            do! modal.Locator(".modal-btn.danger").First.ClickAsync()
-
-            let failure = page.Locator(".deletion-error")
-            do!
-                Assertions.Expect(failure).ToContainTextAsync(
-                    "terminal cleanup was not confirmed"
-                )
-
-            do!
-                Assertions.Expect(targetCard).ToHaveCountAsync(0)
-
-            do! failure.Locator("button", LocatorLocatorOptions(HasText = "Retry")).ClickAsync()
-
-            do!
-                Assertions.Expect(failure).ToHaveCountAsync(0)
-
-            do!
-                Assertions.Expect(targetCard).ToHaveCountAsync(0)
-
-            Assert.That(deleteCallCount, Is.EqualTo(2))
             do! page.CloseAsync()
         }
 
