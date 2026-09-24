@@ -28,6 +28,7 @@ let private createApi store =
           AutoSyncStore = None
           TerminalHostRestartSessions = None
           WorktreeRoots = []
+          DeletedWorktreeFile = Tests.TestUtils.uniquePath "overview-deleted"
           TestFixtures = None
           AppVersion = "test"
           DeployBranch = None }

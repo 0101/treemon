@@ -217,7 +217,67 @@ type DeleteWithSessionSequencingTests() =
                 refresh,
                 Is.Not.Empty,
                 "failure must request the authoritative worktree snapshot"
-            ))
+            )
+
+            match recovered.ConfirmModal with
+            | ConfirmModal.DeleteFailure message ->
+                Assert.That(message, Does.Contain("TerminalHost update is in progress"))
+            | other -> Assert.Fail($"Expected a visible deletion error, got {other}"))
+
+    [<Test>]
+    member _.``failed deletion record restores visibility and reports the failure``() =
+        let pending =
+            updateModel
+                (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
+                modelWithConfirmDelete
+
+        let failed, refresh =
+            update
+                (DeletedPathRecorded(testPath, DeleteAfterRecording.Immediately, Error "storage unavailable"))
+                pending
+
+        Assert.Multiple(fun () ->
+            Assert.That(failed.DeletedPaths, Is.Empty)
+            Assert.That(refresh, Is.Not.Empty)
+
+            match failed.ConfirmModal with
+            | ConfirmModal.DeleteFailure message ->
+                Assert.That(message, Does.Contain("storage unavailable"))
+            | other -> Assert.Fail($"Expected a visible recording error, got {other}"))
+
+    [<Test>]
+    member _.``successful deletion record starts the delete command``() =
+        let pending =
+            updateModel
+                (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
+                modelWithConfirmDelete
+
+        let afterRecord, command =
+            update
+                (DeletedPathRecorded(testPath, DeleteAfterRecording.Immediately, Ok ()))
+                pending
+
+        Assert.That(afterRecord.DeletedPaths, Does.Contain(WorktreePath.value testPath))
+        Assert.That(command, Is.Not.Empty)
+
+    [<Test>]
+    member _.``failed session close keeps the recorded worktree hidden and reports the failure``() =
+        let pending =
+            updateModel
+                (ConfirmMsg(ConfirmModal.DeleteAndCloseSession testPath))
+                modelWithConfirmDelete
+
+        let failed, refresh =
+            update (SessionKillForDeleteFailed "terminal did not close") pending
+
+        Assert.Multiple(fun () ->
+            Assert.That(failed.DeletedPaths, Does.Contain(WorktreePath.value testPath))
+            Assert.That(refresh, Is.Not.Empty)
+
+            match failed.ConfirmModal with
+            | ConfirmModal.DeleteFailure message ->
+                Assert.That(message, Does.Contain("terminal did not close"))
+            | other -> Assert.Fail($"Expected a visible session error, got {other}"))
 
     [<Test>]
     member _.``delete transport failure is dispatched as an explicit result``() =

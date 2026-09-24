@@ -1,6 +1,7 @@
 module App
 
 open Shared
+open Shared.PathUtils
 open Shared.EventUtils
 open OverviewData
 open Navigation
@@ -58,6 +59,13 @@ let deleteWorktreeCmd (api: Lazy<IWorktreeApi>) path =
         path
         DeleteCompleted
         (fun error -> DeleteCompleted(Error error.Message))
+
+let private recordDeletedPathCmd (api: Lazy<IWorktreeApi>) path next =
+    Cmd.OfAsync.either
+        (fun path -> api.Value.recordDeletedWorktree path)
+        path
+        (fun result -> DeletedPathRecorded(path, next, result))
+        (fun error -> DeletedPathRecorded(path, next, Error error.Message))
 
 let fetchOverviewHistory request =
     let loaded response = OverviewHistoryLoaded(request, Some response)
@@ -1300,15 +1308,10 @@ let update msg model =
             model, focusDashboard
         | ConfirmModal.Delete path ->
             removeWorktreeByPath path model,
-            deleteWorktreeCmd worktreeApi path
+            recordDeletedPathCmd worktreeApi path DeleteAfterRecording.Immediately
         | ConfirmModal.DeleteAfterKillSession path ->
             removeWorktreeByPath path model,
-            Cmd.OfAsync.perform
-                (fun path -> worktreeApi.Value.killSession path)
-                path
-                (function
-                | Ok () -> SessionKilledForDelete path
-                | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+            recordDeletedPathCmd worktreeApi path DeleteAfterRecording.AfterClosingSession
         | ConfirmModal.Archive path ->
             model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
         | ConfirmModal.ArchiveAfterKillSession path ->
@@ -1320,11 +1323,40 @@ let update msg model =
                 | Ok () -> SessionKilledForArchive path
                 | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
+    | DeletedPathRecorded (path, _, Error error) ->
+        { model with
+            DeletedPaths = Set.remove (WorktreePath.value path) model.DeletedPaths
+            ConfirmModal =
+                ConfirmModal.DeleteFailure $"Could not confirm the deletion record. No removal was attempted. {error}" },
+        fetchWorktrees ()
+
+    | DeletedPathRecorded (path, DeleteAfterRecording.Immediately, Ok ()) ->
+        model, deleteWorktreeCmd worktreeApi path
+
+    | DeletedPathRecorded (path, DeleteAfterRecording.AfterClosingSession, Ok ()) ->
+        model,
+        Cmd.OfAsync.either
+            (fun path -> worktreeApi.Value.killSession path)
+            path
+            (function
+            | Ok () -> SessionKilledForDelete path
+            | Error error -> SessionKillForDeleteFailed error)
+            (fun error -> SessionKillForDeleteFailed error.Message)
+
+    | SessionKillForDeleteFailed error ->
+        { model with
+            ConfirmModal =
+                ConfirmModal.DeleteFailure $"Could not confirm the terminal closed. The worktree remains hidden until cleanup. {error}" },
+        fetchWorktrees ()
+
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
 
-    | DeleteCompleted (Error _) ->
-        model, fetchWorktrees ()
+    | DeleteCompleted (Error error) ->
+        { model with
+            ConfirmModal =
+                ConfirmModal.DeleteFailure $"Deletion could not be confirmed. This path remains hidden until cleanup. {error}" },
+        fetchWorktrees ()
 
     | SessionKilledForDelete path ->
         removeWorktreeByPath path model,
@@ -1410,15 +1442,31 @@ let update msg model =
         model, Cmd.none
 
     | ModalMsg modalMsg ->
-        let result, modalCmd = CreateWorktreeModal.update worktreeApi modalMsg model.CreateModal
-        let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
-        let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
-        let refocusCmd =
-            if CreateWorktreeModal.isOpen model.CreateModal && not (CreateWorktreeModal.isOpen result.Modal) then
-                focusDashboard
-            else Cmd.none
-        { model with CreateModal = result.Modal; FocusedElement = focus },
-        Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd; refocusCmd ]
+        match modalMsg, model.CreateModal with
+        | CreateWorktreeModal.SubmitCreateWorktree, CreateWorktreeModal.Open form
+            when not (System.String.IsNullOrWhiteSpace form.Name)
+                 && (model.DeletedPaths
+                     |> Set.exists (fun deleted ->
+                         pathEquals
+                             deleted
+                             (siblingWorktreePath (RepoId.value form.RepoId) (form.Name.Trim())))) ->
+            { model with
+                CreateModal =
+                    CreateWorktreeModal.CreateError(
+                        form.RepoId,
+                        "A deleted worktree still reserves this path. Run /cleaning-deleted-worktrees and reload the dashboard before reusing it."
+                    ) },
+            Cmd.none
+        | _ ->
+            let result, modalCmd = CreateWorktreeModal.update worktreeApi modalMsg model.CreateModal
+            let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
+            let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
+            let refocusCmd =
+                if CreateWorktreeModal.isOpen model.CreateModal && not (CreateWorktreeModal.isOpen result.Modal) then
+                    focusDashboard
+                else Cmd.none
+            { model with CreateModal = result.Modal; FocusedElement = focus },
+            Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd; refocusCmd ]
 
     | WorktreeSearchMsg searchMsg
         when WorktreeSearch.isOpenRequest searchMsg

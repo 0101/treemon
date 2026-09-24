@@ -602,6 +602,8 @@ let main args =
                       AutoSyncStore = None
                       TerminalHostRestartSessions = None
                       WorktreeRoots = worktreeRoots
+                      DeletedWorktreeFile =
+                        DeletedWorktreeStore.filePathForPort config.Port
                       TestFixtures = fixtures
                       AppVersion = appVersion
                       DeployBranch = deployBranch }
@@ -677,6 +679,8 @@ let main args =
                                     DateTimeOffset.UtcNow
                                     terminals)
                           WorktreeRoots = worktreeRoots
+                          DeletedWorktreeFile =
+                            DeletedWorktreeStore.filePathForPort config.Port
                           TestFixtures = fixtures
                           AppVersion = appVersion
                           DeployBranch = deployBranch }

@@ -7,6 +7,7 @@ type ConfirmModal =
     | NoConfirm
     | ConfirmDelete of branch: string * path: WorktreePath * hasSession: bool
     | ConfirmArchive of branch: string * path: WorktreePath
+    | DeleteFailure of message: string
 
 type Msg =
     | DeleteWorktree of path: WorktreePath
@@ -97,6 +98,27 @@ let view (dispatch: Msg -> unit) (confirm: ConfirmModal) =
                         prop.autoFocus true
                         prop.onClick (fun _ -> dispatch (ArchiveAndCloseSession path))
                         prop.text "Archive and close terminal"
+                    ]
+                ]
+            ]
+        ]
+    | DeleteFailure message ->
+        ModalOverlay.modalOverlay (Some (fun () -> dispatch DismissConfirm)) [
+            Html.div [ prop.className "modal-header error"; prop.text "Worktree deletion needs attention" ]
+            Html.div [
+                prop.className "modal-body"
+                prop.children [
+                    Html.div [ prop.className "modal-error-message"; prop.text message ]
+                ]
+            ]
+            Html.div [
+                prop.className "modal-footer"
+                prop.children [
+                    Html.button [
+                        prop.className "modal-btn cancel"
+                        prop.autoFocus true
+                        prop.onClick (fun _ -> dispatch DismissConfirm)
+                        prop.text "Close"
                     ]
                 ]
             ]
