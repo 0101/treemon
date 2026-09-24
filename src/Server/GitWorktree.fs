@@ -351,8 +351,8 @@ let private extractRegexInt (pattern: string) (text: string) =
     let m = System.Text.RegularExpressions.Regex.Match(text, pattern)
     if m.Success then Int32.Parse(m.Groups[1].Value: string) else 0
 
-/// Net merge-base-to-`HEAD` content plus its line counts. `None` output means the Git command failed,
-/// which is `Undetermined` — distinct from the empty output of a branch that is genuinely level.
+/// Net merge-base-to-live-worktree tracked content plus its line counts. `None` output means the Git
+/// command failed, which is `Undetermined` — distinct from an empty tracked comparison.
 let parseDiffStats (output: string option) =
     match output |> Option.map _.Trim() with
     | None -> Undetermined, 0, 0
@@ -371,7 +371,8 @@ let getDiffStats (worktreePath: string) (baseRef: string) =
                   "--no-ext-diff"
                   "--no-textconv"
                   "--shortstat"
-                  $"{baseRef}...HEAD"
+                  "--merge-base"
+                  baseRef
                   "--"
                   "."
                   generatedDiffViewerExclusionPathspec ]
@@ -379,8 +380,8 @@ let getDiffStats (worktreePath: string) (baseRef: string) =
         return parseDiffStats output
     }
 
-let createWorkMetrics committed commitCount linesAdded linesRemoved =
-    match committed with
+let createWorkMetrics trackedComparison commitCount linesAdded linesRemoved =
+    match trackedComparison with
     | HasContent ->
         Some
             { CommitCount = commitCount
@@ -603,7 +604,7 @@ let private collectWorktreeGitDataForBaseRef
                 Async.StartChild(async.Return None)
 
         let! commitCount = commitCountChild
-        let! committedContent, linesAdded, linesRemoved = diffStatsChild
+        let! trackedContent, linesAdded, linesRemoved = diffStatsChild
         let! mainBehind = mainBehindChild
         let! baseRevision = baseRevisionChild
 
@@ -617,8 +618,8 @@ let private collectWorktreeGitDataForBaseRef
               MainBehindCount = mainBehind
               BaseRevision = baseRevision
               IsDirty = common.IsDirty
-              Comparison = ComparisonContent.combine committedContent common.LocalContent
-              WorkMetrics = createWorkMetrics committedContent commitCount linesAdded linesRemoved }
+              Comparison = ComparisonContent.combine trackedContent common.LocalContent
+              WorkMetrics = createWorkMetrics trackedContent commitCount linesAdded linesRemoved }
     }
 
 let collectWorktreeGitData

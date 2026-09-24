@@ -196,6 +196,8 @@ and PrInfo =
       AutoMergeEnabled: bool
       HasConflicts: bool }
 
+/// Card metrics: non-merge commits plus net tracked line changes from the base merge point to the
+/// live worktree. Staged and unstaged tracked changes are included; untracked files are excluded.
 type WorkMetrics =
     { CommitCount: int
       LinesAdded: int

@@ -91,7 +91,12 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 ### Per-Worktree Card
 
-- Active-card headers show the branch name, session status dots, and card chrome. Expanded cards place open PR details on the left and a right-aligned tail of `+/-` stats, commit grid, Diff, and Create PR when applicable; compact cards show metrics in compact detail; archive cards retain metrics in their header.
+- Active-card headers show the branch name, session status dots, and card chrome. Expanded cards place
+  open PR details on the left and a right-aligned tail of tracked `+/-` line stats, commit grid,
+  Diff, and Create PR when applicable; compact cards show the same metrics in compact detail;
+  archive cards retain them in their header. Line stats compare the merge base of the resolved base
+  ref and `HEAD` with the live tracked worktree, so committed, staged, and unstaged tracked changes
+  contribute while untracked files do not. The commit grid remains the non-merge commit count.
 - Coding tool status dots — one per open physical process instance (Working / WaitingForUser /
   Idle), each keyed by its opaque exact identity and rendered as a context-usage donut when that
   process has reported usage, else a plain dot. Duplicate processes for one durable session remain
@@ -298,7 +303,7 @@ For fork workflows (push to fork, PRs in upstream repo), treemon auto-detects an
 Each repo can configure which branch is considered the "base" for ahead/behind counts, diff stats, fetch, fast-forward, and auto-sync prompts:
 
 - **Resolution**: `.treemon.json` `"baseBranch"` field → default `"main"`
-- **Affects**: committed `git rev-list`/`git diff --shortstat` metrics use the remote-tracking ref when available and otherwise the local branch. Behind count and auto-sync target use only the remote-tracking ref; a local fallback or missing base reports zero behind. Missing-base refreshes retain last-commit, upstream, tracked-dirty, and local/untracked diff data while omitting committed metrics.
+- **Affects**: non-merge commit counts use `git rev-list` against the remote-tracking ref when available and otherwise the local branch. `+/-` line metrics use that ref's merge base with `HEAD` against the live tracked worktree, including staged and unstaged changes while excluding untracked files. Behind count and auto-sync target use only the remote-tracking ref; a local fallback or missing base reports zero behind. Missing-base refreshes retain last-commit, upstream, tracked-dirty, and local/untracked diff data while omitting work metrics.
 - **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh. The dashboard and generated diff viewer therefore expose the same base branch, including for linked worktrees without their own `.treemon.json`.
 - **Config example**: `{ "baseBranch": "dev" }` in `.treemon.json` at repo root
 

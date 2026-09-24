@@ -143,10 +143,10 @@ let private diffStatsElement added removed =
 let workMetricsItems (metrics: WorkMetrics option) : ReactElement list =
     match metrics with
     | None -> []
-    | Some m when m.CommitCount = 0 -> []
     | Some m ->
         [
-            commitGridElement m
+            if m.CommitCount > 0 then
+                commitGridElement m
             if m.LinesAdded <> 0 || m.LinesRemoved <> 0 then
                 diffStatsElement m.LinesAdded m.LinesRemoved
         ]
