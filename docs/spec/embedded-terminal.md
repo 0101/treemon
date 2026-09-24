@@ -428,10 +428,14 @@ the host bundle.
 install the SDK from that repository policy. An SDK change is therefore deliberate and changes the
 published host bundle when its compiler or bundled dependencies produce different bytes.
 
-Deployment fingerprints the complete non-PDB TerminalHost bundle. The nested host publish excludes
-repository source-revision metadata, so an unrelated Treemon commit does not change that fingerprint;
-any changed host assembly or runtime file does. An equal live fingerprint skips staging, while a
-different fingerprint is copied and verified in one digest-derived version directory.
+Deployment fingerprints the complete non-PDB TerminalHost bundle. Release host and layout builds
+map source and artifact directories to stable paths, and the Server's initial host/layout project
+references use the same compiler settings as its nested host publish. The host's exhaustive data
+plane message match also avoids embedding a worktree-local compiler exception path. Identical source
+therefore produces the same bundle across worktrees without repository revision or build-location
+metadata; any changed host assembly or runtime file still changes the fingerprint. An equal live
+fingerprint skips staging, while a different fingerprint is copied and verified in one
+digest-derived version directory.
 
 The replay buffer is raw and capped at 1 MiB in memory. Terminal bytes, prompts, environment
 contents, and attachment credentials are never persisted or written to diagnostics. The control
@@ -522,9 +526,10 @@ and dynamically allocated non-production ports. Tests never bind production port
   `TerminalLaunch`/`EmbeddedTerminal` boundary.
 - `TerminalRuntimeBudgetTests` asserts that the terminal-page protocol file is the only source
   compiled into both Shared and TerminalHost, and that TerminalHost has no Shared project reference.
-- `scripts/treemon-deployment.test.ps1` asserts that host publication omits `Shared.dll`, two
-  identical publications have the same complete non-PDB digest, and changed runtime content still
-  changes the digest and stages an update.
+- `scripts/treemon-deployment.test.ps1` asserts that host publication omits `Shared.dll`, nested
+  publishes from different source and artifact roots have byte-identical host/layout assemblies
+  and complete non-PDB bundle digests, identical bundles skip staging, and changed runtime content
+  still changes the digest and stages an update.
 - Run the focused tests first, then `dotnet test src/Tests/Tests.fsproj --filter "Category=Fast"`.
 
 ## Decisions

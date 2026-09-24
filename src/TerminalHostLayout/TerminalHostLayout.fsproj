@@ -2,6 +2,8 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <PathMap Condition="'$(Configuration)' == 'Release'">$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/..'))=/_/treemon/src</PathMap>
+    <PathMap Condition="'$(Configuration)' == 'Release' and '$(ArtifactsPath)' != ''">$([System.IO.Path]::GetFullPath('$(ArtifactsPath)'))=/_/artifacts,$(PathMap)</PathMap>
   </PropertyGroup>
 
   <ItemGroup>

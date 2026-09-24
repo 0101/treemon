@@ -8,6 +8,8 @@
     <RollForward>LatestMajor</RollForward>
     <Version>1.0.0</Version>
     <InformationalVersion>1.0.0</InformationalVersion>
+    <PathMap Condition="'$(Configuration)' == 'Release'">$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/..'))=/_/treemon/src</PathMap>
+    <PathMap Condition="'$(Configuration)' == 'Release' and '$(ArtifactsPath)' != ''">$([System.IO.Path]::GetFullPath('$(ArtifactsPath)'))=/_/artifacts,$(PathMap)</PathMap>
   </PropertyGroup>
 
   <ItemGroup>

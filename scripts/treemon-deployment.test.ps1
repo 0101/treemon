@@ -17,6 +17,36 @@ function Publish-TestProject([string]$Project, [string]$Destination, [string]$Ve
     if ($LASTEXITCODE -ne 0) { throw "Test project publish failed" }
 }
 
+function Copy-HostPublishSources([string]$Destination) {
+    $paths = @(
+        git -C $repoRoot -c core.quotePath=false ls-files -- `
+            src\Server src\Shared src\TerminalHost src\TerminalHostLayout src\Extension global.json
+    )
+    if ($LASTEXITCODE -ne 0 -or $paths.Count -eq 0) {
+        throw "Could not list tracked host publish sources"
+    }
+
+    $destinationRoot = [IO.Path]::GetFullPath($Destination)
+    $destinationPrefix = $destinationRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    foreach ($relative in $paths) {
+        $source = Join-Path $repoRoot $relative.Replace('/', '\')
+        $target = [IO.Path]::GetFullPath((Join-Path $destinationRoot $relative.Replace('/', '\')))
+        if (-not $target.StartsWith($destinationPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Tracked host publish source escaped the temporary checkout"
+        }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+        Copy-Item -LiteralPath $source -Destination $target
+    }
+
+    $runtime = ".tools\ttyd\1.7.7"
+    $runtimeDestination = Join-Path $destinationRoot $runtime
+    New-Item -ItemType Directory -Path $runtimeDestination -Force | Out-Null
+    foreach ($name in @("ttyd.exe", "LICENSE.txt")) {
+        Copy-Item -LiteralPath (Join-Path (Join-Path $repoRoot $runtime) $name) `
+            -Destination $runtimeDestination
+    }
+}
+
 function Get-TestPort {
     do {
         $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -174,7 +204,6 @@ try {
     $candidateServer = Publish-ServerCandidate -AdditionalPublishArguments @(
         "-p:UseArtifactsOutput=true"
         "-p:ArtifactsPath=$candidateBuildRoot"
-        "-p:PathMap=$candidateBuildRoot=/_/artifacts"
     )
     Assert-True ($candidateServer -is [string]) "Server candidate path was not scalar"
     $candidateHost = Join-Path $candidateServer "terminal-host"
@@ -219,7 +248,6 @@ try {
     $repeatCandidateServer = Publish-ServerCandidate -AdditionalPublishArguments @(
         "-p:UseArtifactsOutput=true"
         "-p:ArtifactsPath=$repeatCandidateBuildRoot"
-        "-p:PathMap=$repeatCandidateBuildRoot=/_/artifacts"
     )
     $repeatCandidateHost = Join-Path $repeatCandidateServer "terminal-host"
     Assert-True (
@@ -230,6 +258,38 @@ try {
         (Get-TerminalHostBundleDigest $repeatCandidateHost $layoutProbe.Layout)
     ) "Repeated identical nested TerminalHost publications produced different bundle digests"
     Write-Host "PASS: identical nested TerminalHost publications have a stable bundle digest"
+
+    $alternateSource = Join-Path $root "alternate-source"
+    Copy-HostPublishSources $alternateSource
+    $alternatePublish = Join-Path $root "alternate-publish"
+    dotnet publish (Join-Path $alternateSource "src\Server\Server.fsproj") `
+        -c Release `
+        -o $alternatePublish `
+        "-p:UseArtifactsOutput=true" `
+        "-p:ArtifactsPath=$(Join-Path $root 'alternate-build')" | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Alternate-source server publish failed" }
+    $alternateHost = Join-Path $alternatePublish "terminal-host"
+    foreach ($name in @("TerminalHost.dll", "TerminalHostLayout.dll")) {
+        Assert-True (
+            (Get-FileHash -LiteralPath (Join-Path $candidateHost $name) -Algorithm SHA256).Hash -ceq
+            (Get-FileHash -LiteralPath (Join-Path $alternateHost $name) -Algorithm SHA256).Hash
+        ) "$name changed when published from a different source directory"
+    }
+    Assert-True (
+        (Get-TerminalHostBundleDigest $candidateHost $layoutProbe.Layout) -ceq
+        (Get-TerminalHostBundleDigest $alternateHost $layoutProbe.Layout)
+    ) "Identical source published from another source root changed the TerminalHost bundle"
+    $sameSourceLive = [pscustomobject]@{
+        HasLiveHost = $true
+        ExecutablePath = Join-Path $candidateHost $layoutProbe.Layout.HostExecutableName
+        Layout = $layoutProbe.Layout
+    }
+    $unchangedAcrossSources = Stage-TerminalHost $alternateHost $sameSourceLive
+    Assert-True (
+        -not $unchangedAcrossSources.Changed -and
+        -not (Test-Path -LiteralPath $layoutProbe.Layout.StagingDirectory)
+    ) "An identical host bundle published from another source root was staged"
+    Write-Host "PASS: cross-root nested publish produces the same host bundle and skips staging"
 
     Publish-TestProject (
         Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
