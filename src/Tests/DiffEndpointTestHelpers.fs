@@ -110,6 +110,7 @@ let private agentKnowingRepository
 
     agent.Post(
         RefreshScheduler.repositoryDiscoveryUpdate
+            0L
             repoId
             (Some worktrees)
             upstreamRemote

@@ -571,11 +571,15 @@ let private openTerminal
     }
 
 let internal deleteWorktreeWith
-    (removeGitWorktree: string -> string -> string option -> Async<Result<unit, string>>)
+    (removeGitWorktree:
+        string ->
+        string ->
+        string option ->
+        Async<Result<DeleteWorktreeOutcome, string>>)
     (withTerminalCleanup:
         WorktreePath ->
-        (unit -> Async<Result<unit, string>>) ->
-        Async<Result<unit, string>>)
+        (unit -> Async<Result<DeleteWorktreeOutcome, string>>) ->
+        Async<Result<DeleteWorktreeOutcome, string>>)
     (removeWorktreeState: string -> Async<unit>)
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
@@ -595,7 +599,7 @@ let internal deleteWorktreeWith
                     (PathUtils.toWorktreePath ctx.Worktree.Path)
                     (fun () ->
                         asyncResult {
-                            do!
+                            let! outcome =
                                 removeGitWorktree
                                     ctx.RepoRoot
                                     ctx.Worktree.Path
@@ -609,6 +613,7 @@ let internal deleteWorktreeWith
                             )
 
                             do! removeWorktreeState ctx.Worktree.Path
+                            return outcome
                         })
     }
 

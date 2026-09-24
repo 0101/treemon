@@ -361,6 +361,7 @@ let buildPhase3Tasks (repos: Map<RepoId, PerRepoState>) =
     repos |> Map.toList |> List.map (fun (repoId, _) -> RefreshPr repoId)
 
 let repositoryDiscoveryUpdate
+    startedAtRevision
     (repoId: RepoId)
     (worktrees: GitWorktree.WorktreeInfo list option)
     upstreamRemote
@@ -369,6 +370,7 @@ let repositoryDiscoveryUpdate
     UpdateRepositoryDiscovery(
         repoId,
         { Worktrees = worktrees
+          StartedAtRevision = startedAtRevision
           UpstreamRemote = upstreamRemote
           BaseBranch = baseBranch }
     )
@@ -397,11 +399,24 @@ let internal executeTask
         match task with
         | RefreshWorktreeList repoId ->
             let root = rootPaths |> Map.find repoId
+            let! startedState = agent.PostAndAsyncReply(GetState)
+            let startedAtRevision =
+                startedState.Repos
+                |> Map.tryFind repoId
+                |> Option.map _.WorktreeListRevision
+                |> Option.defaultValue 0L
             let! worktrees = GitWorktree.listWorktrees root
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
             let baseBranch = TreemonConfig.readBaseBranch root
             let! state = agent.PostAndAsyncReply(GetState)
-            agent.Post(repositoryDiscoveryUpdate repoId worktrees upstreamRemote baseBranch)
+            agent.Post(
+                repositoryDiscoveryUpdate
+                    startedAtRevision
+                    repoId
+                    worktrees
+                    upstreamRemote
+                    baseBranch
+            )
 
             // A worktree removed outside Treemon never gets another observation, so nothing would
             // ever clear its accepted-revision record and it could suppress the first sync of a

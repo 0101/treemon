@@ -32,6 +32,18 @@ type TerminalHostUpdateModel =
 module TerminalHostUpdateModel =
     let initial = TerminalHostUpdateModel.Observed TerminalHostUpdateState.Unavailable
 
+[<RequireQualifiedAccess>]
+type WorktreeDeletionOperation =
+    | DeleteDirectly
+    | KillSessionFirst
+
+[<RequireQualifiedAccess>]
+type WorktreeDeletionState =
+    | Deleting of WorktreeDeletionOperation
+    | Deleted
+    | DeletedWithWarning of message: string
+    | Failed of WorktreeDeletionOperation * message: string
+
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
@@ -49,7 +61,7 @@ type Model =
       WorktreeSearch: WorktreeSearch.State
       CreateModal: CreateWorktreeModal.ModalState
       ConfirmModal: ConfirmModal.ConfirmModal
-      DeletedPaths: Set<string>
+      WorktreeDeletions: Map<WorktreePath, WorktreeDeletionState>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       ActionCooldowns: Set<WorktreePath>
@@ -125,8 +137,11 @@ type Msg =
     | ConfirmArchiveWorktree of scopedKey: string
     | ConfirmMsg of ConfirmModal.Msg
     | SessionKilledForDelete of path: WorktreePath
+    | SessionKillForDeleteFailed of path: WorktreePath * error: string
     | SessionKilledForArchive of path: WorktreePath
-    | DeleteCompleted of Result<unit, string>
+    | DeleteCompleted of path: WorktreePath * Result<DeleteWorktreeOutcome, string>
+    | RetryDeleteWorktree of path: WorktreePath
+    | DismissDeleteWarning of path: WorktreePath
     | FocusSession of path: WorktreePath
     | SessionResult of Result<unit, string>
     | WorktreeSearchMsg of WorktreeSearch.Msg

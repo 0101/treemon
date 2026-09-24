@@ -100,7 +100,10 @@ let private closeThen closeTerminal path operation =
 
 let private deleteWorktree agent worktreeRoots wtPath =
     WorktreeApi.deleteWorktreeWith
-        (fun _ _ _ -> async { return Ok () })
+        (fun _ _ _ ->
+            async {
+                return Ok DeleteWorktreeOutcome.Deleted
+            })
         (closeThen (fun _ -> async { return Ok() }))
         (fun _ -> async { return () })
         agent
@@ -238,7 +241,7 @@ type DeleteWorktreeResolutionTests() =
             match result with
             | Error msg ->
                 Assert.That(msg, Does.Contain("No worktree found"), "Should report worktree not found")
-            | Ok () ->
+            | Ok _ ->
                 Assert.Fail("Should have returned error for unknown path")
         }
 
@@ -263,7 +266,7 @@ type DeleteWorktreeResolutionTests() =
                     (fun _ _ _ ->
                         async {
                             calls.Add("remove")
-                            return Ok ()
+                            return Ok DeleteWorktreeOutcome.Deleted
                         })
                     (closeThen (fun _ ->
                         async {
@@ -280,7 +283,7 @@ type DeleteWorktreeResolutionTests() =
 
             match result with
             | Error error -> Assert.Fail(error)
-            | Ok () ->
+            | Ok DeleteWorktreeOutcome.Deleted ->
                 Assert.That(
                     calls,
                     Is.EqualTo(
@@ -289,6 +292,8 @@ type DeleteWorktreeResolutionTests() =
                           "state" ]
                     )
                 )
+            | Ok(DeleteWorktreeOutcome.DeletedWithWarning warning) ->
+                Assert.Fail($"Unexpected warning: {warning}")
         }
 
     [<Test>]
@@ -311,7 +316,7 @@ type DeleteWorktreeResolutionTests() =
                     (fun _ _ _ ->
                         async {
                             calls.Add("remove")
-                            return Ok ()
+                            return Ok DeleteWorktreeOutcome.Deleted
                         })
                     (closeThen (fun _ ->
                         async {
@@ -343,7 +348,7 @@ type DeleteWorktreeResolutionTests() =
                             "terminal cleanup was not confirmed"
                         )
                     )
-                | Ok () ->
+                | Ok _ ->
                     Assert.Fail("Delete should have been aborted")
 
                 Assert.That(calls, Is.EqualTo([ "close" ]))
@@ -389,11 +394,70 @@ type DeleteWorktreeResolutionTests() =
                 match result with
                 | Error error ->
                     Assert.That(error, Is.EqualTo("Git removal failed"))
-                | Ok () -> Assert.Fail("Delete should have failed")
+                | Ok _ -> Assert.Fail("Delete should have failed")
 
                 Assert.That(
                     calls,
                     Is.EqualTo([ "close"; "remove" ])
+                ))
+        }
+
+    [<Test>]
+    member _.``deleteWorktree warning still removes scheduler state``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let targetPath = worktreePath tempDirA "feature-x"
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "feature-x" ] ]
+
+            let! result =
+                WorktreeApi.deleteWorktreeWith
+                    (fun _ _ _ ->
+                        async {
+                            return
+                                Ok(
+                                    DeleteWorktreeOutcome.DeletedWithWarning(
+                                        "Local branch cleanup failed"
+                                    )
+                                )
+                        })
+                    (closeThen (fun _ -> async { return Ok() }))
+                    (fun _ -> async { return () })
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (PathUtils.toWorktreePath targetPath)
+
+            let! state = getAgentState agent
+            let repo = state.Repos[repoId]
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok(
+                    DeleteWorktreeOutcome.DeletedWithWarning warning
+                  ) ->
+                    Assert.That(
+                        warning,
+                        Is.EqualTo("Local branch cleanup failed")
+                    )
+                | Ok DeleteWorktreeOutcome.Deleted ->
+                    Assert.Fail("Expected the cleanup warning")
+                | Error error ->
+                    Assert.Fail($"Delete failed: {error}")
+
+                Assert.That(
+                    repo.WorktreeList |> List.map _.Path,
+                    Does.Not.Contain(targetPath)
+                )
+
+                Assert.That(
+                    repo.DeletionTombstones,
+                    Does.Contain(targetPath)
                 ))
         }
 

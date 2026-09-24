@@ -3764,7 +3764,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                                     Is.EqualTo(WorktreePath.value scenario.Target)
                                 )
 
-                                return Ok()
+                                return Ok DeleteWorktreeOutcome.Deleted
                             })
                         (fun path operation ->
                             withManagedTerminalCleanup

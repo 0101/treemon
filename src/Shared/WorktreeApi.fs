@@ -2,6 +2,13 @@ namespace Shared
 
 open System
 
+/// Result after the worktree directory is gone. Ancillary cleanup can warn without turning the
+/// completed deletion back into a failure that the dashboard would render again.
+[<RequireQualifiedAccess>]
+type DeleteWorktreeOutcome =
+    | Deleted
+    | DeletedWithWarning of message: string
+
 /// The Fable.Remoting contract between client and server. Kept in its own file (not Types.fs) purely
 /// for compile order: `getOverviewHistory` uses the history types in `OverviewData`, and
 /// `OverviewData` is compiled AFTER `Types.fs`, so the interface must live after it to name that type.
@@ -17,7 +24,7 @@ type IWorktreeApi =
       openEditor: WorktreePath -> Async<unit>
       toggleAutoSync: WorktreePath -> bool -> Async<Result<unit, string>>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
-      deleteWorktree: WorktreePath -> Async<Result<unit, string>>
+      deleteWorktree: WorktreePath -> Async<Result<DeleteWorktreeOutcome, string>>
       launchSession: LaunchRequest -> Async<Result<EmbeddedTerminalStartResult, string>>
       focusSession: WorktreePath -> Async<Result<unit, string>>
       killSession: WorktreePath -> Async<Result<unit, string>>

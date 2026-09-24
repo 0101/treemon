@@ -376,7 +376,7 @@ type StateAgentTests() =
             let agent = createAgent ()
             let linked = makeWorktree (Path.Combine("repo-linked", "feature")) "feature"
 
-            agent.Post(repositoryDiscoveryUpdate testRepoId (Some [ linked ]) "upstream" "develop")
+            agent.Post(repositoryDiscoveryUpdate 0L testRepoId (Some [ linked ]) "upstream" "develop")
 
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = getRepo state
@@ -397,9 +397,9 @@ type StateAgentTests() =
             let mainPath = Path.Combine("repo", "main")
             let worktrees = [ makeWorktree mainPath "main" ]
 
-            agent.Post(repositoryDiscoveryUpdate testRepoId (Some worktrees) "origin" "main")
+            agent.Post(repositoryDiscoveryUpdate 0L testRepoId (Some worktrees) "origin" "main")
             do! waitForAgent agent
-            agent.Post(repositoryDiscoveryUpdate testRepoId (Some worktrees) "canonical" "trunk")
+            agent.Post(repositoryDiscoveryUpdate 0L testRepoId (Some worktrees) "canonical" "trunk")
 
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = getRepo state
@@ -496,9 +496,83 @@ type StateAgentTests() =
 
             Assert.That(repo.WorktreeList.Length, Is.EqualTo(1))
             Assert.That(repo.WorktreeList[0].Path, Is.EqualTo("/repo/main"))
+            Assert.That(repo.KnownPaths, Does.Not.Contain("/repo/feature"))
             Assert.That(repo.GitData.ContainsKey("/repo/feature"), Is.False)
             Assert.That(repo.BeadsData.ContainsKey("/repo/feature"), Is.False)
             Assert.That(repo.PlanningData.ContainsKey("/repo/feature"), Is.False)
+            Assert.That(repo.DeletionTombstones, Does.Contain("/repo/feature"))
+            Assert.That(repo.WorktreeListRevision, Is.EqualTo(1L))
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Stale discovery cannot restore a removed worktree``() =
+        async {
+            let agent = createAgent ()
+            let main = makeWorktree "/repo/main" "main"
+            let feature = makeWorktree "/repo/feature" "feature"
+            let initial = [ main; feature ]
+
+            agent.Post(UpdateWorktreeList(testRepoId, initial))
+            let! beforeDelete = agent.PostAndAsyncReply(GetState)
+            let startedAtRevision =
+                (getRepo beforeDelete).WorktreeListRevision
+
+            agent.Post(RemoveWorktree(testRepoId, feature.Path))
+            agent.Post(
+                repositoryDiscoveryUpdate
+                    startedAtRevision
+                    testRepoId
+                    (Some initial)
+                    "origin"
+                    "main"
+            )
+
+            let! afterStale = agent.PostAndAsyncReply(GetState)
+            let staleRepo = getRepo afterStale
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    staleRepo.WorktreeList |> List.map _.Path,
+                    Does.Not.Contain(feature.Path)
+                )
+
+                Assert.That(
+                    staleRepo.DeletionTombstones,
+                    Does.Contain(feature.Path)
+                ))
+
+            agent.Post(
+                repositoryDiscoveryUpdate
+                    staleRepo.WorktreeListRevision
+                    testRepoId
+                    (Some [ main ])
+                    "origin"
+                    "main"
+            )
+
+            let! afterAbsence = agent.PostAndAsyncReply(GetState)
+            let absentRepo = getRepo afterAbsence
+            Assert.That(absentRepo.DeletionTombstones, Is.Empty)
+
+            agent.Post(
+                repositoryDiscoveryUpdate
+                    absentRepo.WorktreeListRevision
+                    testRepoId
+                    (Some initial)
+                    "origin"
+                    "main"
+            )
+
+            let! afterRecreation = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(
+                getRepo afterRecreation
+                |> _.WorktreeList
+                |> List.map _.Path,
+                Does.Contain(feature.Path),
+                "a later worktree incarnation may appear after a fresh absence released the tombstone"
+            )
         }
         |> Async.RunSynchronously
 
@@ -514,7 +588,7 @@ type StateAgentTests() =
             agent.Post(UpdateWorktreeList(testRepoId, worktrees))
             do! waitForAgent agent
 
-            agent.Post(repositoryDiscoveryUpdate testRepoId None "upstream" "develop")
+            agent.Post(repositoryDiscoveryUpdate 0L testRepoId None "upstream" "develop")
 
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = getRepo state
@@ -692,7 +766,7 @@ type StateAgentTests() =
                     Head = "abc123"
                     Branch = Some "main" } ]
 
-            agent.Post(repositoryDiscoveryUpdate testRepoId (Some updated) "upstream" "develop")
+            agent.Post(repositoryDiscoveryUpdate 0L testRepoId (Some updated) "upstream" "develop")
 
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = getRepo state
@@ -760,17 +834,18 @@ type RepositoryDiscoveryUpdateTests() =
     member _.``Discovery produces one message containing worktrees remote and base``() =
         let worktrees = [ makeWorktree "/repo/main" "main" ]
 
-        match repositoryDiscoveryUpdate testRepoId (Some worktrees) "upstream" "develop" with
+        match repositoryDiscoveryUpdate 0L testRepoId (Some worktrees) "upstream" "develop" with
         | UpdateRepositoryDiscovery(repoId, discovery) ->
             Assert.That(repoId, Is.EqualTo(testRepoId))
             Assert.That(discovery.Worktrees, Is.EqualTo(Some worktrees))
+            Assert.That(discovery.StartedAtRevision, Is.EqualTo(0L))
             Assert.That(discovery.UpstreamRemote, Is.EqualTo("upstream"))
             Assert.That(discovery.BaseBranch, Is.EqualTo("develop"))
         | other -> Assert.Fail($"Expected UpdateRepositoryDiscovery but got {other}")
 
     [<Test>]
     member _.``Empty successful discovery remains distinguishable from failed discovery``() =
-        match repositoryDiscoveryUpdate testRepoId (Some []) "origin" "main" with
+        match repositoryDiscoveryUpdate 0L testRepoId (Some []) "origin" "main" with
         | UpdateRepositoryDiscovery(repoId, discovery) ->
             Assert.That(repoId, Is.EqualTo(testRepoId))
             Assert.That(discovery.Worktrees |> Option.map List.isEmpty, Is.EqualTo(Some true))
@@ -778,7 +853,7 @@ type RepositoryDiscoveryUpdateTests() =
 
     [<Test>]
     member _.``Failed discovery carries no replacement worktree list``() =
-        match repositoryDiscoveryUpdate testRepoId None "origin" "main" with
+        match repositoryDiscoveryUpdate 0L testRepoId None "origin" "main" with
         | UpdateRepositoryDiscovery(_, discovery) ->
             Assert.That(discovery.Worktrees, Is.EqualTo(None))
         | other -> Assert.Fail($"Expected UpdateRepositoryDiscovery but got {other}")
