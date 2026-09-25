@@ -83,8 +83,7 @@ type ResolveWorktreeCommandTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(fileName, Is.EqualTo("git"))
-            Assert.That(Path.GetFileName(worktreePath), Is.EqualTo("tm-my-branch"), "the worktree is a tm-prefixed sibling")
-            Assert.That(Path.GetDirectoryName(worktreePath), Is.EqualTo(Path.GetDirectoryName("Q:\\code\\repo")))
+            Assert.That(worktreePath, Is.EqualTo("Q:\\code\\tm-my-branch"), "the worktree is a tm-prefixed sibling")
             Assert.That(
                 args,
                 Is.EqualTo(
@@ -132,7 +131,7 @@ type ResolveWorktreeCommandTests() =
         let _, args, worktreePath = resolveWorktreeCommand "Q:\\code\\repo" "main" "feature/foo"
 
         Assert.Multiple(fun () ->
-            Assert.That(Path.GetFileName(worktreePath), Is.EqualTo("tm-feature-foo"))
+            Assert.That(worktreePath, Is.EqualTo("Q:\\code\\tm-feature-foo"))
             Assert.That(args, Does.Contain("feature/foo"), "the branch keeps its slash")
             Assert.That(args, Does.Contain(worktreePath)))
 

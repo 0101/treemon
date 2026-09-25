@@ -10,9 +10,10 @@
 
 ## Expected Behavior
 
-If consolidation proceeds, `MergedPrStore`, `AutoSyncStore`, and `CanvasDocOwnership` move together
-to SQLite. Their current identities, port isolation, atomic update semantics, corruption behavior,
-and startup defaults remain unchanged from the caller's perspective.
+If consolidation proceeds, `MergedPrStore`, `AutoSyncStore`, `CanvasDocOwnership`, and
+`DeletedWorktreeStore` move together to SQLite. Their current identities, port isolation, atomic
+update semantics, corruption behavior, and startup defaults remain unchanged from the caller's
+perspective.
 
 Startup imports each valid legacy JSON store idempotently inside a bounded migration, then uses
 SQLite as the sole writer. A legacy file is removed only after its complete content is durably
@@ -24,7 +25,7 @@ the chosen design and no migration is added.
 ## Technical Approach
 
 First compare the duplicated code and observed failure modes against the cost of schema, migration,
-and retention changes. Treat the three point-read/point-write stores as one decision. Reuse
+and retention changes. Treat the four point-read/point-write stores as one decision. Reuse
 `SqliteStorage` timestamp and reader helpers, but keep concept-specific tables and modules.
 
 Any implementation adds current-schema tables, a transactionally idempotent import keyed by the
@@ -33,14 +34,14 @@ generic key-value table or expose SQL outside their owning modules.
 
 ## Decisions
 
-- **All three stores or none:** migrating one increases inconsistency rather than reducing it.
-- **Evidence before migration:** `JsonStore` already writes atomically, so durability alone is not
+- **All four stores or none:** migrating one increases inconsistency rather than reducing it.
+- **Evidence before migration:** Both JSON writers already write atomically, so durability alone is not
   justification.
 - **Concept-specific tables:** one database mechanism does not require one generic data model.
 - **Bounded one-way import:** compatibility exists only to prevent startup failure or data loss.
 
 ## Related Specs
 
-- `docs/spec/worktree-monitor.md` - AutoSync and merged-PR runtime state.
+- `docs/spec/worktree-monitor.md` - AutoSync, merged-PR, and deleted-worktree runtime state.
 - `docs/spec/canvas-interaction-routing.md` - persistent AgentDoc ownership.
 - `docs/spec/session-status-push.md` - existing SQLite runtime-state patterns.

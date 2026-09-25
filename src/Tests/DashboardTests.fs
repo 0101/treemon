@@ -4232,9 +4232,13 @@ type DashboardTests() =
         task {
             let! page = this.Context.NewPageAsync()
 
-            let mutable deleteCallCount = 0
+            let calls = System.Collections.Generic.List<string>()
+            do! page.RouteAsync("**/IWorktreeApi/recordDeletedWorktree", fun route ->
+                calls.Add("record")
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = "{\"Ok\":null}"))
+            )
             do! page.RouteAsync("**/IWorktreeApi/deleteWorktree", fun route ->
-                deleteCallCount <- deleteCallCount + 1
+                calls.Add("delete")
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = "{\"Ok\":null}"))
             )
 
@@ -4254,6 +4258,10 @@ type DashboardTests() =
             do! Assertions.Expect(modal).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
 
             let confirmBtn = modal.Locator(".modal-btn.danger").First
+            let deletionResponse =
+                page.WaitForResponseAsync(
+                    (fun (response: IResponse) -> response.Url.Contains("/IWorktreeApi/deleteWorktree")),
+                    PageWaitForResponseOptions(Timeout = 5000.0f))
             do! confirmBtn.ClickAsync()
 
             do! Assertions.Expect(targetCard).ToHaveCountAsync(0, LocatorAssertionsToHaveCountOptions(Timeout = 5000.0f))
@@ -4262,11 +4270,19 @@ type DashboardTests() =
             Assert.That(postDeleteCount, Is.EqualTo(0),
                 $"Card for {targetBranch} should be removed immediately after delete confirmation (optimistic removal)")
 
-            do! page.WaitForTimeoutAsync(2000.0f)
+            let! _ = deletionResponse
+            let! _ =
+                page.WaitForResponseAsync(
+                    (fun (response: IResponse) -> response.Url.Contains("/IWorktreeApi/getWorktrees")),
+                    PageWaitForResponseOptions(Timeout = 5000.0f))
+            let! _ = settleBrowserEvents page
 
             let! laterCount = targetCard.CountAsync()
-            Assert.That(laterCount, Is.EqualTo(0),
-                $"Card for {targetBranch} should not reappear after polling (ghost suppression via DeletedPaths)")
+            Assert.Multiple(fun () ->
+                Assert.That(calls, Is.EqualTo([ "record"; "delete" ]),
+                    "the deletion record must be confirmed before removal")
+                Assert.That(laterCount, Is.EqualTo(0),
+                    $"Card for {targetBranch} should not reappear after polling (ghost suppression via DeletedPaths)"))
 
             do! page.CloseAsync()
         }

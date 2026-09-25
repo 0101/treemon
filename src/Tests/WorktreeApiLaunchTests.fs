@@ -94,6 +94,7 @@ let private createApi
           AutoSyncStore = None
           TerminalHostRestartSessions = None
           WorktreeRoots = [ root ]
+          DeletedWorktreeFile = Path.Combine(root, "deleted-worktrees-test.json")
           TestFixtures = None
           AppVersion = "test"
           DeployBranch = None }
@@ -403,6 +404,44 @@ type WorktreeApiLaunchTests() =
             )
 
             assertTerminalCommandAccepted canvasCommand)
+
+    [<Test>]
+    member _.``Create refuses a tombstoned sibling before invoking Git``() =
+        withTempDir "treemon-create-tombstone" (fun root ->
+            let deletedBranch = "feature/x"
+            let branch = "feature-x"
+            let worktreePath =
+                Shared.PathUtils.siblingWorktreePath
+                    (PathUtils.normalizePath root)
+                    deletedBranch
+            let recordFile = Path.Combine(root, "deleted-worktrees-test.json")
+            assertOk
+                (DeletedWorktreeStore.recordAtPath recordFile worktreePath)
+                "record deleted worktree"
+
+            let unavailable: TerminalLaunch.Operations =
+                { OpenNativeTerminal = fun _ -> async { return Error "Unexpected terminal launch" }
+                  StartEmbeddedTerminal = fun _ -> async { return Error "Unexpected terminal launch" }
+                  StartEmbeddedCommand = fun _ _ -> async { return Error "Unexpected terminal launch" } }
+            let api =
+                createApi
+                    root
+                    (PathUtils.toWorktreePath root)
+                    None
+                    unavailable
+
+            let result =
+                api.createWorktree
+                    { RepoId = RepoId.value (PathUtils.toRepoId root)
+                      BranchName = BranchName.create branch
+                      BaseBranch = BranchName.create "main"
+                      Prompt = None
+                      Skill = None }
+                |> runAsync
+
+            match result with
+            | Error message -> Assert.That(message, Does.Contain("hidden"))
+            | Ok _ -> Assert.Fail("A tombstoned worktree path must not be created"))
 
     [<Test>]
     member _.``Create with prompt launches after post-fork without awaiting terminal completion``() =

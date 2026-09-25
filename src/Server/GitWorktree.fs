@@ -669,11 +669,6 @@ let private fetchBaseBranch (repoRoot: string) (upstreamRemote: string) (baseBra
         return ()
     }
 
-let private worktreeDir (repoRoot: string) (branchName: string) =
-    let parentDir = Path.GetDirectoryName(repoRoot)
-    let dirName = branchName.Replace('/', '-')
-    Path.Combine(parentDir, $"tm-{dirName}")
-
 /// Builds the git command that forks `branchName` from `baseRef` into a
 /// `tm-`prefixed sibling of the repo root. Returns the command and the new
 /// worktree path. `--no-track` stops git's default `autoSetupMerge` from making
@@ -683,7 +678,7 @@ let private worktreeDir (repoRoot: string) (branchName: string) =
 /// show the base branch's PR on the new worktree until it is first pushed. A freshly
 /// forked branch has no remote of its own yet, so it correctly starts with no upstream.
 let resolveWorktreeCommand (repoRoot: string) (baseRef: string) (branchName: string) =
-    let worktreePath = worktreeDir repoRoot branchName
+    let worktreePath = Shared.PathUtils.siblingWorktreePath repoRoot branchName
 
     let arguments =
         [ "-C"; repoRoot; "worktree"; "add"; "-b"; branchName; "--no-track"; worktreePath; baseRef ]

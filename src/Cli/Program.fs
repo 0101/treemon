@@ -380,6 +380,42 @@ let rootsCmd =
         setAction handler
     }
 
+let deletedCmd =
+    let handler (clearPath: string option, port: int option) =
+        withPort port (fun port ->
+            tryCallServer port (fun api ->
+                match clearPath with
+                | None ->
+                    match api.listDeletedWorktrees() |> Async.RunSynchronously with
+                    | Ok [] ->
+                        printfn "No deleted worktrees pending cleanup."
+                        0
+                    | Ok paths ->
+                        paths |> List.iter (sanitizeForTerminal >> printfn "%s")
+                        0
+                    | Error error ->
+                        eprintfn $"Error: %s{sanitizeForTerminal error}"
+                        1
+                | Some path ->
+                    match api.forgetDeletedWorktree (WorktreePath path) |> Async.RunSynchronously with
+                    | Ok () ->
+                        printfn $"Cleared deleted-worktree record for %s{sanitizeForTerminal path}"
+                        0
+                    | Error error ->
+                        eprintfn $"Error: %s{sanitizeForTerminal error}"
+                        1))
+
+    command "deleted" {
+        description "List deleted-worktree records or clear one after its disk path is gone"
+
+        inputs (
+            optionMaybe<string> "--clear" |> desc "Clear the record for an absent worktree path",
+            optionMaybe<int> "--port" |> desc "Server port (default: 5000, env: TREEMON_PORT)"
+        )
+
+        setAction handler
+    }
+
 /// Renders a diff category report and the exit code that goes with it: 0 only for a configured
 /// repository, so the command is usable as a check and not just a printer. Category names come from
 /// the repository's `.treemon.json`, so they are sanitized before they reach the terminal.
@@ -451,5 +487,6 @@ let main argv =
         addCommand addCmd
         addCommand removeCmd
         addCommand rootsCmd
+        addCommand deletedCmd
         addCommand categoriesCmd
     }
