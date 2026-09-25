@@ -18,6 +18,9 @@ type IWorktreeApi =
       toggleAutoSync: WorktreePath -> bool -> Async<Result<unit, string>>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
       deleteWorktree: WorktreePath -> Async<Result<unit, string>>
+      recordDeletedWorktree: WorktreePath -> Async<Result<unit, string>>
+      listDeletedWorktrees: unit -> Async<Result<string list, string>>
+      forgetDeletedWorktree: WorktreePath -> Async<Result<unit, string>>
       launchSession: LaunchRequest -> Async<Result<EmbeddedTerminalStartResult, string>>
       focusSession: WorktreePath -> Async<Result<unit, string>>
       killSession: WorktreePath -> Async<Result<unit, string>>

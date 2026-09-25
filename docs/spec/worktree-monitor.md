@@ -48,11 +48,12 @@
 
 ### Configuration Store
 
-Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DIR` when set, for tests). `src/Server/GlobalConfig.fs` owns all runtime access to that file — a single JSON store fronted by typed accessors. Out-of-band operator edits are made only while Treemon is not writing the file. The store has these invariants:
+Machine-level configuration persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DIR` when set, for tests). `src/Server/GlobalConfig.fs` owns all runtime access to that file — a single JSON store fronted by typed accessors. Out-of-band operator edits are made only while Treemon is not writing the file. The store has these invariants:
 
 - **Single serialized runtime writer, atomic on disk.** Every server mutation funnels through one in-process lock and writes via a temp-file-then-replace, so concurrent runtime updates can't interleave or leave a partially written file.
 - **Never destroy data.** An unparseable `config.json` is backed up to a timestamped `*.corrupt-<ts>` sibling before a fresh object is started, and each write touches only its own named keys — every unrelated key is left intact.
 - **Typed accessors over one store.** Watched roots (with the missing-vs-empty distinction the startup resolver depends on — see Multi-Repo above), pane visibility and Desktop workspace ratios, collapsed repos, last-viewed hashes, and the editor command/name reader are thin wrappers over the same locked store. The viewport-derived One-pane/Desktop mode is not persisted.
+- Deleted-worktree records use a separate, atomic `~/.treemon/deleted-worktrees-{port}.json` file in that directory. Port isolation prevents development and production servers from hiding one another's worktrees; missing files mean no records, while malformed files fail closed instead of discarding deletions.
 
 ### Runtime Logging
 
@@ -87,7 +88,14 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
   on Windows before constructing `RepoId` or `WorktreePath`. Raw-string indexes normalize at their
   own ingress before comparison.
 - Server resolves repo and branch from path internally; archive and auto-sync persistence store branch names per repo in `.treemon.json`
-- Client optimistic state (`DeletedPaths: Set<string>`) filters by path, affecting only the correct repo
+- Confirmation hides a worktree immediately. The server persists its canonical path before terminal
+  teardown or Git removal and filters recorded paths from dashboard responses across restarts, even
+  when deletion fails. A failed record write aborts deletion and restores the card with an error.
+  Client `DeletedPaths` also filters stale in-flight responses for the current browser session.
+- Records are cleared only by the manually invoked `/cleaning-deleted-worktrees` skill after residual
+  disk worktrees and Git registrations are gone. `tm deleted` lists records; `tm deleted --clear <path>`
+  removes one and deletes the file when empty. The server refuses to clear a path still on
+  disk. Reload open dashboard tabs after cleanup to release their optimistic client suppression.
 
 ### Per-Worktree Card
 
@@ -192,6 +200,10 @@ A "+" button on each repo header opens a modal to create new worktrees without l
 
 - **Name input** (auto-focused) + **source branch dropdown** (sorted: main > master > develop > dev* > alphabetical from dashboard worktrees)
 - Treemon creates the worktree itself: it fetches the base branch from the upstream remote, then forks via `git worktree add -b {name} --no-track {parentDir}/tm-{name} {baseRef}`. `baseRef` prefers the remote-tracking ref `{remote}/{base}` — so a new worktree forks from the upstream tip rather than a possibly-stale local branch — falling back to the local `{base}` branch when no remote-tracking ref exists. `--no-track` is required: without it git's default `autoSetupMerge` makes the new branch inherit `baseRef`'s upstream (e.g. `origin/{base}`), so PR detection (keyed off `@{u}`) would show the *base* branch's PR on the new worktree until it is first pushed. A freshly forked branch has no remote yet, so it correctly starts with no upstream. No worktree needs the base checked out; fetch/remote failures fall back to whatever ref is available.
+- A request whose `tm-{name}` sibling path has a deleted-worktree record is rejected before Git
+  or automatic agent launch. The UI also blocks reuse of paths optimistically hidden in its
+  current browser session, including distinct branch names mapping to the same directory. The
+  modal directs the user to manual cleanup and a dashboard reload before reusing the path.
 - After creation, an optional `post-fork.ps1` (Windows) / `post-fork.sh` (Unix) in the repo root runs **inside the new worktree**, receiving `{worktreePath} {sourceRepoRoot} {baseRef} {branchName}`. It is for setup only (symlinks, dependency install). Because setup can be slow, it runs **asynchronously in a background task** *after* the create call returns, capped at a **5-minute timeout** (a run that exceeds it is treated as a failure). Its lifecycle is tracked in `CardEventLog` (`PostForkStarted` → `PostForkEnded(status)`), and the client refreshes those card events through `getSyncStatus` on the normal dashboard poll. The existing post-fork event is visible while setup is running. It disappears after success, while a genuine failure or timeout remains visible; failure is non-fatal since the worktree already exists.
 - Legacy `fork.ps1`/`fork.sh` scripts are **no longer executed** — Treemon now owns forking. If one is present, creation still succeeds but returns a warning to migrate setup steps into `post-fork.*`.
 - Warnings returned by `createWorktree` (`Result<string list, string>`) now carry **only the legacy-fork-script advisory** and are surfaced in the modal (UI) or console (CLI); running and failed post-fork setup is surfaced on the card (successful runs stay hidden), not through this return value. Internally, `forkWorktree` performs the fork (returning a `ForkResult`) and `runPostFork` runs the hook.
@@ -356,6 +368,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/GitBranchSync.fs` | Bounded mechanical sync of a worktree onto its base and non-force branch push |
 | `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, upstream remote, and the raw `diffCategories` read |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
+| `src/Server/DeletedWorktreeStore.fs` | Port-scoped deletion records, atomic persistence, and guarded manual clearing |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring, `DashboardResponse` assembly, and the TerminalHost update trigger |
 | `src/Server/HttpSecurity.fs` | Shared loopback Origin/Referer guard for state-changing HTTP routes |
 | `src/Server/Log.fs` | Stable production log selection and unique per-process non-production log paths |

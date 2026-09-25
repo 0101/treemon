@@ -346,6 +346,54 @@ type SubmitCreateWorktreeTests() =
             Assert.Fail($"Expected Creating but got {other}")
 
     [<Test>]
+    member _.``SubmitCreateWorktree blocks a tombstoned sibling path even for another branch spelling``() =
+        let repoId = RepoId "/workspace/repo"
+        let deletedPath = Shared.PathUtils.siblingWorktreePath (RepoId.value repoId) "feature/x"
+        let form : Modal.CreateWorktreeForm =
+            { RepoId = repoId
+              Branches = [ "main" ]
+              Name = "feature-x"
+              BaseBranch = "main"
+              Prompt = ""
+              AvailableSkills = []
+              Skill = None }
+        let model, cmd =
+            update
+                (ModalMsg Modal.SubmitCreateWorktree)
+                { openModel with
+                    CreateModal = Modal.Open form
+                    DeletedPaths = Set.singleton deletedPath }
+
+        match model.CreateModal with
+        | Modal.CreateError (blockedRepo, message) ->
+            Assert.Multiple(fun () ->
+                Assert.That(blockedRepo, Is.EqualTo repoId)
+                Assert.That(message, Does.Contain("/cleaning-deleted-worktrees"))
+                Assert.That(cmd, Is.Empty))
+        | other -> Assert.Fail($"Expected CreateError, got {other}")
+
+    [<Test>]
+    member _.``SubmitCreateWorktree allows a different repo despite the same sibling name``() =
+        let form : Modal.CreateWorktreeForm =
+            { RepoId = RepoId "/other/repo"
+              Branches = [ "main" ]
+              Name = "feature-x"
+              BaseBranch = "main"
+              Prompt = ""
+              AvailableSkills = []
+              Skill = None }
+        let blockedPath = Shared.PathUtils.siblingWorktreePath "/workspace/repo" "feature-x"
+        let model, cmd =
+            update
+                (ModalMsg Modal.SubmitCreateWorktree)
+                { openModel with
+                    CreateModal = Modal.Open form
+                    DeletedPaths = Set.singleton blockedPath }
+
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Creating form.RepoId))
+        Assert.That(cmd, Is.Not.Empty)
+
+    [<Test>]
     member _.``SubmitCreateWorktree with empty name is ignored``() =
         let emptyName =
             Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = ""; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
@@ -411,6 +459,9 @@ type SubmitCreateWorktreeRequestMappingTests() =
           toggleAutoSync = fun _ _ -> failwith "unused"
           getSyncStatus = fun _ -> failwith "unused"
           deleteWorktree = fun _ -> failwith "unused"
+          recordDeletedWorktree = fun _ -> failwith "unused"
+          listDeletedWorktrees = fun () -> failwith "unused"
+          forgetDeletedWorktree = fun _ -> failwith "unused"
           launchSession = fun _ -> failwith "unused"
           focusSession = fun _ -> failwith "unused"
           killSession = fun _ -> failwith "unused"
