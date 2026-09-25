@@ -166,6 +166,14 @@ module TerminalDataPlane =
 
     let private activateAttachment upstream state attachment terminalSize frames =
         async {
+            let frames =
+                match attachment.Mode with
+                | TerminalAttachmentMode.Browser ->
+                    [ TerminalProtocol.clipboardReplayFrame TerminalProtocol.ClipboardReplayStart
+                      yield! frames
+                      TerminalProtocol.clipboardReplayFrame TerminalProtocol.ClipboardReplayEnd ]
+                | TerminalAttachmentMode.Command -> frames
+
             match! sendReplay attachment frames with
             | Error error ->
                 return { state with Attachment = None }, Error error

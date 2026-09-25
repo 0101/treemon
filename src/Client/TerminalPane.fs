@@ -969,6 +969,7 @@ let private runningIframes state callbacks =
                     prop.custom ("data-terminal-worktree", WorktreePath.value tab.Worktree)
                     prop.custom ("data-terminal-view-generation", string generation)
                     prop.custom ("sandbox", "allow-scripts allow-same-origin")
+                    prop.custom ("allow", "clipboard-write")
                     prop.custom ("referrerpolicy", "no-referrer")
                     prop.custom ("scrolling", "no")
                     if viewState |> Option.exists _.FocusAfterLoad then

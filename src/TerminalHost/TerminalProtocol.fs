@@ -34,6 +34,12 @@ module internal TerminalProtocol =
     let [<Literal>] private DefaultRows = 30
     let [<Literal>] private MaximumColumns = 1_000
     let [<Literal>] private MaximumRows = 500
+    let [<Literal>] ClipboardReplayOsc = 777
+    let [<Literal>] ClipboardReplayStart = "treemon-clipboard-replay-start"
+    let [<Literal>] ClipboardReplayEnd = "treemon-clipboard-replay-end"
+
+    let clipboardReplayFrame marker =
+        Encoding.UTF8.GetBytes($"0\u001b]{ClipboardReplayOsc};{marker}\u0007")
 
     let defaultSize =
         { Columns = DefaultColumns
