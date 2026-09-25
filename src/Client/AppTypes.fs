@@ -25,6 +25,11 @@ type InstalledOverviewHistory =
       Response: OverviewHistoryResponse }
 
 [<RequireQualifiedAccess>]
+type DeleteAfterRecording =
+    | Immediately
+    | AfterClosingSession
+
+[<RequireQualifiedAccess>]
 type TerminalHostUpdateModel =
     | Observed of TerminalHostUpdateState
     | RequestInFlight
@@ -124,6 +129,8 @@ type Msg =
     | ConfirmDeleteWorktree of scopedKey: string
     | ConfirmArchiveWorktree of scopedKey: string
     | ConfirmMsg of ConfirmModal.Msg
+    | DeletedPathRecorded of WorktreePath * DeleteAfterRecording * Result<unit, string>
+    | SessionKillForDeleteFailed of string
     | SessionKilledForDelete of path: WorktreePath
     | SessionKilledForArchive of path: WorktreePath
     | DeleteCompleted of Result<unit, string>

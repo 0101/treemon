@@ -45,6 +45,8 @@ let private createApiWithTerminal agent roots embeddedTerminal =
           AutoSyncStore = None
           TerminalHostRestartSessions = None
           WorktreeRoots = roots
+          DeletedWorktreeFile =
+            Path.Combine(roots |> List.head, ".deleted-worktrees-test.json")
           TestFixtures = None
           AppVersion = "1.0"
           DeployBranch = None }
@@ -103,6 +105,7 @@ let private deleteWorktree agent worktreeRoots wtPath =
         (fun _ _ _ -> async { return Ok () })
         (closeThen (fun _ -> async { return Ok() }))
         (fun _ -> async { return () })
+        (fun _ -> Ok ())
         agent
         (RefreshScheduler.buildRootPaths worktreeRoots)
         wtPath
@@ -127,6 +130,118 @@ type DeleteWorktreeResolutionTests() =
     member _.TearDown() =
         if Directory.Exists(tempDirA) then Directory.Delete(tempDirA, recursive = true)
         if Directory.Exists(tempDirB) then Directory.Delete(tempDirB, recursive = true)
+
+    [<Test>]
+    member _.``dashboard hides a tombstoned worktree still on disk after a fresh API read``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId tempDirA
+            let mainPath = worktreePath tempDirA "main"
+            let leftoverPath = worktreePath tempDirA "tm-leftover"
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree mainPath "main"
+                        makeWorktree leftoverPath "leftover" ] ]
+
+            let file = Path.Combine(tempDirA, ".deleted-worktrees-test.json")
+            let api, _ = createApi agent [ tempDirA ]
+            let! recorded =
+                api.recordDeletedWorktree (PathUtils.toWorktreePath leftoverPath)
+                |> Async.StartAsTask
+            Tests.TestUtils.assertOk recorded "record leftover"
+
+            let freshApi, _ = createApi agent [ tempDirA ]
+            let! listed = freshApi.listDeletedWorktrees() |> Async.StartAsTask
+            let! response = freshApi.getWorktrees() |> Async.StartAsTask
+            let visible =
+                response.Repos
+                |> List.collect _.Worktrees
+                |> List.map (fun worktree -> WorktreePath.value worktree.Path)
+
+            Assert.Multiple(fun () ->
+                match listed with
+                | Ok paths -> Assert.That(paths, Is.EqualTo([ leftoverPath ]))
+                | Error error -> Assert.Fail(error)
+
+                Assert.That(File.Exists file, Is.True)
+                Assert.That(Directory.Exists leftoverPath, Is.True)
+                Assert.That(visible, Does.Not.Contain(leftoverPath))
+                Assert.That(visible, Does.Contain(mainPath)))
+        }
+
+    [<Test>]
+    member _.``cleanup API clears only a tombstone whose disk path is gone``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId tempDirA
+            let leftoverPath = worktreePath tempDirA "tm-leftover"
+            let file = Path.Combine(tempDirA, ".deleted-worktrees-test.json")
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree leftoverPath "leftover" ] ]
+
+            let api, _ = createApi agent [ tempDirA ]
+            let! recorded =
+                api.recordDeletedWorktree (PathUtils.toWorktreePath leftoverPath)
+                |> Async.StartAsTask
+            Tests.TestUtils.assertOk recorded "record leftover"
+
+            let! refused =
+                api.forgetDeletedWorktree (PathUtils.toWorktreePath leftoverPath)
+                |> Async.StartAsTask
+            Directory.Delete leftoverPath
+            let! cleared =
+                api.forgetDeletedWorktree (PathUtils.toWorktreePath leftoverPath)
+                |> Async.StartAsTask
+            let! listed = api.listDeletedWorktrees() |> Async.StartAsTask
+
+            Tests.TestUtils.assertOk cleared "clear absent worktree"
+            Assert.Multiple(fun () ->
+                match refused with
+                | Error error -> Assert.That(error, Is.EqualTo("Worktree path still exists on disk"))
+                | Ok () -> Assert.Fail("An existing worktree must keep its deletion record")
+
+                match listed with
+                | Ok paths -> Assert.That(paths, Is.Empty)
+                | Error error -> Assert.Fail(error)
+
+                Assert.That(File.Exists file, Is.False))
+        }
+
+    [<Test>]
+    member _.``main worktree cannot be recorded as deleted``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId tempDirA
+            let mainPath = worktreePath tempDirA "main"
+            Directory.CreateDirectory(Path.Combine(mainPath, ".git")) |> ignore
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId, [ makeWorktree mainPath "main" ] ]
+
+            let api, _ = createApi agent [ tempDirA ]
+            let! result =
+                api.recordDeletedWorktree (PathUtils.toWorktreePath mainPath)
+                |> Async.StartAsTask
+            let! listed = api.listDeletedWorktrees() |> Async.StartAsTask
+
+            match result with
+            | Error error -> Assert.That(error, Is.EqualTo("Cannot delete the main worktree"))
+            | Ok () -> Assert.Fail("Main worktree must never receive a deletion record")
+
+            match listed with
+            | Ok paths -> Assert.That(paths, Is.Empty)
+            | Error error -> Assert.Fail(error)
+        }
 
     [<Test>]
     member _.``deleteWorktree with WorktreePath targets correct repo when branches are duplicated``() =
@@ -274,6 +389,7 @@ type DeleteWorktreeResolutionTests() =
                         async {
                             calls.Add("state")
                         })
+                    (fun _ -> Ok ())
                     agent
                     (RefreshScheduler.buildRootPaths [ tempDirA ])
                     (PathUtils.toWorktreePath targetPath)
@@ -289,6 +405,74 @@ type DeleteWorktreeResolutionTests() =
                           "state" ]
                     )
                 )
+        }
+
+    [<Test>]
+    member _.``failed terminal cleanup retains the deletion record and the worktree on disk``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId tempDirA
+            let targetPath = worktreePath tempDirA "tm-leftover"
+            let file = Path.Combine(tempDirA, ".deleted-worktrees-test.json")
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "leftover" ] ]
+
+            let! result =
+                WorktreeApi.deleteWorktreeWith
+                    (fun _ _ _ -> async { return failwith "Git removal must not run" })
+                    (fun _ _ -> async { return Error "terminal close failed" })
+                    (fun _ -> async { return () })
+                    (DeletedWorktreeStore.recordAtPath file)
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (PathUtils.toWorktreePath targetPath)
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Error error -> Assert.That(error, Is.EqualTo("terminal close failed"))
+                | Ok () -> Assert.Fail("Terminal failure must abort deletion")
+
+                match DeletedWorktreeStore.readAtPath file with
+                | Ok paths -> Assert.That(paths, Is.EqualTo(Set.singleton targetPath))
+                | Error error -> Assert.Fail(error)
+
+                Assert.That(Directory.Exists targetPath, Is.True))
+        }
+
+    [<Test>]
+    member _.``failed deletion-record write stops before terminal or Git cleanup``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId tempDirA
+            let targetPath = worktreePath tempDirA "tm-leftover"
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "leftover" ] ]
+
+            let! result =
+                WorktreeApi.deleteWorktreeWith
+                    (fun _ _ _ -> async { return failwith "Git removal must not run" })
+                    (fun _ _ -> async { return failwith "Terminal cleanup must not run" })
+                    (fun _ -> async { return () })
+                    (fun _ -> Error "disk unavailable")
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (PathUtils.toWorktreePath targetPath)
+
+            match result with
+            | Error error -> Assert.That(error, Is.EqualTo("disk unavailable"))
+            | Ok () -> Assert.Fail("A failed record write must abort deletion")
+
+            Assert.That(Directory.Exists targetPath, Is.True)
         }
 
     [<Test>]
@@ -324,6 +508,7 @@ type DeleteWorktreeResolutionTests() =
                         async {
                             calls.Add("state")
                         })
+                    (fun _ -> Ok ())
                     agent
                     (RefreshScheduler.buildRootPaths [ tempDirA ])
                     (PathUtils.toWorktreePath targetPath)
@@ -381,6 +566,7 @@ type DeleteWorktreeResolutionTests() =
                         async {
                             calls.Add("state")
                         })
+                    (fun _ -> Ok ())
                     agent
                     (RefreshScheduler.buildRootPaths [ tempDirA ])
                     (PathUtils.toWorktreePath targetPath)

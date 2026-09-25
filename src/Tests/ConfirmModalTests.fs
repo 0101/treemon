@@ -91,6 +91,22 @@ let private defaultModel : Model =
       EmbeddedTerminalPollInFlight = false }
 let private updateModel msg model = update msg model |> fst
 
+let private dashboardResponse repos : DashboardResponse =
+    { Repos = repos |> List.map toRepoWorktrees
+      SchedulerEvents = []
+      LatestByCategory = Map.empty
+      AppVersion = "1.0"
+      DeployBranch = None
+      SystemMetrics = None
+      EditorName = "VS Code"
+      WorktreeSkills = []
+      CollapsedRepos = Set.empty
+      TerminalPaneOpen = false
+      CanvasPaneOpen = false
+      OverviewPanelOpen = false
+      WorkspaceWidth = WorkspaceWidth.EqualThirds
+      TerminalHostUpdate = TerminalHostUpdateState.Unavailable }
+
 
 
 
@@ -179,7 +195,7 @@ type DeleteWithSessionSequencingTests() =
             "Confirming deletion should dismiss the modal")
 
     [<Test>]
-    member _.``failed delete clears ghost suppression and requests authoritative refresh``() =
+    member _.``failed delete stays hidden and requests authoritative refresh``() =
         let pending =
             updateModel
                 (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
@@ -193,15 +209,75 @@ type DeleteWithSessionSequencingTests() =
         Assert.Multiple(fun () ->
             Assert.That(
                 recovered.DeletedPaths,
-                Is.Empty,
-                "the next server snapshot must be allowed to restore the worktree"
+                Does.Contain(WorktreePath.value testPath),
+                "confirmation keeps the worktree hidden for the browser session"
             )
 
             Assert.That(
                 refresh,
                 Is.Not.Empty,
                 "failure must request the authoritative worktree snapshot"
-            ))
+            )
+
+            match recovered.ConfirmModal with
+            | ConfirmModal.DeleteFailure message ->
+                Assert.That(message, Does.Contain("TerminalHost update is in progress"))
+            | other -> Assert.Fail($"Expected a visible deletion error, got {other}"))
+
+    [<Test>]
+    member _.``failed deletion record restores visibility and reports the failure``() =
+        let pending =
+            updateModel
+                (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
+                modelWithConfirmDelete
+
+        let failed, refresh =
+            update
+                (DeletedPathRecorded(testPath, DeleteAfterRecording.Immediately, Error "storage unavailable"))
+                pending
+
+        Assert.Multiple(fun () ->
+            Assert.That(failed.DeletedPaths, Is.Empty)
+            Assert.That(refresh, Is.Not.Empty)
+
+            match failed.ConfirmModal with
+            | ConfirmModal.DeleteFailure message ->
+                Assert.That(message, Does.Contain("storage unavailable"))
+            | other -> Assert.Fail($"Expected a visible recording error, got {other}"))
+
+    [<Test>]
+    member _.``successful deletion record starts the delete command``() =
+        let pending =
+            updateModel
+                (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
+                modelWithConfirmDelete
+
+        let afterRecord, command =
+            update
+                (DeletedPathRecorded(testPath, DeleteAfterRecording.Immediately, Ok ()))
+                pending
+
+        Assert.That(afterRecord.DeletedPaths, Does.Contain(WorktreePath.value testPath))
+        Assert.That(command, Is.Not.Empty)
+
+    [<Test>]
+    member _.``failed session close keeps the recorded worktree hidden and reports the failure``() =
+        let pending =
+            updateModel
+                (ConfirmMsg(ConfirmModal.DeleteAndCloseSession testPath))
+                modelWithConfirmDelete
+
+        let failed, refresh =
+            update (SessionKillForDeleteFailed "terminal did not close") pending
+
+        Assert.Multiple(fun () ->
+            Assert.That(failed.DeletedPaths, Does.Contain(WorktreePath.value testPath))
+            Assert.That(refresh, Is.Not.Empty)
+
+            match failed.ConfirmModal with
+            | ConfirmModal.DeleteFailure message ->
+                Assert.That(message, Does.Contain("terminal did not close"))
+            | other -> Assert.Fail($"Expected a visible session error, got {other}"))
 
     [<Test>]
     member _.``delete transport failure is dispatched as an explicit result``() =
@@ -244,16 +320,49 @@ type DeleteWithSessionSequencingTests() =
         }
 
     [<Test>]
-    member _.``ConfirmMsg DeleteAfterKillSession does NOT remove worktree from model``() =
+    member _.``ConfirmMsg DeleteAfterKillSession immediately removes worktree from model``() =
         let model = updateModel (ConfirmMsg (ConfirmModal.DeleteAndCloseSession testPath)) modelWithConfirmDelete
 
         let branches =
             model.Repos |> List.collect _.Worktrees |> List.map _.Branch
 
-        Assert.That(branches, Does.Contain("feature-branch"),
-            "Worktree should NOT be removed yet — must wait for session kill to succeed")
-        Assert.That(model.DeletedPaths, Is.Empty,
-            "DeletedPaths should remain empty until session is confirmed killed")
+        Assert.That(branches, Does.Not.Contain("feature-branch"))
+        Assert.That(
+            model.DeletedPaths,
+            Does.Contain(WorktreePath.value testPath)
+        )
+
+    [<Test>]
+    member _.``stale response cannot restore a confirmed deletion``() =
+        let deleting =
+            updateModel
+                (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
+                modelWithConfirmDelete
+
+        let absent =
+            updateModel
+                (DataLoaded(
+                    dashboardResponse [
+                        makeRepo "repo" [ makeWorktree "main" false ]
+                    ],
+                    DateTimeOffset.UnixEpoch
+                ))
+                deleting
+
+        let stale =
+            updateModel
+                (DataLoaded(
+                    dashboardResponse defaultModel.Repos,
+                    DateTimeOffset.UnixEpoch
+                ))
+                absent
+
+        Assert.That(
+            stale.Repos
+            |> List.collect _.Worktrees
+            |> List.map _.Path,
+            Does.Not.Contain(testPath)
+        )
 
     [<Test>]
     member _.``SessionKilledForDelete removes worktree from model``() =

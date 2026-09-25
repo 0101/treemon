@@ -65,6 +65,9 @@ let readOnlyApi
       openEditor = fun _ -> async { return () }
       toggleAutoSync = fun _ _ -> async { return Error $"Auto-sync is not available in {modeName}" }
       deleteWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
+      recordDeletedWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
+      listDeletedWorktrees = fun () -> async { return Ok [] }
+      forgetDeletedWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
       launchSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       focusSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       killSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
@@ -497,8 +500,14 @@ let getWorktrees
     (rootPaths: Map<RepoId, string>)
     (appVersion: string)
     (deployBranch: string option)
+    (deletedWorktreeFile: string)
     : Async<DashboardResponse> =
     async {
+        let deletedPaths =
+            match DeletedWorktreeStore.readAtPath deletedWorktreeFile with
+            | Ok paths -> paths
+            | Error error -> raise (InvalidDataException error)
+
         let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
         let! terminalHostUpdate =
@@ -506,7 +515,14 @@ let getWorktrees
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
         let inputs = loadRepoAssemblyInputs DateTimeOffset.UtcNow activityStore rootPaths
-        let repos = assembleRepos inputs rootPaths activeSessionPaths state
+        let repos =
+            assembleRepos inputs rootPaths activeSessionPaths state
+            |> List.map (fun repo ->
+                { repo with
+                    Worktrees =
+                        repo.Worktrees
+                        |> List.filter (fun worktree ->
+                            not (Set.contains (WorktreePath.value worktree.Path) deletedPaths)) })
 
         return
             { Repos = repos
@@ -570,6 +586,13 @@ let private openTerminal
             | Error msg -> Log.log "API" $"openTerminal: failed for '{path}': {msg}"
     }
 
+let private tryResolveDeletableWorktree rootPaths state path =
+    match tryResolveWorktreeContext rootPaths state path with
+    | None -> Error $"No worktree found at path '{path}'"
+    | Some ctx when Directory.Exists(Path.Combine(ctx.Worktree.Path, ".git")) ->
+        Error "Cannot delete the main worktree"
+    | Some ctx -> Ok ctx
+
 let internal deleteWorktreeWith
     (removeGitWorktree: string -> string -> string option -> Async<Result<unit, string>>)
     (withTerminalCleanup:
@@ -577,6 +600,7 @@ let internal deleteWorktreeWith
         (unit -> Async<Result<unit, string>>) ->
         Async<Result<unit, string>>)
     (removeWorktreeState: string -> Async<unit>)
+    (recordDeletedWorktree: string -> Result<unit, string>)
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (wtPath: WorktreePath)
@@ -585,31 +609,29 @@ let internal deleteWorktreeWith
     asyncResult {
         let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
-        match tryResolveWorktreeContext rootPaths state path with
-        | None -> return! Error $"No worktree found at path '{path}'"
-        | Some ctx when Directory.Exists(Path.Combine(ctx.Worktree.Path, ".git")) ->
-            return! Error "Cannot delete the main worktree"
-        | Some ctx ->
-            return!
-                withTerminalCleanup
-                    (PathUtils.toWorktreePath ctx.Worktree.Path)
-                    (fun () ->
-                        asyncResult {
-                            do!
-                                removeGitWorktree
-                                    ctx.RepoRoot
-                                    ctx.Worktree.Path
-                                    ctx.Worktree.Branch
+        let! ctx = tryResolveDeletableWorktree rootPaths state path
+        do! recordDeletedWorktree ctx.Worktree.Path
 
-                            agent.Post(
-                                SchedulerState.StateMsg.RemoveWorktree(
-                                    ctx.RepoId,
-                                    ctx.Worktree.Path
-                                )
+        return!
+            withTerminalCleanup
+                (PathUtils.toWorktreePath ctx.Worktree.Path)
+                (fun () ->
+                    asyncResult {
+                        do!
+                            removeGitWorktree
+                                ctx.RepoRoot
+                                ctx.Worktree.Path
+                                ctx.Worktree.Branch
+
+                        agent.Post(
+                            SchedulerState.StateMsg.RemoveWorktree(
+                                ctx.RepoId,
+                                ctx.Worktree.Path
                             )
+                        )
 
-                            do! removeWorktreeState ctx.Worktree.Path
-                        })
+                        do! removeWorktreeState ctx.Worktree.Path
+                    })
     }
 
 let private deleteWorktree
@@ -617,6 +639,7 @@ let private deleteWorktree
     embeddedTerminal
     terminalSessionCleanup
     (clearAcceptedSync: string -> unit)
+    (recordDeletedWorktree: string -> Result<unit, string>)
     rootPaths
     wtPath
     =
@@ -633,6 +656,7 @@ let private deleteWorktree
             terminalSessionCleanup
             embeddedTerminal)
         removeWorktreeState
+        recordDeletedWorktree
         agent
         rootPaths
         wtPath
@@ -724,6 +748,7 @@ type internal WorktreeApiDependencies =
       TerminalHostRestartSessions:
         TerminalHostReplacement.RestartSessionQuery option
       WorktreeRoots: string list
+      DeletedWorktreeFile: string
       TestFixtures: string option
       AppVersion: string
       DeployBranch: string option }
@@ -742,6 +767,7 @@ let internal worktreeApiWithLaunch
           AutoSyncStore = autoSyncStore
           TerminalHostRestartSessions = terminalHostRestartSessions
           WorktreeRoots = worktreeRoots
+          DeletedWorktreeFile = deletedWorktreeFile
           TestFixtures = testFixtures
           AppVersion = appVersion
           DeployBranch = deployBranch } =
@@ -888,6 +914,7 @@ let internal worktreeApiWithLaunch
                     rootPaths
                     appVersion
                     deployBranch
+                    deletedWorktreeFile
           openTerminal =
             openTerminal
                 validatePath
@@ -994,7 +1021,31 @@ let internal worktreeApiWithLaunch
                 embeddedTerminal
                 terminalSessionCleanup
                 clearAcceptedRecord
+                (DeletedWorktreeStore.recordAtPath deletedWorktreeFile)
                 rootPaths
+          recordDeletedWorktree = fun wtPath ->
+              async {
+                  let path = WorktreePath.value wtPath
+                  let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+
+                  return
+                      tryResolveDeletableWorktree rootPaths state path
+                      |> Result.bind (fun ctx ->
+                          DeletedWorktreeStore.recordAtPath deletedWorktreeFile ctx.Worktree.Path)
+              }
+          listDeletedWorktrees = fun () ->
+              async {
+                  return
+                      DeletedWorktreeStore.readAtPath deletedWorktreeFile
+                      |> Result.map Set.toList
+              }
+          forgetDeletedWorktree = fun wtPath ->
+              async {
+                  return
+                      DeletedWorktreeStore.forgetAtPath
+                          deletedWorktreeFile
+                          (WorktreePath.value wtPath)
+              }
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
                   async {
@@ -1055,6 +1106,12 @@ let internal worktreeApiWithLaunch
                       |> Result.requireSome $"Unknown repo: {req.RepoId}"
 
                   let branchName = BranchName.value req.BranchName
+                  let! deletedPaths = DeletedWorktreeStore.readAtPath deletedWorktreeFile
+                  let newPath = Shared.PathUtils.siblingWorktreePath root branchName
+
+                  if deletedPaths |> Set.exists (fun path -> pathEquals path newPath) then
+                      return! Error "This worktree path is hidden by a deleted-worktree record. Run /cleaning-deleted-worktrees before reusing it."
+
                   let! fork = GitWorktree.forkWorktree root (BranchName.value req.BaseBranch) branchName
                   agent.Post(SchedulerState.StateMsg.ExpediteRefresh repoId)
 

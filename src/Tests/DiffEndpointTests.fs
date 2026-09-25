@@ -1782,6 +1782,7 @@ type DiffEndpointHttpTests() =
                                       repoDir ])
                                 "test"
                                 None
+                                (Path.Combine(tempDir, "deleted-worktrees-test.json"))
                             |> TestUtils.runAsync
                         finally
                             Directory.SetCurrentDirectory(previousCwd)
@@ -2221,6 +2222,7 @@ type DiffIdentityLifecycleHttpTests() =
                         (fun _ _ _ -> async.Return(Ok()))
                         (fun _ operation -> operation ())
                         WorktreeDiffApi.removeWorktree
+                        (fun _ -> Ok ())
                         deleteAgent
                         (RefreshScheduler.buildRootPaths [ repoRoot ])
                         (PathUtils.toWorktreePath worktree)
