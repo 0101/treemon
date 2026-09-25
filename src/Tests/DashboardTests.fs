@@ -2851,6 +2851,7 @@ type DashboardTests() =
                     $"iframe.terminal-iframe-active[data-terminal-id='{EmbeddedTerminalId.value thirdTerminal}']"
                 )
             do! firstActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(firstActiveIframe).ToHaveAttributeAsync("allow", "clipboard-write")
 
             let firstTarget =
                 page

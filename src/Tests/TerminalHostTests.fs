@@ -1418,6 +1418,10 @@ type TerminalHostControlApiTests() =
 [<Category("TerminalHost")>]
 type TerminalHostDataPlaneTests() =
     let frame (value: string) = Encoding.UTF8.GetBytes value
+    let markerStart =
+        $"0\u001b]{TerminalProtocol.ClipboardReplayOsc};{TerminalProtocol.ClipboardReplayStart}\u0007"
+    let markerEnd =
+        $"0\u001b]{TerminalProtocol.ClipboardReplayOsc};{TerminalProtocol.ClipboardReplayEnd}\u0007"
 
     [<Test>]
     member _.``message failure does not wedge the data plane``() =
@@ -1580,7 +1584,15 @@ type TerminalHostDataPlaneTests() =
                 |> requireOk
 
             Assert.Multiple(fun () ->
-                Assert.That(browserFrames, Is.EqualTo([ "0second"; "0third" ]))
+                Assert.That(
+                    browserFrames,
+                    Is.EqualTo(
+                        [ markerStart
+                          "0second"
+                          "0third"
+                          markerEnd ]
+                    )
+                )
                 Assert.That(resize.Columns, Is.EqualTo(220))
                 Assert.That(resize.Rows, Is.EqualTo(70)))
         finally
@@ -1615,10 +1627,44 @@ type TerminalHostDataPlaneTests() =
             Assert.That(
                 browser.Sent |> List.map Encoding.UTF8.GetString,
                 Is.EqualTo(
-                    [ "0\u001b[?1049h\u001b[?6h"
+                    [ markerStart
+                      "0\u001b[?1049h\u001b[?6h"
                       "0redraw"
-                      "0\u001b[?25l\u001b[?1002h\u001b[?1006h" ]
+                      "0\u001b[?25l\u001b[?1002h\u001b[?1006h"
+                      markerEnd ]
                 )
+            )
+        finally
+            plane.Stop() |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``replayed clipboard output is bracketed while live clipboard output stays live``() =
+        let upstream = new TestWebSocket()
+        let plane = TerminalDataPlane.createCore 1_024 upstream ignore
+        let clipboardOutput = "0\u001b]52;c;Y29waWVkIHRleHQ=\u0007"
+
+        try
+            plane.AcceptUpstreamFrame(frame clipboardOutput)
+            |> Async.RunSynchronously
+
+            let browser = new TestWebSocket()
+            let attachmentId =
+                plane.AttachSocket TerminalAttachmentMode.Browser browser
+                |> Async.RunSynchronously
+                |> requireSome "browser was not attached"
+
+            plane.AcceptBrowserFrame
+                attachmentId
+                (frame """{"AuthToken":"","columns":120,"rows":30}""")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            plane.AcceptUpstreamFrame(frame clipboardOutput)
+            |> Async.RunSynchronously
+
+            Assert.That(
+                browser.Sent |> List.map Encoding.UTF8.GetString,
+                Is.EqualTo([ markerStart; clipboardOutput; markerEnd; clipboardOutput ])
             )
         finally
             plane.Stop() |> Async.RunSynchronously
@@ -1777,7 +1823,11 @@ type TerminalHostDataPlaneTests() =
                 plane.AcceptUpstreamFrame(frame value)
                 |> Async.RunSynchronously)
 
-            Assert.That(browser.Sent, Is.Empty, "paused output was sent live")
+            Assert.That(
+                browser.Sent |> List.map Encoding.UTF8.GetString,
+                Is.EqualTo([ markerStart; markerEnd ]),
+                "paused output was sent live"
+            )
 
             plane.AcceptBrowserFrame attachmentId (frame "3")
             |> Async.RunSynchronously
@@ -1795,7 +1845,10 @@ type TerminalHostDataPlaneTests() =
             Assert.Multiple(fun () ->
                 Assert.That(
                     browserFrames,
-                    Is.EqualTo([ "0paused-first"; "0paused-second" ])
+                    Is.EqualTo(
+                        [ markerStart; markerEnd
+                          markerStart; "0paused-first"; "0paused-second"; markerEnd ]
+                    )
                 )
 
                 Assert.That(
@@ -1849,25 +1902,37 @@ type TerminalHostDataPlaneTests() =
             plane.AcceptUpstreamFrame retained
             |> Async.RunSynchronously
 
-            Assert.That(browser.Sent, Is.Empty, "paused output was sent live")
+            Assert.That(
+                browser.Sent |> List.map Encoding.UTF8.GetString,
+                Is.EqualTo([ markerStart; markerEnd ]),
+                "paused output was sent live"
+            )
 
             plane.AcceptBrowserFrame attachmentId (frame "3")
             |> Async.RunSynchronously
             |> requireOk
 
             let browserFrames = browser.Sent
-            Assert.That(browserFrames |> List.length, Is.EqualTo(5))
+            Assert.That(browserFrames |> List.length, Is.EqualTo(9))
 
-            let resetFrame = browserFrames |> List.head |> Encoding.UTF8.GetString
-            let beforeReplay = browserFrames |> List.item 1 |> Encoding.UTF8.GetString
-            let gapNotice = browserFrames |> List.item 2 |> Encoding.UTF8.GetString
-            let survivingFrame = browserFrames |> List.item 3
+            let resetFrame = browserFrames |> List.item 3 |> Encoding.UTF8.GetString
+            let beforeReplay = browserFrames |> List.item 4 |> Encoding.UTF8.GetString
+            let gapNotice = browserFrames |> List.item 5 |> Encoding.UTF8.GetString
+            let survivingFrame = browserFrames |> List.item 6
             let modeFrame =
                 browserFrames
-                |> List.last
+                |> List.item 7
                 |> Encoding.UTF8.GetString
 
             Assert.Multiple(fun () ->
+                Assert.That(
+                    browserFrames |> List.item 2 |> Encoding.UTF8.GetString,
+                    Is.EqualTo(markerStart)
+                )
+                Assert.That(
+                    browserFrames |> List.last |> Encoding.UTF8.GetString,
+                    Is.EqualTo(markerEnd)
+                )
                 Assert.That(
                     resetFrame,
                     Is.EqualTo("0\u001bc\u001b[2J\u001b[H")
@@ -2255,6 +2320,11 @@ type TerminalHostProxyTests() =
             Assert.That(customized, Does.Contain("exactCtrl&&key==='v'"))
             Assert.That(customized, Does.Not.Contain("hasTerminalMethod('paste')"))
             Assert.That(customized, Does.Contain("e.stopImmediatePropagation()"))
+            Assert.That(customized, Does.Contain("registerOscHandler(52"))
+            Assert.That(customized, Does.Contain("navigator.clipboard.writeText(text)"))
+            Assert.That(customized, Does.Contain("treemon-clipboard-error"))
+            Assert.That(customized, Does.Contain(TerminalProtocol.ClipboardReplayStart))
+            Assert.That(customized, Does.Contain(TerminalProtocol.ClipboardReplayEnd))
             Assert.That(customized, Does.Contain("},true)"))
             Assert.That(customized, Does.Contain($"action={serializedAction}"))
             Assert.That(
