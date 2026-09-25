@@ -338,6 +338,35 @@ async function verifyTerminalInputShortcuts(page) {
   }
 }
 
+async function verifyRealTerminalClipboardWrite(frame, dashboard) {
+  const context = dashboard.context();
+  await context.grantPermissions(
+    ["clipboard-read", "clipboard-write"],
+    { origin: new URL(dashboard.url()).origin },
+  );
+  await context.grantPermissions(
+    ["clipboard-write"],
+    { origin: new URL(frame.url()).origin },
+  );
+
+  const previousClipboard = await dashboard.evaluate(() => navigator.clipboard.readText());
+  const text = `treemon clipboard probe ${randomUUID()}`;
+  try {
+    await frame.locator(".xterm-screen").click({ button: "right" });
+    await frame.evaluate(
+      (output) => new Promise((resolveWrite) => window.term.write(output, resolveWrite)),
+      `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`,
+    );
+    await dashboard.waitForFunction(
+      (expected) => navigator.clipboard.readText().then((actual) => actual === expected),
+      text,
+      { timeout: 5000 },
+    );
+  } finally {
+    await dashboard.evaluate((previous) => navigator.clipboard.writeText(previous), previousClipboard);
+  }
+}
+
 async function verifyTerminalClipboard(page) {
   const copiedText = "clipboard check: café 😊\nsecond line";
   const oscCopy = `\x1b]52;c;${Buffer.from(copiedText, "utf8").toString("base64")}\x07`;
@@ -674,6 +703,7 @@ export async function runTtydRuntimeVerification() {
       document.featurePolicy?.allowsFeature("clipboard-write"),
     );
     assert(clipboardAllowed, "The embedded terminal lacks clipboard-write permission");
+    await verifyRealTerminalClipboardWrite(terminalFrame, dashboard);
     await verifyTerminalClipboard(terminalFrame);
 
     console.log(
