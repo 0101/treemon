@@ -24,6 +24,123 @@ module internal TerminalProxy =
     let private terminalPageHeadInjection =
         $"<style>.xterm-viewport{{scrollbar-width:none}}.xterm-viewport::-webkit-scrollbar{{display:none}}</style><script>(function(){{function focusTerminal(){{var input=document.querySelector('.xterm-helper-textarea');if(input)input.focus()}}function isTerminalInput(e){{return e.target&&e.target.classList&&e.target.classList.contains('xterm-helper-textarea')}}function hasTerminalMethod(name){{return window.term&&typeof window.term[name]==='function'}}window.addEventListener('message',function(e){{if(e.source!==parent||!e.data||e.data.action!=='{Shared.TerminalPageMessage.FocusTerminal}')return;focusTerminal()}});document.addEventListener('keydown',function(e){{var key=(e.key||'').toLowerCase();var exactCtrl=e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey;if(isTerminalInput(e)&&exactCtrl&&key==='enter'&&hasTerminalMethod('input')){{e.preventDefault();e.stopImmediatePropagation();window.term.input('\\n',true);return}}if(isTerminalInput(e)&&exactCtrl&&key==='v'){{e.stopImmediatePropagation();return}}if(!(e.ctrlKey||e.metaKey)||e.altKey)return;var action=key==='p'?'{Shared.TerminalPageMessage.OpenWorktreeSearch}':key==='tab'?'{Shared.TerminalPageMessage.CycleTerminal}':key==='w'&&!e.shiftKey?'{Shared.TerminalPageMessage.CloseTerminal}':key==='n'&&!e.shiftKey?'{Shared.TerminalPageMessage.StartTerminal}':'';if(!action)return;e.preventDefault();e.stopImmediatePropagation();if(action==='{Shared.TerminalPageMessage.CycleTerminal}')parent.postMessage({{action:action,direction:e.shiftKey?'{Shared.TerminalPageMessage.PreviousDirection}':'{Shared.TerminalPageMessage.NextDirection}'}},'*');else parent.postMessage({{action:action}},'*')}},true)}})()</script>"
 
+    let private terminalClipboardInjection =
+        """<style>
+            .treemon-clipboard-error {
+                position: fixed; z-index: 10; left: 12px; right: 12px; bottom: 12px;
+                display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+                border: 1px solid #f38ba8; border-radius: 4px;
+                background: #1e1e2e; color: #f38ba8; font: 13px system-ui, sans-serif;
+            }
+            .treemon-clipboard-error button {
+                margin-left: auto; border: 1px solid #45475a; border-radius: 4px;
+                background: #313244; color: #cdd6f4; font: inherit; cursor: pointer;
+            }
+        </style><script>(function() {
+            const replayStart = """
+        + JsonSerializer.Serialize TerminalProtocol.ClipboardReplayStart
+        + """, replayEnd = """
+        + JsonSerializer.Serialize TerminalProtocol.ClipboardReplayEnd
+        + """;
+            let replaying = true, copyIntentUntil = 0, copyAttempt = 0;
+            const maxEncodedLength = 262144;
+            function clearError() {
+                document.querySelector('.treemon-clipboard-error')?.remove();
+            }
+            function showError(message, error) {
+                if (error) console.error('[treemon] terminal clipboard copy failed', error);
+                clearError();
+                const notice = document.createElement('div');
+                notice.className = 'treemon-clipboard-error';
+                notice.setAttribute('role', 'alert');
+                const text = document.createElement('span');
+                text.textContent = message;
+                const dismiss = document.createElement('button');
+                dismiss.type = 'button';
+                dismiss.textContent = 'Dismiss';
+                dismiss.addEventListener('click', clearError);
+                notice.append(text, dismiss);
+                document.body.appendChild(notice);
+            }
+            function inTerminal(event) {
+                return event.target instanceof Element && !!event.target.closest('.xterm');
+            }
+            document.addEventListener('contextmenu', event => {
+                if (inTerminal(event)) event.preventDefault();
+            }, true);
+            function armCopy(event) {
+                if (!event.isTrusted || !inTerminal(event)) return;
+                const rightClick = event.type === 'pointerdown' && event.button === 2;
+                const copyKey = event.type === 'keydown' &&
+                    (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey &&
+                    event.key.toLowerCase() === 'c';
+                if (rightClick || copyKey) copyIntentUntil = performance.now() + 5000;
+            }
+            document.addEventListener('pointerdown', armCopy, true);
+            document.addEventListener('keydown', armCopy, true);
+            function install() {
+                if (!window.term) return false;
+                if (!window.term.parser?.registerOscHandler) {
+                    showError('This terminal cannot copy text to the browser clipboard.');
+                    return true;
+                }
+                const parser = window.term.parser;
+                parser.registerOscHandler("""
+        + string TerminalProtocol.ClipboardReplayOsc
+        + """, function(data) {
+                    if (data === replayStart) replaying = true;
+                    else if (data === replayEnd) replaying = false;
+                    return true;
+                });
+                parser.registerOscHandler(52, function(data) {
+                    if (replaying || !data.startsWith('c;') ||
+                        copyIntentUntil < performance.now() || !document.hasFocus()) return true;
+                    copyIntentUntil = 0;
+                    const attempt = ++copyAttempt;
+                    const encoded = data.slice(2);
+                    if (!encoded || encoded.length > maxEncodedLength ||
+                        encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+                        showError('Could not copy: invalid or oversized terminal clipboard data.');
+                        return true;
+                    }
+                    let text;
+                    try {
+                        const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0));
+                        text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+                    } catch (error) {
+                        showError('Could not decode terminal clipboard data.', error);
+                        return true;
+                    }
+                    const reportWriteFailure = error => {
+                        if (attempt === copyAttempt) {
+                            showError('Could not copy to the browser clipboard. Check clipboard permissions and try again.', error);
+                        } else {
+                            console.error('[treemon] superseded terminal clipboard write failed', error);
+                        }
+                    };
+                    try {
+                        navigator.clipboard.writeText(text)
+                            .then(() => { if (attempt === copyAttempt) clearError(); })
+                            .catch(reportWriteFailure);
+                    } catch (error) {
+                        reportWriteFailure(error);
+                    }
+                    return true;
+                });
+                return true;
+            }
+            if (!install()) {
+                const observer = new MutationObserver(() => {
+                    if (install()) observer.disconnect();
+                });
+                observer.observe(document, { childList: true, subtree: true });
+                setTimeout(() => {
+                    observer.disconnect();
+                    if (!window.term) console.error('[treemon] terminal clipboard handler was not installed');
+                }, 10000);
+            }
+        })()</script>"""
+
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
     type internal ProxyStopOperations =
@@ -36,7 +153,7 @@ module internal TerminalProxy =
         let reconnectScript =
             $"<script>(function(){{var allowedOrigins={JsonSerializer.Serialize allowedOrigins},action={JsonSerializer.Serialize Shared.TerminalPageMessage.TerminalVisible},reconnectPrompt=\"Press \\u23CE to Reconnect\",poll=null,deadline=null,reloading=false,reloadMarker='treemon-terminal-reconnect-load',suppressNextLoadedActivation=(function(){{try{{var marked=sessionStorage.getItem(reloadMarker)==='1';sessionStorage.removeItem(reloadMarker);return marked}}catch(_){{return true}}}})();function clearPending(){{if(poll!==null){{clearInterval(poll);poll=null}}if(deadline!==null){{clearTimeout(deadline);deadline=null}}}}function isWaitingForReconnect(){{var terminal=document.querySelector('.xterm');return !!terminal&&Array.prototype.some.call(terminal.children,function(child){{return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt}})}}function reconnectIfWaiting(){{if(reloading||document.visibilityState!=='visible'||!isWaitingForReconnect())return false;reloading=true;clearPending();try{{sessionStorage.setItem(reloadMarker,'1')}}catch(_){{}}window.location.reload();return true}}function activate(loaded){{if(document.visibilityState!=='visible'){{clearPending();return}}if(loaded&&suppressNextLoadedActivation){{suppressNextLoadedActivation=false;return}}if(reconnectIfWaiting())return;if(poll===null)poll=setInterval(reconnectIfWaiting,100);if(deadline!==null)clearTimeout(deadline);deadline=setTimeout(clearPending,10000)}}window.addEventListener('message',function(event){{if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;if(event.data.active===false){{clearPending();return}}if(event.data.active===true)activate(event.data.loaded===true)}});document.addEventListener('visibilitychange',function(){{if(document.visibilityState!=='visible')clearPending()}})}})();</script>"
 
-        html.Replace("</head>", terminalPageHeadInjection + reconnectScript + "</head>", StringComparison.OrdinalIgnoreCase)
+        html.Replace("</head>", terminalPageHeadInjection + terminalClipboardInjection + reconnectScript + "</head>", StringComparison.OrdinalIgnoreCase)
 
     let private receiveMessage mode (socket: WebSocket) =
         let buffer = Array.zeroCreate<byte> 8_192
