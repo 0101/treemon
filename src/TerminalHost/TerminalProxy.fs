@@ -62,9 +62,14 @@ module internal TerminalProxy =
                 notice.append(text, dismiss);
                 document.body.appendChild(notice);
             }
+            function inTerminal(event) {
+                return event.target instanceof Element && !!event.target.closest('.xterm');
+            }
+            document.addEventListener('contextmenu', event => {
+                if (inTerminal(event)) event.preventDefault();
+            }, true);
             function armCopy(event) {
-                if (!event.isTrusted || !(event.target instanceof Element) ||
-                    !event.target.closest('.xterm')) return;
+                if (!event.isTrusted || !inTerminal(event)) return;
                 const rightClick = event.type === 'pointerdown' && event.button === 2;
                 const copyKey = event.type === 'keydown' &&
                     (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey &&

@@ -134,8 +134,10 @@ retained screen output.
 The terminal host wraps browser replay on attach and resume with private OSC markers,
 so clipboard requests in retained output never overwrite the browser clipboard.
 The proxied ttyd page handles live OSC 52 clipboard-set (`c`) requests only within
-five seconds of a trusted right-click or Ctrl+C in the focused terminal. It accepts
-bounded, valid UTF-8 text (at most 262,144 base64 characters), never responds to
+five seconds of a trusted right-click or Ctrl+C in the focused terminal. Right-click
+inside the xterm surface suppresses the browser context menu without consuming the
+mouse event, so the TUI can copy its selection; menus outside that surface are unchanged.
+It accepts bounded, valid UTF-8 text (at most 262,144 base64 characters), never responds to
 clipboard reads or primary-selection writes, and copies through the browser Clipboard
 API rather than the terminal process's Windows clipboard. The cross-origin terminal
 iframe delegates `clipboard-write`; a rejected or unavailable browser write shows

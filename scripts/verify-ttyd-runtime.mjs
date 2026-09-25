@@ -365,7 +365,30 @@ async function verifyTerminalClipboard(page) {
   const readWrites = () => page.evaluate(() => window.__treemonClipboardWrites);
 
   try {
+    await page.evaluate(() => {
+      window.__treemonRightClick = { pointerDown: false, contextMenu: null };
+      document.addEventListener("pointerdown", (event) => {
+        window.__treemonRightClick.pointerDown = event.button === 2;
+      }, { capture: true, once: true });
+      document.addEventListener("contextmenu", (event) => {
+        window.__treemonRightClick.contextMenu = {
+          inTerminal: !!event.target.closest(".xterm"),
+          prevented: event.defaultPrevented,
+        };
+      }, { capture: true, once: true });
+    });
     await terminalScreen.click({ button: "right" });
+    const rightClick = await page.evaluate(() => ({
+      ...window.__treemonRightClick,
+      outsideMenuAllowed: document.body.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      ),
+    }));
+    assertStrict.deepEqual(rightClick, {
+      pointerDown: true,
+      contextMenu: { inTerminal: true, prevented: true },
+      outsideMenuAllowed: true,
+    }, "terminal right-click must reach the TUI without opening the browser menu");
     await write(oscCopy);
     await page.waitForFunction(() => window.__treemonClipboardWrites.length === 1);
     assertStrict.deepEqual(await readWrites(), [copiedText]);
@@ -449,6 +472,7 @@ async function verifyTerminalClipboard(page) {
     await page.evaluate(() => {
       delete navigator.clipboard;
       delete window.__treemonClipboardWrites;
+      delete window.__treemonRightClick;
     });
   }
 }
