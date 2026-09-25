@@ -364,27 +364,27 @@ module TerminalDataPlane =
         let processMessage _ state message =
             async {
                 match message with
-                | Attach(_, socket, reply) when state.Stopped ->
-                    do! closeSocket WebSocketCloseStatus.EndpointUnavailable "Terminal session closed" socket
-
-                    return respond reply None state
                 | Attach(mode, socket, reply) ->
-                    match state.Attachment with
-                    | Some previous ->
-                        do! closeSocket WebSocketCloseStatus.NormalClosure "Replaced by a new attachment" previous.Socket
-                    | None -> ()
+                    if state.Stopped then
+                        do! closeSocket WebSocketCloseStatus.EndpointUnavailable "Terminal session closed" socket
+                        return respond reply None state
+                    else
+                        match state.Attachment with
+                        | Some previous ->
+                            do! closeSocket WebSocketCloseStatus.NormalClosure "Replaced by a new attachment" previous.Socket
+                        | None -> ()
 
-                    let attachment =
-                        { Id = Guid.NewGuid()
-                          Socket = socket
-                          Mode = mode
-                          Initialized = false
-                          Paused = false
-                          NextSequence = ReplayBuffer.nextSequence state.Replay }
+                        let attachment =
+                            { Id = Guid.NewGuid()
+                              Socket = socket
+                              Mode = mode
+                              Initialized = false
+                              Paused = false
+                              NextSequence = ReplayBuffer.nextSequence state.Replay }
 
-                    return
-                        { state with Attachment = Some attachment }
-                        |> respond reply (Some attachment.Id)
+                        return
+                            { state with Attachment = Some attachment }
+                            |> respond reply (Some attachment.Id)
                 | BrowserFrame(attachmentId, frame, reply) ->
                     match state.Attachment with
                     | Some attachment when attachment.Id = attachmentId ->
@@ -402,19 +402,24 @@ module TerminalDataPlane =
                         | None -> state
 
                     return respond reply () updated
-                | UpstreamFrame(_, reply)
-                | UpstreamClosed reply
-                | Stop reply when state.Stopped ->
-                    return respond reply () state
                 | UpstreamFrame(frame, reply) ->
-                    let! updated = handleUpstreamFrame replayCapacity state frame
-                    return respond reply () updated
+                    if state.Stopped then
+                        return respond reply () state
+                    else
+                        let! updated = handleUpstreamFrame replayCapacity state frame
+                        return respond reply () updated
                 | UpstreamClosed reply ->
-                    let! stopped = upstreamStopped state
-                    return respond reply () stopped
+                    if state.Stopped then
+                        return respond reply () state
+                    else
+                        let! stopped = upstreamStopped state
+                        return respond reply () stopped
                 | Stop reply ->
-                    let! stopped = explicitlyStopped state
-                    return respond reply () stopped
+                    if state.Stopped then
+                        return respond reply () state
+                    else
+                        let! stopped = explicitlyStopped state
+                        return respond reply () stopped
             }
 
         let mailbox = ResilientMailbox.start "TerminalDataPlane" initial recoverMessage processMessage

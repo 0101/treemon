@@ -5,6 +5,8 @@
     <AssemblyName>Treemon</AssemblyName>
     <TargetFramework>net10.0</TargetFramework>
     <RollForward>LatestMajor</RollForward>
+    <_TerminalHostBuildProperties>IncludeSourceRevisionInInformationalVersion=false;DebugType=None;DebugSymbols=false</_TerminalHostBuildProperties>
+    <_TerminalHostReferenceProperties Condition="'$(Configuration)' == 'Release'">$(_TerminalHostBuildProperties)</_TerminalHostReferenceProperties>
   </PropertyGroup>
 
   <ItemGroup>
@@ -160,10 +162,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Shared\Shared.fsproj" />
-    <ProjectReference Include="..\TerminalHostLayout\TerminalHostLayout.fsproj" />
+    <ProjectReference Include="..\TerminalHostLayout\TerminalHostLayout.fsproj"
+                      AdditionalProperties="$(_TerminalHostReferenceProperties)" />
     <ProjectReference Include="..\TerminalHost\TerminalHost.fsproj"
                       ReferenceOutputAssembly="false"
-                      Private="false" />
+                      Private="false"
+                      AdditionalProperties="$(_TerminalHostReferenceProperties)" />
   </ItemGroup>
 
   <Target Name="PublishTerminalHost"
@@ -173,7 +177,7 @@
     </PropertyGroup>
     <MSBuild Projects="..\TerminalHost\TerminalHost.fsproj"
              Targets="Publish"
-             Properties="Configuration=$(Configuration);PublishDir=$(_TerminalHostPublishDir);SelfContained=false;IncludeSourceRevisionInInformationalVersion=false;DebugType=None;DebugSymbols=false" />
+             Properties="Configuration=$(Configuration);PublishDir=$(_TerminalHostPublishDir);SelfContained=false;$(_TerminalHostBuildProperties)" />
   </Target>
 
 </Project>
