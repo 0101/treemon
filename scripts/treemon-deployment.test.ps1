@@ -636,8 +636,17 @@ try {
     $unreadyStatus = Show-Status 6>&1 | Out-String
     Assert-True (
         $unreadyStatus.Contains("running but not listening on port $DefaultPort") -and
-        $unreadyStatus.Contains("Monitor: (server not listening)")
-    ) "Status reported a process without a dashboard listener as healthy"
+        $unreadyStatus.Contains("Monitor: (server not listening)") -and
+        $unreadyStatus.Contains("Stdout log: $runStdout") -and
+        $unreadyStatus.Contains("Stderr log: $runStderr") -and
+        $unreadyStatus.Contains("SQLite Error 10: 'disk I/O error'")
+    ) "Status omitted startup diagnostics for an unready process"
+    Clear-Content -LiteralPath $runStderr
+    $unreadyWithoutStderr = Show-Status 6>&1 | Out-String
+    Assert-True (
+        $unreadyWithoutStderr.Contains("Stderr log: $runStderr") -and
+        -not $unreadyWithoutStderr.Contains("SQLite Error 10:")
+    ) "Status omitted the stderr path for an unready process without an error yet"
     $startUnreadyRefused = $false
     try {
         Start-ProductionServer @()

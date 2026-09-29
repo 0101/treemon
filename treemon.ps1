@@ -574,6 +574,15 @@ function Show-StartupLogs([string]$StdoutLog, [string]$StderrLog) {
     }
 }
 
+function Show-RecentStartupLogs {
+    $recentLogs = Get-RunLogs ""
+    if ($recentLogs.Count -eq 0) { return }
+
+    $stderrLog = Join-Path $LogDir ($recentLogs[0].Name -replace '^treemon-prod\.', 'treemon-prod-stderr.')
+    Write-Host "  Most recent run:"
+    Show-StartupLogs $recentLogs[0].FullName $stderrLog
+}
+
 function Remove-OldRunLogs([int]$Keep) {
     # Keep only the most recent $Keep runs per channel; older logs are best-effort deleted (a log
     # still held open elsewhere simply survives until its holder releases it).
@@ -910,14 +919,7 @@ function Show-Status {
     $runningPid = Get-RunningPid
     if (-not $runningPid) {
         Write-Host "Production server is not running" -ForegroundColor Yellow
-        $recentLogs = Get-RunLogs ""
-        if ($recentLogs.Count -gt 0) {
-            $stderrLog = Join-Path $LogDir ($recentLogs[0].Name -replace '^treemon-prod\.', 'treemon-prod-stderr.')
-            if ((Test-Path -LiteralPath $stderrLog) -and (Get-Item -LiteralPath $stderrLog).Length -gt 0) {
-                Write-Host "  Most recent run:"
-                Show-StartupLogs $recentLogs[0].FullName $stderrLog
-            }
-        }
+        Show-RecentStartupLogs
         return
     }
 
@@ -966,7 +968,11 @@ function Show-Status {
     } else {
         Write-Host "  Monitor: (none configured)"
     }
-    Write-Host "  Log:     $(Get-CurrentLogFile)"
+    if ($dashboardListening) {
+        Write-Host "  Log:     $(Get-CurrentLogFile)"
+    } else {
+        Show-RecentStartupLogs
+    }
 }
 
 function Show-Log {
