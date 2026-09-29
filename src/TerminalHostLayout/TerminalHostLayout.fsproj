@@ -6,6 +6,12 @@
     <PathMap Condition="'$(Configuration)' == 'Release' and '$(ArtifactsPath)' != ''">$([System.IO.Path]::GetFullPath('$(ArtifactsPath)'))=/_/artifacts,$(PathMap)</PathMap>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
   <ItemGroup>
     <Compile Include="Layout.fs" />
   </ItemGroup>
