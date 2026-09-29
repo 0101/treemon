@@ -122,6 +122,69 @@ function Get-RunningPid {
     return $null
 }
 
+function Get-RequiredDotNetSdkVersion {
+    $globalJson = Get-Content (Join-Path $ScriptDir "global.json") -Raw | ConvertFrom-Json
+    $version = [string]$globalJson.sdk.version
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        throw "global.json does not declare an SDK version"
+    }
+    return $version
+}
+
+function Test-DotNetSdkInstalled([string]$Version) {
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { return $false }
+
+    $installedSdks = @(dotnet --list-sdks 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "Could not list installed .NET SDKs" }
+
+    $prefix = "$Version "
+    return $null -ne (
+        $installedSdks |
+            Where-Object { $_.StartsWith($prefix, [StringComparison]::Ordinal) } |
+            Select-Object -First 1
+    )
+}
+
+function Ensure-DotNetSdk {
+    $requiredVersion = Get-RequiredDotNetSdkVersion
+    $dotnetAvailable = $null -ne (Get-Command dotnet -ErrorAction SilentlyContinue)
+    if ($dotnetAvailable -and (Test-DotNetSdkInstalled $requiredVersion)) { return }
+
+    $majorVersion = ($requiredVersion -split "\.")[0]
+    $packageId = "Microsoft.DotNet.SDK.$majorVersion"
+    $installCommand =
+        "winget install --exact --id $packageId --version $requiredVersion --source winget"
+
+    Write-Host ".NET SDK $requiredVersion is required but not installed" -ForegroundColor Red
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "Install the required SDK and retry: $installCommand"
+    }
+
+    $answer = Read-Host "Install .NET SDK $requiredVersion via winget? (Y/n)"
+    if ($answer -ne "" -and $answer -notmatch "^[Yy]") {
+        throw ".NET SDK $requiredVersion is required — install it with: $installCommand"
+    }
+
+    winget install `
+        --exact `
+        --id $packageId `
+        --version $requiredVersion `
+        --source winget `
+        --accept-package-agreements `
+        --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) { throw "winget install failed" }
+
+    if (-not $dotnetAvailable) {
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+            [Environment]::GetEnvironmentVariable("Path", "User")
+    }
+    if (-not (Test-DotNetSdkInstalled $requiredVersion)) {
+        throw ".NET SDK $requiredVersion is still unavailable after installation — restart your shell and try again"
+    }
+
+    Write-Host ".NET SDK $requiredVersion installed" -ForegroundColor Green
+}
+
 function Build-Frontend([string]$Destination = $WwwRoot) {
     Push-Location $ScriptDir
     try {
@@ -820,6 +883,7 @@ function Start-ProductionServer([string[]]$Roots) {
     }
 
     Assert-ExternalProductionLifecycle "start Treemon production"
+    Ensure-DotNetSdk
     Ensure-WwwRoot
     $terminalHostExecutable = Install-ServerDeployment {
         param($preflight)
@@ -846,6 +910,7 @@ function Stop-ProductionServer {
 
 function Restart-ProductionServer([string[]]$Roots) {
     Assert-ExternalProductionLifecycle "restart Treemon production"
+    Ensure-DotNetSdk
     Write-Host "Restarting server..." -ForegroundColor Cyan
     Stop-ProductionServer
     Start-Sleep -Seconds 1
@@ -1065,6 +1130,7 @@ function Start-DualProcess(
 }
 
 function Start-DevMode([string[]]$Roots) {
+    Ensure-DotNetSdk
     # Drop any $null/empty entries: an omitted path binds $Roots to $null, and
     # @($null) is a 1-element array that would call .TrimEnd() on $null below.
     $cleanRoots = @($Roots | Where-Object { $_ })
@@ -1079,6 +1145,7 @@ function Start-DevMode([string[]]$Roots) {
 }
 
 function Start-DemoMode {
+    Ensure-DotNetSdk
     $terminalHostExecutable = Resolve-DevelopmentTerminalHostExecutable
     Start-DualProcess `
         -ServerArgs "--demo" `
@@ -1254,6 +1321,7 @@ function Restart-ServerIfRunning {
 
 function Deploy-Frontend {
     Assert-ExternalProductionLifecycle "deploy Treemon production"
+    Ensure-DotNetSdk
     $frontendCandidate = "$WwwRoot.candidate-$([Guid]::NewGuid().ToString('N'))"
     try {
         Write-Host "Building frontend candidate..." -ForegroundColor Cyan
