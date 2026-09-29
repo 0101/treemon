@@ -522,6 +522,23 @@ function Wait-PortFree([int]$Port, [int]$TimeoutSec = 10) {
     }
 }
 
+function Test-ProcessListening([int]$Port, [int]$ProcessId) {
+    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -eq $ProcessId } |
+        Select-Object -First 1
+    return $null -ne $listener
+}
+
+function Wait-ProductionListening($Process, [int]$Port, [int]$TimeoutSec = 30) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ($true) {
+        if ($Process.HasExited) { return $false }
+        if (Test-ProcessListening $Port $Process.Id) { return $true }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Milliseconds 300
+    }
+}
+
 function Get-RunLogs([string]$Channel) {
     # Returns this scheme's per-run log files for a channel ("" = stdout, "-stderr" = stderr), newest
     # first. Each run writes a fresh treemon-prod[-stderr].<timestamp>.log, so a new run never touches
@@ -539,6 +556,31 @@ function Get-CurrentLogFile {
     $logs = Get-RunLogs ""
     if ($logs.Count -eq 0) { return $LogFile }
     return $logs[0].FullName
+}
+
+function Show-StartupLogs([string]$StdoutLog, [string]$StderrLog) {
+    Write-Host "  Stdout log: $StdoutLog"
+    Write-Host "  Stderr log: $StderrLog"
+    if (-not (Test-Path -LiteralPath $StderrLog -PathType Leaf)) { return }
+
+    $firstLine = Get-Content -LiteralPath $StderrLog -TotalCount 1
+    if ([string]::IsNullOrWhiteSpace($firstLine)) { return }
+
+    $summary = ($firstLine -replace '\p{C}', ' ').Trim()
+    if ($summary.Length -gt 300) { $summary = $summary.Substring(0, 300) + "..." }
+    Write-Host "  Error: $summary" -ForegroundColor Red
+    if ($summary -match 'SQLite Error 10:') {
+        Write-Host "  SQLite disk I/O error: preserve the database and WAL/SHM files; check storage and file access." -ForegroundColor Yellow
+    }
+}
+
+function Show-RecentStartupLogs {
+    $recentLogs = Get-RunLogs ""
+    if ($recentLogs.Count -eq 0) { return }
+
+    $stderrLog = Join-Path $LogDir ($recentLogs[0].Name -replace '^treemon-prod\.', 'treemon-prod-stderr.')
+    Write-Host "  Most recent run:"
+    Show-StartupLogs $recentLogs[0].FullName $stderrLog
 }
 
 function Remove-OldRunLogs([int]$Keep) {
@@ -764,16 +806,15 @@ function Start-ProductionProcess(
 
     $process.Id | Set-Content $PidFile
 
-    Start-Sleep -Seconds 3
-
-    if ($process.HasExited) {
-        Remove-Item $PidFile -ErrorAction SilentlyContinue
-        Write-Host "Production server failed to start (exit code: $($process.ExitCode))" -ForegroundColor Red
-        $stderrFile = $stderrLog
-        if ((Test-Path $stderrFile) -and (Get-Item $stderrFile).Length -gt 0) {
-            Write-Host ""
-            Get-Content $stderrFile | Select-Object -Last 5 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    $startupTimeoutSec = 30
+    if (-not (Wait-ProductionListening $process $DefaultPort $startupTimeoutSec) -or $process.HasExited) {
+        if ($process.HasExited) {
+            Remove-Item $PidFile -ErrorAction SilentlyContinue
+            Write-Host "Production server exited before listening on port $DefaultPort (exit code: $($process.ExitCode))" -ForegroundColor Red
+        } else {
+            Write-Host "Production server did not listen on port $DefaultPort within ${startupTimeoutSec}s (PID: $($process.Id) is still running)" -ForegroundColor Red
         }
+        Show-StartupLogs $LogFile $stderrLog
         exit 1
     }
 
@@ -813,6 +854,9 @@ function Start-ProductionProcess(
 function Start-ProductionServer([string[]]$Roots) {
     $runningPid = Get-RunningPid
     if ($runningPid) {
+        if (-not (Test-ProcessListening $DefaultPort $runningPid)) {
+            throw "Production server process PID $runningPid is not listening on port $DefaultPort. Run '.\treemon.ps1 status' to inspect its logs before retrying."
+        }
         Write-Host "Production server is already running (PID: $runningPid)" -ForegroundColor Yellow
         Write-Host "  URL: http://localhost:$DefaultPort" -ForegroundColor Gray
         Write-Host "Use '.\treemon.ps1 stop' first or run '.\treemon.ps1 restart' from an external PowerShell window" -ForegroundColor Gray
@@ -875,6 +919,7 @@ function Show-Status {
     $runningPid = Get-RunningPid
     if (-not $runningPid) {
         Write-Host "Production server is not running" -ForegroundColor Yellow
+        Show-RecentStartupLogs
         return
     }
 
@@ -884,7 +929,12 @@ function Show-Status {
                  elseif ($uptime.Hours -gt 0) { "$($uptime.Hours)h $($uptime.Minutes)m" }
                  else { "$($uptime.Minutes)m $($uptime.Seconds)s" }
 
-    Write-Host "Production server is running" -ForegroundColor Green
+    $dashboardListening = Test-ProcessListening $DefaultPort $runningPid
+    if ($dashboardListening) {
+        Write-Host "Production server is running" -ForegroundColor Green
+    } else {
+        Write-Host "Production server process is running but not listening on port $DefaultPort" -ForegroundColor Red
+    }
     Write-Host "  PID:     $runningPid"
     Write-Host "  Port:    $DefaultPort"
     Write-Host "  Uptime:  $uptimeStr"
@@ -903,18 +953,26 @@ function Show-Status {
 
     # Watched roots come from the server (the single source of truth) via `tm roots`.
     $rootLines = @()
-    try {
-        $rootsOutput = & $TmScript roots --port $DefaultPort 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            $rootLines = @($rootsOutput | Where-Object { $_ -and $_.Trim() -and $_.Trim() -ne "No worktree roots configured." })
-        }
-    } catch { }
-    if ($rootLines.Count -gt 0) {
+    if ($dashboardListening) {
+        try {
+            $rootsOutput = & $TmScript roots --port $DefaultPort 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $rootLines = @($rootsOutput | Where-Object { $_ -and $_.Trim() -and $_.Trim() -ne "No worktree roots configured." })
+            }
+        } catch { }
+    }
+    if (-not $dashboardListening) {
+        Write-Host "  Monitor: (server not listening)"
+    } elseif ($rootLines.Count -gt 0) {
         $rootLines | ForEach-Object { Write-Host "  Monitor: $_" }
     } else {
         Write-Host "  Monitor: (none configured)"
     }
-    Write-Host "  Log:     $(Get-CurrentLogFile)"
+    if ($dashboardListening) {
+        Write-Host "  Log:     $(Get-CurrentLogFile)"
+    } else {
+        Show-RecentStartupLogs
+    }
 }
 
 function Show-Log {
