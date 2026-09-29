@@ -63,6 +63,8 @@ Run production `start`, `restart`, and `deploy` operations from an external Powe
 .\treemon.ps1 deploy                                                # rebuild + replace production with this checkout
 ```
 
+Production `start` and `deploy` report success only after the new process listens on the dashboard port. If it exits early or fails to listen within 30 seconds, the script reports the error headline and both run-log paths; `status` shows the most recent run's log paths and stderr when the server is down or running without a listener. A process that has not listened by the timeout is left running for inspection rather than stopped automatically, and subsequent starts refuse to treat it as healthy.
+
 ### Development
 
 ```powershell

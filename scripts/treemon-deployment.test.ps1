@@ -164,10 +164,50 @@ $hadTerminalSessionId = Test-Path Env:\TREEMON_TERMINAL_SESSION_ID
 $previousTerminalSessionId = $env:TREEMON_TERMINAL_SESSION_ID
 $hostProcess = $null
 $manifest = $null
+$embeddedListener = $null
 
 try {
     Remove-Item Env:\TREEMON_TERMINAL_SESSION_ID -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path $root | Out-Null
+
+    $testPort = Get-TestPort
+    $testListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $testPort)
+    $testListener.Start()
+    try {
+        $liveProcess = [pscustomobject]@{ Id = $PID; HasExited = $false }
+        $otherProcess = [pscustomobject]@{ Id = 0; HasExited = $false }
+        $exitedProcess = [pscustomobject]@{ Id = $PID; HasExited = $true }
+        Assert-True (Wait-ProductionListening $liveProcess $testPort 5) "The server's own listener was not recognized"
+        Assert-True (-not (Wait-ProductionListening $otherProcess $testPort 0)) "Another process's listener counted as readiness"
+        Assert-True (-not (Wait-ProductionListening $exitedProcess $testPort 0)) "An exited server counted as ready"
+    } finally {
+        $testListener.Stop()
+    }
+    Assert-True (-not (Wait-ProductionListening $liveProcess (Get-TestPort) 0)) "A server without a listener counted as ready"
+    $script:exitProbeCount = 0
+    $delayedExit = [pscustomobject]@{ Id = 0 }
+    $delayedExit | Add-Member -MemberType ScriptProperty -Name HasExited -Value {
+        $script:exitProbeCount++
+        return $script:exitProbeCount -ge 3
+    }
+    Assert-True (
+        -not (Wait-ProductionListening $delayedExit (Get-TestPort) 10) -and
+        $script:exitProbeCount -ge 3
+    ) "A server that exits after the first readiness check counted as ready"
+
+    $stderrFixture = Join-Path $root "startup-stderr.log"
+    $stdoutFixture = Join-Path $root "startup-stdout.log"
+    Set-Content -LiteralPath $stderrFixture -Value @(
+        "Unhandled exception. Microsoft.Data.Sqlite.SqliteException: SQLite Error 10: 'disk I/O error'.",
+        "   at Example.openConnection()"
+    )
+    $startupOutput = Show-StartupLogs $stdoutFixture $stderrFixture 6>&1 | Out-String
+    Assert-True (
+        $startupOutput.Contains("SQLite Error 10: 'disk I/O error'") -and
+        $startupOutput.Contains("Stderr log: $stderrFixture") -and
+        $startupOutput.Contains("preserve the database and WAL/SHM files")
+    ) "Startup diagnostics omitted the SQLite error or its log paths"
+    Write-Host "PASS: startup waits for its own listener and reports SQLite failures"
 
     $script:publishSetupEvents = @()
     $PublishDir = Join-Path $root "setup-order"
@@ -641,6 +681,43 @@ try {
         $script:deploymentWorkflowEvents += "start-server"
     }
 
+    New-Item -ItemType Directory -Path $LogDir | Out-Null
+    $runStdout = Join-Path $LogDir "treemon-prod.20260925-000000.log"
+    $runStderr = Join-Path $LogDir "treemon-prod-stderr.20260925-000000.log"
+    Set-Content -LiteralPath $runStdout -Value "Server startup"
+    Copy-Item -LiteralPath $stderrFixture -Destination $runStderr
+    $script:mockRunningPid = $null
+    $stoppedStatus = Show-Status 6>&1 | Out-String
+    Assert-True (
+        $stoppedStatus.Contains("Production server is not running") -and
+        $stoppedStatus.Contains("SQLite Error 10: 'disk I/O error'")
+    ) "Status did not report the latest failed run's SQLite error"
+    $script:mockRunningPid = $PID
+    $unreadyStatus = Show-Status 6>&1 | Out-String
+    Assert-True (
+        $unreadyStatus.Contains("running but not listening on port $DefaultPort") -and
+        $unreadyStatus.Contains("Monitor: (server not listening)") -and
+        $unreadyStatus.Contains("Stdout log: $runStdout") -and
+        $unreadyStatus.Contains("Stderr log: $runStderr") -and
+        $unreadyStatus.Contains("SQLite Error 10: 'disk I/O error'")
+    ) "Status omitted startup diagnostics for an unready process"
+    Clear-Content -LiteralPath $runStderr
+    $unreadyWithoutStderr = Show-Status 6>&1 | Out-String
+    Assert-True (
+        $unreadyWithoutStderr.Contains("Stderr log: $runStderr") -and
+        -not $unreadyWithoutStderr.Contains("SQLite Error 10:")
+    ) "Status omitted the stderr path for an unready process without an error yet"
+    $startUnreadyRefused = $false
+    try {
+        Start-ProductionServer @()
+    } catch {
+        $startUnreadyRefused = $_.Exception.Message -like
+            "Production server process PID $PID is not listening on port $DefaultPort*"
+    }
+    Assert-True $startUnreadyRefused "Start accepted an existing process with no dashboard listener"
+    $script:mockRunningPid = $null
+    Write-Host "PASS: status distinguishes failed and unready production runs"
+
     $script:mockDeploymentScenario = "start"
     $script:deploymentWorkflowEvents = @()
     Start-ProductionServer @("Q:\fixture-worktree")
@@ -708,12 +785,14 @@ try {
         $script:deploymentWorkflowEvents.Count -eq 0
     ) "Embedded-terminal deploy performed work before refusal"
 
-    $script:mockRunningPid = 123
+    $embeddedListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $DefaultPort)
+    $embeddedListener.Start()
+    $script:mockRunningPid = $PID
     $script:deploymentWorkflowEvents = @()
     Start-ProductionServer @()
     Assert-True (
         $script:deploymentWorkflowEvents.Count -eq 0 -and
-        $script:mockRunningPid -eq 123
+        $script:mockRunningPid -eq $PID
     ) "Embedded-terminal start did not preserve the already-running no-op"
 
     $script:mockRunningPid = $null
@@ -730,7 +809,7 @@ try {
         $script:deploymentWorkflowEvents.Count -eq 0
     ) "Embedded-terminal production start performed work before refusal"
 
-    $script:mockRunningPid = 123
+    $script:mockRunningPid = $PID
     $script:deploymentWorkflowEvents = @()
     $restartRefused = $false
     try {
@@ -742,17 +821,18 @@ try {
     Assert-True $restartRefused "Embedded-terminal production restart was not refused"
     Assert-True (
         $script:deploymentWorkflowEvents.Count -eq 0 -and
-        $script:mockRunningPid -eq 123
+        $script:mockRunningPid -eq $PID
     ) "Embedded-terminal production restart stopped or replaced the running server"
 
     $script:deploymentWorkflowEvents = @()
     Restart-ServerIfRunning
     Assert-True (
         $script:deploymentWorkflowEvents.Count -eq 0 -and
-        $script:mockRunningPid -eq 123
+        $script:mockRunningPid -eq $PID
     ) "Embedded-terminal automatic config restart stopped or replaced the running server"
     Write-Host "PASS: production lifecycle refuses embedded-terminal ownership before side effects"
 } finally {
+    if ($embeddedListener) { $embeddedListener.Stop() }
     $PublishDir = $originalPublishDir
     $PidFile = $originalPidFile
     $WwwRoot = $originalWwwRoot
