@@ -130,7 +130,7 @@ let private closedPr = prInfo PrState.ClosedUnmerged
 /// overlapping inside the durable-record layer, which the guard serializes in production, and
 /// `AutoSyncMechanicalTests` covers the guard itself.
 let private withAcceptedRecords agent store deliver =
-    let unexpectedLaunch _ _ = async { return Error "Unexpected terminal launch" }
+    let unexpectedLaunch _ _ _ = async { return Error "Unexpected terminal launch" }
 
     { autoSyncDependencies agent unexpectedLaunch None (Some store) with
         ReadPrStatus = fun _ -> async { return Some NoPr }
@@ -1763,7 +1763,7 @@ type AutoSyncDeliveryTests() =
         Assert.That(accepted, Is.False)
 
     [<Test>]
-    member _.``AutoSync fallback uses embedded command launch and rejects failed command delivery``() =
+    member _.``AutoSync fallback passes the complete prompt and rejects failed startup``() =
         let path =
             Path.Combine("test", $"auto-sync-launch-{Guid.NewGuid():N}")
             |> WorktreePath
@@ -1771,10 +1771,10 @@ type AutoSyncDeliveryTests() =
         // The injected launch callback is the async effect whose exact operation is under test.
         let mutable observedLaunch = None
 
-        let launch requestedPath command =
+        let launch _ requestedPath prompt =
             async {
-                observedLaunch <- Some(requestedPath, command)
-                return Error "command delivery failed"
+                observedLaunch <- Some(requestedPath, prompt)
+                return Error "startup prompt rejected"
             }
 
         let dependencies =
@@ -1787,16 +1787,12 @@ type AutoSyncDeliveryTests() =
                   Prompt = promptText }
             |> Async.RunSynchronously
 
-        let expectedCommand =
-            CodingToolCli.build None (CodingToolCli.Interactive promptText)
-            |> _.AsShellString
-
         Assert.Multiple(fun () ->
             Assert.That(accepted, Is.False)
 
             match observedLaunch with
-            | Some(requestedPath, command) ->
-                Assert.That(command, Is.EqualTo(expectedCommand))
+            | Some(requestedPath, prompt) ->
+                Assert.That(prompt, Is.EqualTo(promptText))
                 Assert.That(requestedPath, Is.EqualTo(path))
             | None ->
                 Assert.Fail("Expected the AutoSync fallback to invoke the terminal launch boundary"))

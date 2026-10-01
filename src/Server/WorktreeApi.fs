@@ -779,7 +779,7 @@ let internal worktreeApiWithLaunch
     let autoSyncDependencies =
         RefreshScheduler.autoSyncDependencies
             agent
-            terminalLaunch.StartEmbeddedCommand
+            terminalLaunch.StartPromptedAgent
             activityStore
             autoSyncStore
 
@@ -1051,9 +1051,8 @@ let internal worktreeApiWithLaunch
                   async {
                       let path = WorktreePath.value req.Path
                       let provider = CodingToolStatus.readConfiguredProvider path
-                      let inv = CodingToolCli.build provider (CodingToolCli.Interactive req.Prompt)
                       return!
-                          startEmbeddedCommand req.Path inv.AsShellString
+                          terminalLaunch.StartPromptedAgent provider req.Path req.Prompt
                           |> terminalStart
                   })
           focusSession = fun wtPath ->
@@ -1137,12 +1136,19 @@ let internal worktreeApiWithLaunch
                               match req.Skill with
                               | Some skill -> CodingToolStatus.skillInvocation provider skill prompt
                               | None -> prompt
-                          let cmd = (CodingToolCli.build provider (CodingToolCli.Interactive wrapped)).AsShellString
                           async {
                               try
-                                  match! startEmbeddedCommand (WorktreePath newPath) cmd with
-                                  | Ok _ -> ()
-                                  | Error msg -> Log.log "API" $"Auto-launch failed for {newPath}: {msg}"
+                                  let! worktrees = GitWorktree.listWorktrees root
+
+                                  match worktrees with
+                                  | Some worktrees when worktrees |> List.exists (fun wt -> pathEquals wt.Path newPath) ->
+                                      agent.Post(SchedulerState.StateMsg.UpdateWorktreeList(repoId, worktrees))
+
+                                      match! terminalLaunch.StartPromptedAgent provider (WorktreePath newPath) wrapped with
+                                      | Ok _ -> ()
+                                      | Error msg -> Log.log "API" $"Auto-launch failed for {newPath}: {msg}"
+                                  | None | Some _ ->
+                                      Log.log "API" "Auto-launch failed: could not discover the newly created worktree"
                               with ex ->
                                   Log.log "API" $"Auto-launch crashed for {newPath}: {ex}"
                           }
@@ -1186,9 +1192,8 @@ let internal worktreeApiWithLaunch
                       let path = WorktreePath.value req.Path
                       let provider = CodingToolStatus.readConfiguredProvider path
                       let prompt = CodingToolStatus.actionPrompt provider req.Action
-                      let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
                       return!
-                          startEmbeddedCommand req.Path command.AsShellString
+                          terminalLaunch.StartPromptedAgent provider req.Path prompt
                           |> terminalStart
                   })
           reportActivity = fun level -> async { agent.Post(SchedulerState.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
@@ -1276,17 +1281,15 @@ let internal worktreeApiWithLaunch
                           | CanvasBridge.PendingLaunchStarted ->
                               let provider = CodingToolStatus.readConfiguredProvider path
                               let prompt = CanvasPrompt.continueWorking path request.Filename
-                              let command =
-                                  CodingToolCli.build provider (CodingToolCli.Interactive prompt)
-
                               Log.log
                                   "API"
                                   $"sendCanvasMessage: no reachable session for {request.Filename}; launching one"
 
                               match!
-                                  startEmbeddedCommand
+                                  terminalLaunch.StartPromptedAgent
+                                      provider
                                       request.WorktreePath
-                                      command.AsShellString
+                                      prompt
                                   |> Async.Catch
                               with
                               | Choice1Of2(Ok _) -> return result
@@ -1385,5 +1388,6 @@ let internal worktreeApi
     worktreeApiWithLaunch
         (TerminalLaunch.create
             dependencies.SessionAgent
-            dependencies.EmbeddedTerminal)
+            dependencies.EmbeddedTerminal
+            dependencies.TerminalSessionCleanup)
         dependencies

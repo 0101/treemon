@@ -1,12 +1,10 @@
 module Server.CodingToolCli
 
-open System
-open System.Text
 open Shared
 
 type InvocationMode =
     | Start
-    | Interactive of prompt: string
+    | NewSession of sessionId: string
     | Resume of sessionId: string option
     | NonInteractive of prompt: string
 
@@ -16,18 +14,9 @@ type CliInvocation =
 
     member this.AsShellString = $"{this.Executable} {this.Args}"
 
-// Keep the readable single-quoted form for control-free values. Control-bearing prompts are
-// decoded from inert base64 data so the emitted terminal command remains one line.
 let private escape (s: string) = s.Replace("'", "''")
 
 let private quoted value = $"'{escape value}'"
-
-let private promptArgument (prompt: string) =
-    if prompt |> Seq.exists Char.IsControl then
-        let encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes prompt)
-        $"([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded}')))"
-    else
-        quoted prompt
 
 let private withExtensionDiscovery arguments =
     $"--experimental {arguments}"
@@ -39,10 +28,7 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
     | CodingToolProvider.CopilotCli, Start ->
         { Executable = "copilot"
           Args = "--yolo" }
-    | CodingToolProvider.CopilotCli, Interactive prompt ->
-        { Executable = "copilot"
-          Args = withExtensionDiscovery $"--yolo -i {promptArgument prompt}" }
-    | CodingToolProvider.CopilotCli, Resume (Some id) ->
+    | CodingToolProvider.CopilotCli, (NewSession id | Resume (Some id)) ->
         { Executable = "copilot"
           Args = withExtensionDiscovery $"--yolo --session-id={quoted id}" }
     | CodingToolProvider.CopilotCli, Resume None ->

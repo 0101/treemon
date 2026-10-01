@@ -1,7 +1,6 @@
 module Tests.CommandBuilderTests
 
 open System
-open System.Text
 open NUnit.Framework
 open Shared
 open Server.CodingToolStatus
@@ -21,27 +20,23 @@ type StartCommandTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type BuildInteractiveCommandTests() =
+type BuildNewSessionCommandTests() =
 
     [<Test>]
-    member _.``CopilotCli provider produces copilot -i command``() =
-        let result = (build (Some CodingToolProvider.CopilotCli) (Interactive "use pr skill with https://github.com/org/repo/pull/7")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --experimental --yolo -i 'use pr skill with https://github.com/org/repo/pull/7'"))
+    member _.``New session selects its durable identity without a shell prompt``() =
+        let id = "f68f73bd-b6ef-4598-b64b-346a263244d4"
+        let result = (build (Some CodingToolProvider.CopilotCli) (NewSession id)).AsShellString
+        Assert.That(result, Is.EqualTo($"copilot --experimental --yolo --session-id='{id}'"))
 
     [<Test>]
     member _.``None provider falls back to the default``() =
-        let result = (build None (Interactive "create a pull request")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --experimental --yolo -i 'create a pull request'"))
+        let result = (build None (NewSession "session-id")).AsShellString
+        Assert.That(result, Is.EqualTo("copilot --experimental --yolo --session-id='session-id'"))
 
     [<Test>]
-    member _.``single quotes in prompt are escaped``() =
-        let result = (build (Some CodingToolProvider.CopilotCli) (Interactive "it's broken")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --experimental --yolo -i 'it''s broken'"))
-
-    [<Test>]
-    member _.``prompt with special characters is preserved``() =
-        let result = (build None (Interactive "/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --experimental --yolo -i '/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs'"))
+    member _.``New session quotes its identity at the shell boundary``() =
+        let result = (build None (NewSession "$(calc); '")).AsShellString
+        Assert.That(result, Is.EqualTo("copilot --experimental --yolo --session-id='$(calc); '''"))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -86,13 +81,13 @@ type PermissionFlagInvariantTests() =
     static member InvariantCases : obj array seq =
         seq {
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box Start |]
-            yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Interactive "hello") |]
+            yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (NewSession "session-id") |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Resume (Some "abc")) |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Resume None) |]
         }
 
     [<TestCaseSource("InvariantCases")>]
-    member _.``Interactive and Resume always include the permission-skip flag``
+    member _.``NewSession and Resume always include the permission-skip flag``
             (provider: CodingToolProvider, permFlag: string, mode: InvocationMode) =
         let inv = build (Some provider) mode
         Assert.That(inv.Args, Does.Contain(permFlag))
@@ -104,7 +99,7 @@ type ExtensionDiscoveryFlagInvariantTests() =
 
     static member InvocationCases : obj array seq =
         seq {
-            yield [| box (Interactive "hello") |]
+            yield [| box (NewSession "session-id") |]
             yield [| box (Resume (Some "abc")) |]
             yield [| box (Resume None) |]
             yield [| box (NonInteractive "hello") |]
@@ -176,48 +171,3 @@ type SkillInvocationTests() =
         let viaHelper = skillInvocation (Some CodingToolProvider.CopilotCli) "fix-build" url
         let viaAction = actionPrompt (Some CodingToolProvider.CopilotCli) (FixBuild url)
         Assert.That(viaHelper, Is.EqualTo(viaAction))
-
-// Verification coverage for tm-quicklaunch-nvb (worktree prompt -> investigate launch).
-// These reproduce the exact command-construction chain WorktreeApi.createWorktree performs on
-// auto-launch: skillInvocation wraps the user's prompt, then CodingToolCli.build renders the
-// interactive shell string. Kept as falsifiable, literal-output assertions.
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type InvestigateLaunchCommandTests() =
-
-    [<Test>]
-    member _.``build wraps the investigate invocation as an interactive shell string``() =
-        let wrapped = skillInvocation (Some CodingToolProvider.CopilotCli) "investigate" "clean up auth"
-        let cmd = (build (Some CodingToolProvider.CopilotCli) (Interactive wrapped)).AsShellString
-        Assert.That(cmd, Is.EqualTo("copilot --experimental --yolo -i 'use investigate skill with clean up auth'"))
-
-    [<Test>]
-    member _.``multi-line prompt becomes one control-free command with its UTF-8 payload intact``() =
-        let prompt = "line a\r\nline b\nline c"
-        let wrapped = skillInvocation (Some CodingToolProvider.CopilotCli) "investigate" prompt
-        let cmd = (build (Some CodingToolProvider.CopilotCli) (Interactive wrapped)).AsShellString
-        let prefix =
-            "copilot --experimental --yolo -i ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('"
-        let suffix = "')))"
-
-        Assert.That(cmd, Does.StartWith prefix)
-        Assert.That(cmd, Does.EndWith suffix)
-
-        let payload =
-            cmd.Substring(
-                prefix.Length,
-                cmd.Length - prefix.Length - suffix.Length
-            )
-        let decoded =
-            payload
-            |> Convert.FromBase64String
-            |> Encoding.UTF8.GetString
-
-        Assert.Multiple(fun () ->
-            Assert.That(decoded, Is.EqualTo wrapped)
-            Assert.That(cmd |> Seq.exists Char.IsControl, Is.False)
-            Assert.That(
-                Server.TerminalHostClient.validateTerminalCommand cmd,
-                Is.EqualTo(Ok cmd : Result<string, string>)
-            ))

@@ -179,13 +179,22 @@ active-session indicator. That flag and its terminal-button glow, focus label, a
 native-kill prompt remain tied only to a tracked Windows Terminal window. Existing coding-tool
 status continues to show whether an embedded agent is working.
 
-Interactive agent-launch prompts containing control characters, including newlines, are
-UTF-8/base64 encoded as inert data and decoded by a fixed PowerShell expression. The resulting
-shell command is one control-free line while the coding tool receives the original prompt text
-unchanged.
+Prompted interactive launches reserve their complete initial instruction for a fresh durable
+session ID, then start Copilot with `--session-id=<id>` and no `-i` argument. The registered
+extension receives that exact session's `startup-prompt` over the bridge and submits the original
+text through `session.send`. Prompt text never passes through shell arguments: Windows CMD shims
+do not reliably preserve multiline or quoted argument data.
 
-Every Copilot command submitted through the host includes `--experimental`, so the CLI discovers
-Treemon's user-scoped reporting extension from the active Copilot config directory. A fresh
+Launch succeeds only after the SDK accepts the startup message, not merely when HTTP queueing
+succeeds or the agent finishes its turn. Acceptance has a 30-second deadline after terminal
+startup. Timeout or rejection removes the reserved prompt, closes only the newly created terminal
+through exact-session cleanup, and returns an explicit error; incomplete cleanup is also reported.
+Acceptance and cleanup continue if the requesting browser disconnects. The transport does not
+depend on the CLI's `-i` submission during plugin loading, but still requires Treemon's extension
+to join and submit through the SDK; a missing bridge fails startup.
+
+Every prompted or Resume Copilot command submitted through the host includes `--experimental`, so
+the CLI discovers Treemon's user-scoped reporting extension from the active Copilot config directory. A fresh
 isolated `COPILOT_HOME` therefore uses the same deterministic extension path as a normal launch
 rather than relying on a project extension or a persisted experimental setting. The isolated
 harness accepts the CLI's disposable folder-trust confirmation before evaluating extension
@@ -358,11 +367,16 @@ Every start — plain or command-bearing — carries that exact terminal ID out 
 browser selects the started terminal by identity. Comparing registry snapshots taken before and
 after a start cannot distinguish it from a terminal a background launch created in the same window.
 
-`CodingToolCli` keeps control-free interactive prompts readable as single-quoted PowerShell
-arguments. An interactive prompt containing controls is encoded as UTF-8/base64 and decoded only by
-a fixed expression in the emitted command. `TerminalHostClient` separately validates the raw
-command and mirrors the host's 16,384-byte attachment-message cap against the complete transmitted
-input frame; no command chunking or acknowledgement protocol is added.
+`TerminalLaunch.StartPromptedAgent` is the shared prompted-launch boundary. `SessionBridge`
+reserves its startup prompt before the terminal starts, targets the fresh durable session ID, and
+delivers it before already-queued canvas interactions. The startup transport's HTTP success
+acknowledges SDK message acceptance; ordinary canvas and agent-prompt queueing retain their existing
+semantics. Failed startup never reroutes its instructions to another session.
+
+`CodingToolCli` builds only the identity-bearing shell command for these launches.
+`TerminalHostClient` separately validates the raw command and mirrors the host's 16,384-byte
+attachment-message cap against the complete transmitted input frame. Startup instructions use the
+bridge's bounded JSON HTTP transport instead of terminal input.
 
 ### Terminal host
 
@@ -624,14 +638,15 @@ and dynamically allocated non-production ports. Tests never bind production port
 | `src/Server/SessionActivityStoreSchema.fs` and `SessionActivityStore.fs` | Durable process-instance schema/migration, resume identity, event dedupe keys, and retention |
 | `src/Extension/reporting/extension.mjs` | Acknowledged process presence, passive activity, heartbeat, background lifecycle, and shutdown reports |
 | `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `src/Server/SessionBridge.fs` | Shared exact registration plus capability-guarded graceful shutdown endpoint and bounded typed server control client |
-| `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
+| `src/Server/CodingToolCli.fs` | Provider-specific fresh-session and resume command construction without startup prompt arguments |
 | `src/Server/Program.fs` | Host/API lifecycle and TerminalHost restart-session query wiring |
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/AppTypes.fs` and `src/Client/App.fs` | Reconnect view generation, Elmish messages, guarded load completion, and focus effect |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, activity labels, live SessionIds, Canvas-driven selection without pane focus, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus update transaction, command delivery, control rejection, UTF-8 frame boundaries, crash, security, and cleanup coverage |
 | `src/Tests/SessionIsolationVerifier/` and `scripts/verify-session-isolation.ps1` | Durable five-phase concurrent same-session process-isolation harness and clean-checkout runner |
-| `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
+| `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, complete AgentDoc/SystemView/create-worktree prompts, and post-fork launch ordering |
+| `src/Tests/StartupPromptTests.fs` | Full initial-prompt HTTP transport, exact concurrent-session targeting, SDK acceptance, startup ordering, failure cleanup, and the real Windows CMD argument boundary |
 | `src/Tests/EmbeddedLaunchEndToEndTests.fs`, `src/Tests/TestAgentRecorder`, and `scripts/verify-embedded-launch-routing.ps1` | Reproducible isolated real-host launch matrix, exact argv recorder, raw route evidence, forced-delivery rollback, native HWND preservation, and exact cleanup |
 | `src/Tests/TerminalPaneTests.fs` and `src/Tests/WorkspaceLayoutTests.fs` | Terminal selection, reconnect generation/focus guards, and selected-only iframe replacement |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, activity labels, and provider-specific durable restart snapshot coverage |

@@ -55,6 +55,11 @@ not arbitrated — the guard covers only Treemon's own spawns.
 An AgentDoc interaction with no reachable author is queued without launching, because a new session
 would not be that document's author.
 
+Explicit AgentDoc Start and automatic SystemView startup use the shared prompted-launch handshake
+in `docs/spec/embedded-terminal.md`: the complete initial instruction is reserved for the exact
+fresh session, delivered through its extension, and accepted before already-queued interactions.
+This transport does not assign an AgentDoc owner or change SystemView target resolution.
+
 Queued messages retain the existing cap of 10 and five-minute TTL. On drain, an AgentDoc
 prompt goes only to its recorded owner, so ownership changes made while a message waits are honored.
 A SystemView prompt stays bound to the session resolution picked, if any; when nothing was reachable

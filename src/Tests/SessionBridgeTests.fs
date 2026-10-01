@@ -92,7 +92,11 @@ type ClockScenario = { Name: string; Probe: ClockProbe; Survives: bool }
 let private observeClock =
     function
     | ClockProbe.QueueTtl enqueuedAt ->
-        let queued = { EnqueuedAt = enqueuedAt; Target = SendTarget.Unspecified; Prompt = Prompt.agentPrompt "q" }
+        let queued =
+            { EnqueuedAt = enqueuedAt
+              Target = SendTarget.Unspecified
+              Prompt = Prompt.agentPrompt "q"
+              Delivery = PromptDelivery.Ordinary }
         cleanExpired clock [ queued ] |> List.isEmpty |> not
     | ClockProbe.SessionLiveness registeredAt ->
         isSessionAlive clock { registrationAged 90001 0 (Some "clock") with RegisteredAt = registeredAt }

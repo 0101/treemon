@@ -172,7 +172,10 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   then tells the replacement session to load the canvas skill, claim the focused doc using the JSON
   `filename`, and read `.agents/canvas/<filename>` beneath the JSON `worktreePath` before handling
   user interactions through the doc. The direct action opens the terminal pane and selects the
-  exact new terminal.
+  exact new terminal after SDK acceptance. The full instruction reaches the fresh session through
+  the shared `startup-prompt` bridge handshake, never through a multiline `-i` shell argument; the
+  source worktree and bare filename come from the pane's selected document, not document-authored
+  interaction payloads. See `docs/spec/embedded-terminal.md`.
 - AgentDoc messages route to the selected doc's author session.
 - If the recorded owner is unreachable, the message queues. After a replacement session claims the doc, its next bridge registration can deliver the waiting message; doc identity never changes.
 - SystemView interactions resolve the current effective session at send time. It is not surfaced as

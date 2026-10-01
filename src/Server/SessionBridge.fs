@@ -7,6 +7,8 @@ open System.IO
 open System.Net.Http
 open System.Text
 open System.Text.Json
+open System.Threading
+open System.Threading.Tasks
 open Shared
 open Server.SessionActivity
 
@@ -16,6 +18,7 @@ let private normalizePath = Server.PathUtils.normalizePath
 type PromptKind =
     | Canvas
     | AgentPrompt
+    | StartupPrompt
 
 type Prompt =
     { Kind: PromptKind
@@ -35,6 +38,11 @@ module Prompt =
 
     let agentPrompt text =
         { Kind = PromptKind.AgentPrompt
+          Text = text
+          Filename = None }
+
+    let startup text =
+        { Kind = PromptKind.StartupPrompt
           Text = text
           Filename = None }
 
@@ -96,10 +104,29 @@ type SendResult =
     | Delivered
     | Queued
 
+[<RequireQualifiedAccess>]
+type internal StartupPromptFailure =
+    | TimedOut
+    | Rejected
+
+[<RequireQualifiedAccess>]
+type internal StartupResult<'started> =
+    | Accepted of 'started
+    | LaunchFailed of string
+    | PromptFailed of 'started * StartupPromptFailure
+
+[<RequireQualifiedAccess>]
+type internal PromptDelivery =
+    | Ordinary
+    | Startup of
+        TaskCompletionSource<Result<unit, StartupPromptFailure>> *
+        CancellationToken
+
 type internal QueuedPrompt =
     { EnqueuedAt: DateTime
       Target: SendTarget
-      Prompt: Prompt }
+      Prompt: Prompt
+      Delivery: PromptDelivery }
 
 type private DeliveryAttempt =
     | AttemptDelivered
@@ -191,6 +218,7 @@ let private promptKindName =
     function
     | PromptKind.Canvas -> "canvas"
     | PromptKind.AgentPrompt -> "agent-prompt"
+    | PromptKind.StartupPrompt -> "startup-prompt"
 
 let internal serializePrompt (prompt: Prompt) =
     JsonSerializer.Serialize(
@@ -208,11 +236,12 @@ let private capQueue prompts =
     let excess = List.length prompts - maxQueueSize
     if excess > 0 then prompts |> List.skip excess else prompts
 
-let private enqueue now worktreeKey target prompt =
+let private enqueue now worktreeKey target prompt delivery =
     let queued =
         { EnqueuedAt = now
           Target = target
-          Prompt = prompt }
+          Prompt = prompt
+          Delivery = delivery }
 
     promptQueue.AddOrUpdate(
         worktreeKey,
@@ -260,6 +289,7 @@ let private requeue now (worktreeKey: string) (survivors: QueuedPrompt list) =
         |> ignore
 
 let private postPrompt
+    cancellationToken
     (entry: SessionEntry)
     (prompt: Prompt)
     (worktreeKey: string)
@@ -267,7 +297,9 @@ let private postPrompt
     async {
         try
             use content = new StringContent(serializePrompt prompt, Encoding.UTF8, "application/json")
-            let! response = httpClient.PostAsync(entry.InjectUrl, content) |> Async.AwaitTask
+            let! response =
+                httpClient.PostAsync(entry.InjectUrl, content, cancellationToken)
+                |> Async.AwaitTask
             use _ = response
 
             if response.IsSuccessStatusCode then
@@ -279,7 +311,7 @@ let private postPrompt
                 Log.log "SessionBridge" $"Prompt forward failed: {failure}"
                 return Error()
         with ex ->
-            Log.log "SessionBridge" $"Prompt forward error: {ex.Message}"
+            Log.logException "SessionBridge" "Prompt forward failed" ex
             return Error()
     }
 
@@ -297,17 +329,107 @@ let private drainQueue now (worktreeKey: string) (entry: SessionEntry) =
         if not (List.isEmpty deliver) then
             Log.log "SessionBridge" $"Draining {List.length deliver} queued prompt(s) for {worktreeKey}"
 
-            deliver
-            |> List.map (fun queued ->
+            let startup, ordinary =
+                deliver
+                |> List.partition (fun queued ->
+                    match queued.Delivery with
+                    | PromptDelivery.Startup _ -> true
+                    | PromptDelivery.Ordinary -> false)
+
+            let rec deliverQueued remaining =
                 async {
-                    match! postPrompt entry queued.Prompt worktreeKey with
-                    | Ok() -> ()
-                    | Error error ->
-                        Log.log "SessionBridge" $"Queued {promptKindName queued.Prompt.Kind} prompt delivery failed for {worktreeKey}: {error}"
-                })
-            |> Async.Sequential
-            |> Async.Ignore
-            |> Async.Start
+                    match remaining with
+                    | [] -> ()
+                    | queued :: rest ->
+                        let token =
+                            match queued.Delivery with
+                            | PromptDelivery.Startup(_, token) -> token
+                            | PromptDelivery.Ordinary -> CancellationToken.None
+
+                        let! result = postPrompt token entry queued.Prompt worktreeKey
+
+                        match queued.Delivery with
+                        | PromptDelivery.Startup(completion, _) ->
+                            let acceptance =
+                                if token.IsCancellationRequested then
+                                    Error StartupPromptFailure.TimedOut
+                                else
+                                    result |> Result.mapError (fun () -> StartupPromptFailure.Rejected)
+
+                            completion.TrySetResult acceptance |> ignore
+
+                            match acceptance with
+                            | Ok() -> return! deliverQueued rest
+                            | Error _ -> requeue DateTime.UtcNow worktreeKey rest
+                        | PromptDelivery.Ordinary ->
+                            match result with
+                            | Ok() -> ()
+                            | Error() ->
+                                Log.log "SessionBridge" $"Queued {promptKindName queued.Prompt.Kind} prompt delivery failed"
+
+                            return! deliverQueued rest
+                }
+
+            deliverQueued (startup @ ordinary) |> Async.Start
+
+let private removeStartupPrompt worktreeKey completion =
+    let rec remove () =
+        match promptQueue.TryGetValue worktreeKey with
+        | false, _ -> ()
+        | true, queued ->
+            let remaining =
+                queued
+                |> List.filter (fun prompt ->
+                    match prompt.Delivery with
+                    | PromptDelivery.Startup(pending, _) -> not (Object.ReferenceEquals(pending, completion))
+                    | PromptDelivery.Ordinary -> true)
+
+            let removed =
+                if remaining.IsEmpty then
+                    promptQueue.TryRemove(KeyValuePair(worktreeKey, queued))
+                else
+                    promptQueue.TryUpdate(worktreeKey, remaining, queued)
+
+            if not removed then remove ()
+
+    remove ()
+
+/// Reserve the first prompt for one new durable session before its terminal starts.
+let internal startWithPrompt timeout worktreePath sessionId prompt launch =
+    async {
+        let worktreeKey = normalizePath worktreePath
+        let completion =
+            TaskCompletionSource<Result<unit, StartupPromptFailure>>(
+                TaskCreationOptions.RunContinuationsAsynchronously)
+        use deadline = new CancellationTokenSource()
+
+        enqueue
+            DateTime.UtcNow
+            worktreeKey
+            (SendTarget.DurableSession sessionId)
+            (Prompt.startup prompt)
+            (PromptDelivery.Startup(completion, deadline.Token))
+
+        try
+            match! launch () with
+            | Error error -> return StartupResult.LaunchFailed error
+            | Ok started ->
+                deadline.CancelAfter(timeout: TimeSpan)
+
+                try
+                    let! accepted =
+                        completion.Task.WaitAsync(deadline.Token) |> Async.AwaitTask
+
+                    return
+                        match accepted with
+                        | Ok() -> StartupResult.Accepted started
+                        | Error error -> StartupResult.PromptFailed(started, error)
+                with :? OperationCanceledException when deadline.IsCancellationRequested ->
+                    return StartupResult.PromptFailed(started, StartupPromptFailure.TimedOut)
+        finally
+            deadline.Cancel()
+            removeStartupPrompt worktreeKey completion
+    }
 
 let private registrationClockLock = obj ()
 // Mutable under registrationClockLock so registrations receive a strictly monotonic timestamp.
@@ -620,7 +742,7 @@ let private tryDeliverAt now (request: SendRequest) =
         match target with
         | None -> return AttemptNoLiveSession
         | Some entry ->
-            match! postPrompt entry request.Prompt worktreeKey with
+            match! postPrompt CancellationToken.None entry request.Prompt worktreeKey with
             | Ok () -> return AttemptDelivered
             | Error () ->
                 let queuedTarget =
@@ -629,7 +751,7 @@ let private tryDeliverAt now (request: SendRequest) =
                         SendTarget.ExactProcess entry.ProcessIdentity
                     | target -> target
 
-                enqueue now worktreeKey queuedTarget request.Prompt
+                enqueue now worktreeKey queuedTarget request.Prompt PromptDelivery.Ordinary
                 return AttemptFailed entry
     }
 
@@ -652,7 +774,7 @@ let send (request: SendRequest) =
         | AttemptDelivered -> return SendResult.Delivered
         | AttemptFailed _ -> return SendResult.Queued
         | AttemptNoLiveSession ->
-            enqueue now worktreeKey request.Target request.Prompt
+            enqueue now worktreeKey request.Target request.Prompt PromptDelivery.Ordinary
             return SendResult.Queued
     }
 

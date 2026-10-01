@@ -1930,7 +1930,10 @@ type TerminalFocusTests() =
                                 repo.Worktrees
                                 |> List.map (fun worktree ->
                                     if worktree.Path = first then
-                                        { worktree with CanvasDocs = [ doc ] }
+                                        { worktree with
+                                            CanvasDocs =
+                                                [ { doc with Filename = "not-selected.html" }
+                                                  doc ] }
                                     else
                                         worktree) })
                 Canvas.ActiveCanvasDoc =

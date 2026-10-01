@@ -21,6 +21,7 @@ type private LaunchCall =
     | OpenNativeTerminal of WorktreePath
     | StartEmbeddedTerminal of WorktreePath
     | StartEmbeddedCommand of WorktreePath * string
+    | StartPromptedAgent of CodingToolProvider option * WorktreePath * string
 
 let private assertTerminalCommandAccepted command =
     Assert.That(
@@ -97,7 +98,8 @@ let private createApi
           DeletedWorktreeFile = Path.Combine(root, "deleted-worktrees-test.json")
           TestFixtures = None
           AppVersion = "test"
-          DeployBranch = None }
+          DeployBranch = None },
+    agent
 
 let private assertStart expectedId result =
     match result with
@@ -278,18 +280,11 @@ type WorktreeApiLaunchTests() =
                 CanvasSessionPrompt.forAgentDoc
                     (WorktreePath.value path)
                     "review.html"
-            let launchCommand =
-                (build None (Interactive launchPrompt)).AsShellString
             let agentCommand =
                 (build (Some CodingToolProvider.CopilotCli) Start).AsShellString
-            let actionCommand =
+            let actionPrompt =
                 action
                 |> CodingToolStatus.actionPrompt None
-                |> Interactive
-                |> build None
-                |> _.AsShellString
-            let canvasCommand =
-                (build None (Interactive canvasPrompt)).AsShellString
             let resumeCommand =
                 (build None (Resume None)).AsShellString
 
@@ -335,24 +330,6 @@ type WorktreeApiLaunchTests() =
                                             requestedPath
                                             (EmbeddedTerminalId.value agentId)
                                     )
-                                | value when value = launchCommand ->
-                                    Ok(
-                                        startResult
-                                            requestedPath
-                                            (EmbeddedTerminalId.value launchId)
-                                    )
-                                | value when value = actionCommand ->
-                                    Ok(
-                                        startResult
-                                            requestedPath
-                                            (EmbeddedTerminalId.value actionId)
-                                    )
-                                | value when value = canvasCommand ->
-                                    Ok(
-                                        startResult
-                                            requestedPath
-                                            (EmbeddedTerminalId.value canvasId)
-                                    )
                                 | value when value = resumeCommand ->
                                     Ok(
                                         startResult
@@ -360,9 +337,37 @@ type WorktreeApiLaunchTests() =
                                             (EmbeddedTerminalId.value resumeId)
                                     )
                                 | _ -> Error "Unexpected embedded command"
+                        }
+                  StartPromptedAgent =
+                    fun provider requestedPath prompt ->
+                        async {
+                            calls.Enqueue(
+                                LaunchCall.StartPromptedAgent(provider, requestedPath, prompt))
+
+                            return
+                                match prompt with
+                                | value when value = launchPrompt ->
+                                    Ok(
+                                        startResult
+                                            requestedPath
+                                            (EmbeddedTerminalId.value launchId)
+                                    )
+                                | value when value = actionPrompt ->
+                                    Ok(
+                                        startResult
+                                            requestedPath
+                                            (EmbeddedTerminalId.value actionId)
+                                    )
+                                | value when value = canvasPrompt ->
+                                    Ok(
+                                        startResult
+                                            requestedPath
+                                            (EmbeddedTerminalId.value canvasId)
+                                    )
+                                | _ -> Error "Unexpected startup prompt"
                         } }
 
-            let api = createApi root path None terminalLaunch
+            let api, _ = createApi root path None terminalLaunch
 
             api.openTerminal path |> runAsync
             let plain = api.startEmbeddedTerminal path |> runAsync
@@ -396,14 +401,15 @@ type WorktreeApiLaunchTests() =
                     [| LaunchCall.OpenNativeTerminal path
                        LaunchCall.StartEmbeddedTerminal path
                        LaunchCall.StartEmbeddedCommand(path, agentCommand)
-                       LaunchCall.StartEmbeddedCommand(path, launchCommand)
-                       LaunchCall.StartEmbeddedCommand(path, actionCommand)
-                       LaunchCall.StartEmbeddedCommand(path, canvasCommand)
+                       LaunchCall.StartPromptedAgent(None, path, launchPrompt)
+                       LaunchCall.StartPromptedAgent(None, path, actionPrompt)
+                       LaunchCall.StartPromptedAgent(None, path, canvasPrompt)
                        LaunchCall.StartEmbeddedCommand(path, resumeCommand) |]
                 )
             )
 
-            assertTerminalCommandAccepted canvasCommand)
+            assertTerminalCommandAccepted agentCommand
+            assertTerminalCommandAccepted resumeCommand)
 
     [<Test>]
     member _.``Create refuses a tombstoned sibling before invoking Git``() =
@@ -422,8 +428,9 @@ type WorktreeApiLaunchTests() =
             let unavailable: TerminalLaunch.Operations =
                 { OpenNativeTerminal = fun _ -> async { return Error "Unexpected terminal launch" }
                   StartEmbeddedTerminal = fun _ -> async { return Error "Unexpected terminal launch" }
-                  StartEmbeddedCommand = fun _ _ -> async { return Error "Unexpected terminal launch" } }
-            let api =
+                  StartEmbeddedCommand = fun _ _ -> async { return Error "Unexpected terminal launch" }
+                  StartPromptedAgent = fun _ _ _ -> async { return Error "Unexpected agent launch" } }
+            let api, _ =
                 createApi
                     root
                     (PathUtils.toWorktreePath root)
@@ -444,7 +451,7 @@ type WorktreeApiLaunchTests() =
             | Ok _ -> Assert.Fail("A tombstoned worktree path must not be created"))
 
     [<Test>]
-    member _.``Create with prompt launches after post-fork without awaiting terminal completion``() =
+    member _.``Create with prompt publishes discovery after post-fork without awaiting terminal completion``() =
         withTempDir "treemon-create-embedded-launch" (fun parent ->
             let repoRoot = Path.Combine(parent, "repo")
             initRepoOnMain repoRoot
@@ -473,7 +480,9 @@ type WorktreeApiLaunchTests() =
                   StartEmbeddedTerminal =
                     fun _ -> async { return Error "Unexpected plain embedded launch" }
                   StartEmbeddedCommand =
-                    fun requestedPath command ->
+                    fun _ _ -> async { return Error "Unexpected shell command launch" }
+                  StartPromptedAgent =
+                    fun _ requestedPath prompt ->
                         async {
                             let markerExists =
                                 File.Exists(
@@ -483,7 +492,7 @@ type WorktreeApiLaunchTests() =
                                     )
                                 )
 
-                            started.TrySetResult((requestedPath, command, markerExists))
+                            started.TrySetResult((requestedPath, prompt, markerExists))
                             |> ignore
 
                             do! release.Task |> Async.AwaitTask
@@ -497,7 +506,7 @@ type WorktreeApiLaunchTests() =
                                 )
                         } }
 
-            let api = createApi repoRoot rootPath None terminalLaunch
+            let api, agent = createApi repoRoot rootPath None terminalLaunch
             let prompt =
                 "Implement the next ready task.\r\n"
                 + "Preserve this second line exactly."
@@ -516,7 +525,7 @@ type WorktreeApiLaunchTests() =
                       Skill = Some skill }
                 |> runAsync
 
-            let launchedPath, command, markerExists =
+            let launchedPath, deliveredPrompt, markerExists =
                 started.Task
                     .WaitAsync(TimeSpan.FromSeconds 15.0)
                     .GetAwaiter()
@@ -525,10 +534,14 @@ type WorktreeApiLaunchTests() =
             try
                 let wrapped =
                     CodingToolStatus.skillInvocation None skill prompt
-                let expectedCommand =
-                    (build None (Interactive wrapped)).AsShellString
                 let expectedPath =
                     Path.Combine(parent, $"tm-{branch}")
+                let knownPaths =
+                    agent.PostAndAsyncReply GetState
+                    |> runAsync
+                    |> _.Repos
+                    |> Map.find (PathUtils.toRepoId repoRoot)
+                    |> _.KnownPaths
 
                 Assert.Multiple(fun () ->
                     Assert.That(Result.isOk createResult, Is.True)
@@ -540,8 +553,11 @@ type WorktreeApiLaunchTests() =
                             expectedPath,
                         Is.True
                     )
-                    Assert.That(command, Is.EqualTo(expectedCommand))
-                    assertTerminalCommandAccepted expectedCommand
+                    Assert.That(
+                        knownPaths,
+                        Does.Contain(PathUtils.normalizePath (WorktreePath.value launchedPath)),
+                        "bridge registration must recognize the new worktree before its session starts")
+                    Assert.That(deliveredPrompt, Is.EqualTo(wrapped))
                     Assert.That(completed.Task.IsCompleted, Is.False,
                         "createWorktree must not wait for the fire-and-forget terminal launch"))
             finally
@@ -552,7 +568,7 @@ type WorktreeApiLaunchTests() =
                     .GetResult())
 
     [<Test>]
-    member _.``Queued SystemView fallback starts embedded command without changing its queued result``() =
+    member _.``Queued SystemView fallback passes the generated-view prompt without changing its queued result``() =
         withTempDir "treemon-canvas-embedded-launch" (fun root ->
             let path =
                 root
@@ -567,9 +583,11 @@ type WorktreeApiLaunchTests() =
                   StartEmbeddedTerminal =
                     fun _ -> async { return Error "Unexpected plain embedded launch" }
                   StartEmbeddedCommand =
-                    fun requestedPath command ->
+                    fun _ _ -> async { return Error "Unexpected shell command launch" }
+                  StartPromptedAgent =
+                    fun _ requestedPath prompt ->
                         async {
-                            calls.Enqueue((requestedPath, command))
+                            calls.Enqueue((requestedPath, prompt))
 
                             return
                                 Ok(
@@ -579,7 +597,7 @@ type WorktreeApiLaunchTests() =
                                 )
                         } }
 
-            let api = createApi root path None terminalLaunch
+            let api, _ = createApi root path None terminalLaunch
             let filename = "diff.html"
             let result =
                 api.sendCanvasMessage
@@ -587,19 +605,14 @@ type WorktreeApiLaunchTests() =
                       Filename = filename
                       Payload = """{"action":"canvas-selection"}""" }
                 |> runAsync
-            let expectedCommand =
+            let expectedPrompt =
                 CanvasPrompt.continueWorking
                     (WorktreePath.value path)
                     filename
-                |> Interactive
-                |> build None
-                |> _.AsShellString
 
             Assert.Multiple(fun () ->
                 Assert.That(result, Is.EqualTo CanvasMessageResult.Queued)
                 Assert.That(
                     calls.ToArray(),
-                    Is.EqualTo([| (path, expectedCommand) |])
-                )
-
-                assertTerminalCommandAccepted expectedCommand))
+                    Is.EqualTo([| (path, expectedPrompt) |])
+                )))

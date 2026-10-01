@@ -574,14 +574,16 @@ let main args =
             let agent = SchedulerState.createAgent ()
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
-            let terminalLaunch =
-                TerminalLaunch.create
-                    sessionAgent
-                    embeddedTerminal.Value
             CanvasDocOwnership.load ()
 
             match fixtures with
             | Some path ->
+                let terminalLaunch =
+                    TerminalLaunch.create
+                        sessionAgent
+                        embeddedTerminal.Value
+                        WorktreeCleanup.noSessionClose
+
                 match WorktreeApi.loadFixtures path with
                 | Ok fixtures ->
                     populateAgentFromFixtures agent fixtures
@@ -623,6 +625,10 @@ let main args =
                         agent
                         rootPaths
                 let store = activity.Components.Store
+                let terminalSessionCleanup =
+                    TerminalSessionCleanup.terminalSessionCleanup activity.Components.Service
+                let terminalLaunch =
+                    TerminalLaunch.create sessionAgent embeddedTerminal.Value terminalSessionCleanup
 
                 let mergedStore =
                     loadRuntimeStore
@@ -637,8 +643,8 @@ let main args =
                         AutoSyncStore.create
 
                 let schedulerServices: RefreshScheduler.SchedulerServices =
-                    { StartEmbeddedCommand =
-                        terminalLaunch.StartEmbeddedCommand
+                    { StartPromptedAgent =
+                        terminalLaunch.StartPromptedAgent
                       ActivityStore = Some store
                       MergedPrStore = mergedStore
                       AutoSyncStore = autoSyncStore }
@@ -665,9 +671,7 @@ let main args =
                           CardLog = cardLog
                           SessionAgent = sessionAgent
                           EmbeddedTerminal = embeddedTerminal.Value
-                          TerminalSessionCleanup =
-                            TerminalSessionCleanup.terminalSessionCleanup
-                                activity.Components.Service
+                          TerminalSessionCleanup = terminalSessionCleanup
                           ActivityStore = Some store
                           SnapshotStore = Some activity.SnapshotStore
                           AutoSyncStore = Some autoSyncStore

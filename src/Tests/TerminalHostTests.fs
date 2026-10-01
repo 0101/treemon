@@ -2174,47 +2174,31 @@ type TerminalHostProxyTests() =
             plane.Stop() |> Async.RunSynchronously
 
     [<Test>]
-    member _.``multiline launch prompts cross the real attachment as one control-free frame``() =
-        let cases =
-            [ ("AgentDoc",
-               CanvasSessionPrompt.forAgentDoc
-                   "Q:/code/demo"
-                   "report.html")
-              ("SystemView",
-               Shared.CanvasPrompt.continueWorking
-                   "Q:/code/demo"
-                   "diff.html")
-              ("create-worktree",
-               Server.CodingToolStatus.skillInvocation
-                   None
-                   "bd-execute"
-                   "Implement the first line.\r\nPreserve the second line.") ]
+    member _.``fresh prompted session command crosses the real attachment without carrying prompt text``() =
+        let sessionId = "9f6d9d5b-d410-486d-b7d3-b2b7f369d23b"
+        withCommandProxy (fun upstream plane ->
+            let command =
+                Server.CodingToolCli.build
+                    None
+                    (Server.CodingToolCli.NewSession sessionId)
+                |> _.AsShellString
 
-        cases
-        |> List.iter (fun (name, prompt) ->
-            withCommandProxy (fun upstream plane ->
-                let command =
-                    Server.CodingToolCli.build
-                        None
-                        (Server.CodingToolCli.Interactive prompt)
-                    |> _.AsShellString
+            let result = submitTerminalCommand plane command
+            assertOk result "Fresh session command submission failed"
+            let frame = requireTerminalInputFrame upstream
 
-                let result = submitTerminalCommand plane command
-                assertOk result $"{name} command submission failed"
-                let frame = requireTerminalInputFrame upstream
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    command |> Seq.exists Char.IsControl,
+                    Is.False,
+                    "Fresh session command must be one control-free line"
+                )
 
-                Assert.Multiple(fun () ->
-                    Assert.That(
-                        command |> Seq.exists Char.IsControl,
-                        Is.False,
-                        $"{name} launch command must be one control-free line"
-                    )
-
-                    Assert.That(
-                        frame,
-                        Is.EqualTo(Encoding.UTF8.GetBytes($"0{command}\r")),
-                        $"{name} prompt command changed while crossing the attachment"
-                    ))))
+                Assert.That(
+                    frame,
+                    Is.EqualTo(Encoding.UTF8.GetBytes($"0{command}\r")),
+                    "Fresh session command changed while crossing the attachment"
+                )))
 
     [<Test>]
     member _.``command sender delivers a frame exactly at the attachment byte limit``() =
@@ -3011,16 +2995,7 @@ type private FakeCleanupBoundary(
 [<Platform("Win")>]
 type TerminalHostJobObjectTests() =
     let powershell = executableOnPath "pwsh.exe"
-    let testOutput = DirectoryInfo AppContext.BaseDirectory
-    let consoleProbe =
-        Path.Combine(
-            __SOURCE_DIRECTORY__,
-            "TestAgentRecorder",
-            "bin",
-            testOutput.Parent.Name,
-            testOutput.Name,
-            "copilot.exe"
-        )
+    let consoleProbe = copilotRecorderExecutable
 
     let identity processId startTicks: JobProcess.ProcessIdentity =
         { ProcessId = processId
