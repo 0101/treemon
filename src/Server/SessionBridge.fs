@@ -112,7 +112,7 @@ type internal StartupResult<'started> =
 
 [<RequireQualifiedAccess>]
 type internal PromptDelivery =
-    | Ordinary
+    | Ordinary of queueCancellation: CancellationToken
     | Startup of
         TaskCompletionSource<Result<unit, StartupPromptFailure>> *
         CancellationToken
@@ -225,7 +225,8 @@ let internal cleanExpired (now: DateTime) (prompts: QueuedPrompt list) =
     prompts
     |> List.filter (fun prompt ->
         match prompt.Delivery with
-        | PromptDelivery.Ordinary -> prompt.EnqueuedAt > cutoff
+        | PromptDelivery.Ordinary token ->
+            prompt.EnqueuedAt > cutoff && not token.IsCancellationRequested
         | PromptDelivery.Startup(_, token) -> not token.IsCancellationRequested)
 
 let internal formatPostFailure statusCode (body: string) =
@@ -237,7 +238,7 @@ let private capQueue prompts =
         |> List.partition (fun prompt ->
             match prompt.Delivery with
             | PromptDelivery.Startup _ -> true
-            | PromptDelivery.Ordinary -> false)
+            | PromptDelivery.Ordinary _ -> false)
 
     let excess = ordinary.Length - maxQueueSize
     startup @ (if excess > 0 then ordinary |> List.skip excess else ordinary)
@@ -287,6 +288,8 @@ let private deliverableTo worktreeKey (entry: SessionEntry option) (queued: Queu
     | _ -> targetMatches entry queued.Target
 
 let private requeue now (worktreeKey: string) (survivors: QueuedPrompt list) =
+    let survivors = cleanExpired now survivors
+
     if not (List.isEmpty survivors) then
         promptQueue.AddOrUpdate(
             worktreeKey,
@@ -339,11 +342,13 @@ let private drainQueue now (worktreeKey: string) (entry: SessionEntry) =
                 async {
                     match remaining with
                     | [] -> ()
+                    | { Delivery = PromptDelivery.Ordinary token } :: rest when token.IsCancellationRequested ->
+                        return! deliverQueued rest
                     | queued :: rest ->
                         let token =
                             match queued.Delivery with
                             | PromptDelivery.Startup(_, token) -> token
-                            | PromptDelivery.Ordinary -> CancellationToken.None
+                            | PromptDelivery.Ordinary _ -> CancellationToken.None
 
                         let! result = postPrompt token entry queued.Prompt worktreeKey
 
@@ -355,12 +360,14 @@ let private drainQueue now (worktreeKey: string) (entry: SessionEntry) =
                                 else
                                     result |> Result.mapError (fun () -> StartupPromptFailure.Rejected)
 
-                            completion.TrySetResult acceptance |> ignore
-
                             match acceptance with
-                            | Ok() -> return! deliverQueued rest
-                            | Error _ -> requeue DateTime.UtcNow worktreeKey rest
-                        | PromptDelivery.Ordinary ->
+                            | Ok() ->
+                                completion.TrySetResult acceptance |> ignore
+                                return! deliverQueued rest
+                            | Error _ ->
+                                requeue DateTime.UtcNow worktreeKey rest
+                                completion.TrySetResult acceptance |> ignore
+                        | PromptDelivery.Ordinary _ ->
                             match result with
                             | Ok() -> ()
                             | Error() ->
@@ -381,7 +388,7 @@ let private removeStartupPrompt worktreeKey completion =
                 |> List.filter (fun prompt ->
                     match prompt.Delivery with
                     | PromptDelivery.Startup(pending, _) -> not (Object.ReferenceEquals(pending, completion))
-                    | PromptDelivery.Ordinary -> true)
+                    | PromptDelivery.Ordinary _ -> true)
 
             let removed =
                 if remaining.IsEmpty then
@@ -731,7 +738,7 @@ let internal selectLiveTarget now promptKind target entries =
 
 /// Attempt immediate delivery to the selected live session. A failed POST is queued for that
 /// session, while an absent live target remains distinct so auto-sync can apply its fallback policy.
-let private tryDeliverAt now (request: SendRequest) =
+let private tryDeliverAt now queueCancellationToken (request: SendRequest) =
     async {
         let worktreeKey = normalizePath request.WorktreePath
         let target =
@@ -750,7 +757,7 @@ let private tryDeliverAt now (request: SendRequest) =
                         SendTarget.ExactProcess entry.ProcessIdentity
                     | target -> target
 
-                enqueue now worktreeKey queuedTarget request.Prompt PromptDelivery.Ordinary
+                enqueue now worktreeKey queuedTarget request.Prompt (PromptDelivery.Ordinary queueCancellationToken)
                 return AttemptFailed entry
     }
 
@@ -758,22 +765,22 @@ let tryDeliver (request: SendRequest) =
     async {
         let now = DateTime.UtcNow
 
-        match! tryDeliverAt now request with
+        match! tryDeliverAt now CancellationToken.None request with
         | AttemptDelivered -> return DeliveryResult.Delivered
         | AttemptNoLiveSession -> return DeliveryResult.NoLiveSession
         | AttemptFailed _ -> return DeliveryResult.DeliveryFailed
     }
 
-let send (request: SendRequest) =
+let send (queueCancellationToken: CancellationToken) (request: SendRequest) =
     async {
         let now = DateTime.UtcNow
         let worktreeKey = normalizePath request.WorktreePath
 
-        match! tryDeliverAt now request with
+        match! tryDeliverAt now queueCancellationToken request with
         | AttemptDelivered -> return SendResult.Delivered
         | AttemptFailed _ -> return SendResult.Queued
         | AttemptNoLiveSession ->
-            enqueue now worktreeKey request.Target request.Prompt PromptDelivery.Ordinary
+            enqueue now worktreeKey request.Target request.Prompt (PromptDelivery.Ordinary queueCancellationToken)
             return SendResult.Queued
     }
 

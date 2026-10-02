@@ -4,12 +4,14 @@ open System
 open System.Collections.Concurrent
 open System.IO
 open System.Runtime.InteropServices
+open System.Threading
 open System.Threading.Tasks
 open NUnit.Framework
 open Shared
 open Server
 open Server.CodingToolCli
 open Server.SchedulerState
+open Tests.BridgeFixture
 open Tests.GitTestHelpers
 open Tests.TestUtils
 
@@ -673,3 +675,90 @@ type WorktreeApiLaunchTests() =
                 Assert.That(first, Is.EqualTo(CanvasMessageResult.SessionStartFailed expected))
                 Assert.That(retry, Is.EqualTo(CanvasMessageResult.SessionStartFailed expected))
                 Assert.That(calls.ToArray(), Is.EqualTo([| path; path |]))))
+
+    [<TestCase(false, false)>]
+    [<TestCase(true, false)>]
+    [<TestCase(false, true)>]
+    [<TestCase(true, true)>]
+    [<Category("BridgeTransport")>]
+    member _.``retry after failed SystemView startup delivers its interaction once and preserves other requests``
+        (startThrows: bool, callerDisconnects: bool) =
+        withTempDir "treemon-canvas-startup-retry" (fun root ->
+            withBridges 1 (fun bridges ->
+                let listener, url = List.exactlyOne bridges
+                let path = PathUtils.toWorktreePath root
+                let calls = ConcurrentQueue<WorktreePath>()
+                let launchEntered = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+                let releaseLaunch = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+                let failure = PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected
+                let terminalLaunch =
+                    promptedLaunchOnly (fun _ requestedPath _ ->
+                        async {
+                            calls.Enqueue requestedPath
+
+                            if calls.Count = 1 then
+                                launchEntered.TrySetResult() |> ignore
+                                do! releaseLaunch.Task |> Async.AwaitTask
+
+                                if startThrows then
+                                    return raise (InvalidOperationException "Startup failed")
+                                else
+                                    return Error failure
+                            else
+                                let sessionId = Guid.NewGuid().ToString()
+                                let identity = collisionResistantProcessIdentityForSessionId sessionId
+                                registerExactSession 'R' identity root url (Some sessionId) None |> ignore
+                                return Ok(startResult requestedPath "77777777777777777777777777777777")
+                        })
+                let api, _ = createApi root path None terminalLaunch
+                let request =
+                    { WorktreePath = path
+                      Filename = "diff.html"
+                      Payload = """{"action":"canvas-selection","request":"Explain the change"}""" }
+                let queue payload =
+                    SessionBridge.send CancellationToken.None
+                        { WorktreePath = root
+                          Target = SessionBridge.SendTarget.Unspecified
+                          Prompt = SessionBridge.Prompt.canvasFor request.Filename payload }
+                    |> runAsync
+                    |> ignore
+                let before = """{"action":"canvas-selection","request":"Keep the earlier request"}"""
+                let after = """{"action":"canvas-selection","request":"Keep the later request"}"""
+
+                queue before
+                use caller = new CancellationTokenSource()
+                let failed =
+                    Async.StartAsTask(api.sendCanvasMessage request, cancellationToken = caller.Token)
+
+                try
+                    launchEntered.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+                    if callerDisconnects then caller.Cancel()
+                    releaseLaunch.TrySetResult() |> ignore
+
+                    let expectedFailure =
+                        if startThrows then PromptedLaunchError.Unexpected else failure
+                    Assert.That(
+                        failed.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult(),
+                        Is.EqualTo(CanvasMessageResult.SessionStartFailed expectedFailure))
+
+                    queue after
+                    let retry = api.sendCanvasMessage request |> Async.StartAsTask
+                    let delivered =
+                        [ 1 .. 3 ]
+                        |> List.map (fun _ ->
+                            let context =
+                                listener.GetContextAsync().WaitAsync(TimeSpan.FromSeconds 5.0)
+                                    .GetAwaiter().GetResult()
+                            let _, prompt = readPrompt context
+                            context.Response.StatusCode <- 200
+                            context.Response.Close()
+                            prompt)
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(
+                            retry.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult(),
+                            Is.EqualTo CanvasMessageResult.Queued)
+                        Assert.That(delivered |> List.toArray, Is.EqualTo([| before; after; request.Payload |]))
+                        Assert.That(calls.ToArray(), Is.EqualTo([| path; path |])))
+                finally
+                    releaseLaunch.TrySetResult() |> ignore))

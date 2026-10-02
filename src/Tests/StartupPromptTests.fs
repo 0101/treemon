@@ -23,12 +23,6 @@ let private register path sessionId url =
 
     registerExactSession 'S' identity path url sessionId None |> ignore
 
-let private readPrompt (context: HttpListenerContext) =
-    use reader = new StreamReader(context.Request.InputStream)
-    use document = JsonDocument.Parse(reader.ReadToEnd())
-    document.RootElement.GetProperty("kind").GetString(),
-    document.RootElement.GetProperty("prompt").GetString()
-
 let private respond status (context: HttpListenerContext) =
     context.Response.StatusCode <- status
     context.Response.Close()
@@ -189,7 +183,7 @@ type StartupPromptTests() =
             let initial = CanvasPrompt.continueWorking (WorktreePath.value path) "diff.html"
             let interaction = """{"action":"canvas-selection","request":"Explain the change"}"""
 
-            SessionBridge.send
+            SessionBridge.send System.Threading.CancellationToken.None
                 { WorktreePath = WorktreePath.value path
                   Target = SessionBridge.SendTarget.Unspecified
                   Prompt = SessionBridge.Prompt.canvasFor "diff.html" interaction }
@@ -215,6 +209,61 @@ type StartupPromptTests() =
             Assert.That(readPrompt second, Is.EqualTo(("canvas", interaction)))
             respond 200 second
             await launched |> assertStarted (started path))
+
+    [<Test>]
+    member _.``cancellation during startup does not requeue the failed interaction``() =
+        withBridges 1 (fun bridges ->
+            let listener, url = List.exactlyOne bridges
+            let path = WorktreePath(uniquePath "cancel-in-flight-startup")
+            let sessionId = Guid.NewGuid().ToString()
+            use queueCancellation = new System.Threading.CancellationTokenSource()
+            let failedInteraction = """{"action":"canvas-selection","request":"Retry this request"}"""
+            let preservedInteraction = """{"action":"canvas-selection","request":"Keep this request"}"""
+            let queue token payload =
+                SessionBridge.send token
+                    { WorktreePath = WorktreePath.value path
+                      Target = SessionBridge.SendTarget.Unspecified
+                      Prompt = SessionBridge.Prompt.canvasFor "diff.html" payload }
+                |> Async.RunSynchronously
+                |> ignore
+
+            queue queueCancellation.Token failedInteraction
+            queue System.Threading.CancellationToken.None preservedInteraction
+            let incoming = listener.GetContextAsync()
+            let launched =
+                start
+                    (TimeSpan.FromSeconds 5.0)
+                    (fun _ _ ->
+                        register (WorktreePath.value path) (Some sessionId) url
+                        async.Return(Ok(started path)))
+                    (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                    sessionId
+                    path
+                    "Initial task"
+
+            let startup = await incoming
+            Assert.That(readPrompt startup, Is.EqualTo(("startup-prompt", "Initial task")))
+            queueCancellation.Cancel()
+            respond 503 startup
+            Assert.That(
+                await launched,
+                Is.EqualTo(
+                    Error(PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected)
+                    : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
+
+            queue System.Threading.CancellationToken.None failedInteraction
+            register (WorktreePath.value path) (Some(Guid.NewGuid().ToString())) url
+            let delivered =
+                [ 1 .. 2 ]
+                |> List.map (fun _ ->
+                    let context = await (listener.GetContextAsync())
+                    let prompt = readPrompt context
+                    respond 200 context
+                    prompt)
+
+            Assert.That(
+                delivered |> List.toArray,
+                Is.EqualTo([| ("canvas", preservedInteraction); ("canvas", failedInteraction) |])))
 
     [<TestCase(10)>]
     [<TestCase(12)>]
@@ -253,7 +302,7 @@ type StartupPromptTests() =
 
                 interactions
                 |> List.iter (fun interaction ->
-                    SessionBridge.send
+                    SessionBridge.send System.Threading.CancellationToken.None
                         { WorktreePath = WorktreePath.value path
                           Target = SessionBridge.SendTarget.Unspecified
                           Prompt = SessionBridge.Prompt.canvasFor "diff.html" interaction }

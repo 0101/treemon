@@ -49,8 +49,10 @@ the terminal pane; registry polling makes it attachable later. A started launch 
 spawn for the same worktree for 30 seconds; the suppression **expires on time** rather than waiting
 to be cleared by a registration, so a spawn that never registers cannot block later interactions,
 and an unrelated session's periodic heartbeat cannot be mistaken for the launch completing. A
-spawn that fails releases the suppression immediately. Sessions the user starts concurrently are
-not arbitrated — the guard covers only Treemon's own spawns.
+spawn that fails cancels only its triggering queued interaction before releasing suppression, so
+retrying cannot deliver both the failed request and its retry. Unrelated queued interactions are
+retained. Startup and this rollback finish even if the requesting browser disconnects. Sessions the
+user starts concurrently are not arbitrated — the guard covers only Treemon's own spawns.
 
 An AgentDoc interaction with no reachable author is queued without launching, because a new session
 would not be that document's author.
@@ -93,7 +95,7 @@ worktree and durable-SessionId lookup, the transport queue, limits, and liveness
 and agent prompts. Canvas-facing lookup collapses duplicate physical registrations for one durable
 SessionId to its freshest live registration; exact agent delivery keeps the physical identity.
 `CanvasBridge` layers target resolution and worktree launch policy over that generic transport, and
-delegates a required spawn to the shared embedded command-launch boundary.
+delegates a required spawn to the shared prompted-launch boundary.
 
 `CanvasBridge.resolveTarget` branches on `CanvasDocKinds.classify`: an AgentDoc reads
 `CanvasDocOwnership`, while a SystemView takes the durable session IDs from the worktree's
@@ -102,7 +104,7 @@ canvas-collapsed live registrations, orders their exact rows from
 freshest live registration when no reachable session has an activity row.
 The same captured live-registration list and resolution populate `BridgeLiveness` for canvas tabs;
 the target is absent when no live registration can receive a SystemView interaction.
-`CanvasBridge.sendMessage` returns the resolved target alongside the outcome so the caller can
+`CanvasBridge.sendMessage` returns a routing outcome so the caller can
 distinguish "queued because nothing is reachable" from "queued behind a known session".
 
 The launch guard is a map from normalized worktree to the time a spawn started, suppressing another

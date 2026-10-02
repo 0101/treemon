@@ -3,6 +3,7 @@ module Server.WorktreeApi
 open System
 open System.IO
 open System.Text.RegularExpressions
+open System.Threading
 open Shared
 open Shared.EventUtils
 open Shared.PathUtils
@@ -1268,55 +1269,63 @@ let internal worktreeApiWithLaunch
                   request.WorktreePath
                   "sendCanvasMessage"
                   (fun path -> CanvasMessageResult.Error $"Unknown worktree path: {WorktreePath.value path}")
-                  (fun () -> async {
-                      let path = WorktreePath.value request.WorktreePath
-                      let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+                  (fun () ->
+                      let send = async {
+                          use queueCancellation = new CancellationTokenSource()
+                          let path = WorktreePath.value request.WorktreePath
+                          let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
-                      let! outcome =
-                          CanvasBridge.sendMessage
-                              (state.SessionInstances |> Map.values)
-                              request
+                          let! outcome =
+                              CanvasBridge.sendMessage
+                                  queueCancellation.Token
+                                  (state.SessionInstances |> Map.values)
+                                  request
 
-                      match outcome with
-                      | CanvasBridge.Routed result -> return result
-                      | CanvasBridge.QueuedNeedingSession result ->
-                          match! CanvasBridge.beginPendingLaunch path with
-                          | CanvasBridge.PendingLaunchJoined ->
-                              Log.log
-                                  "API"
-                                  $"sendCanvasMessage: a launch is already starting for {request.Filename}"
-
-                              return result
-                          | CanvasBridge.PendingLaunchStarted ->
-                              let provider = CodingToolStatus.readConfiguredProvider path
-                              let prompt = CanvasPrompt.continueWorking path request.Filename
-                              Log.log
-                                  "API"
-                                  $"sendCanvasMessage: no reachable session for {request.Filename}; launching one"
-
-                              match!
-                                  terminalLaunch.StartPromptedAgent
-                                      provider
-                                      request.WorktreePath
-                                      prompt
-                                  |> Async.Catch
-                              with
-                              | Choice1Of2(Ok _) -> return result
-                              | Choice1Of2(Error err) ->
-                                  do! CanvasBridge.cancelPendingLaunch path
-
-                                  return
-                                      CanvasMessageResult.SessionStartFailed err
-                              | Choice2Of2 ex ->
-                                  do! CanvasBridge.cancelPendingLaunch path
-                                  Log.logException
+                          match outcome with
+                          | CanvasBridge.Routed result -> return result
+                          | CanvasBridge.QueuedNeedingSession result ->
+                              match! CanvasBridge.beginPendingLaunch path with
+                              | CanvasBridge.PendingLaunchJoined ->
+                                  Log.log
                                       "API"
-                                      $"Canvas session launch failed for worktree={JsonConvert.SerializeObject path}"
-                                      ex
+                                      $"sendCanvasMessage: a launch is already starting for {request.Filename}"
 
-                                  return
-                                      CanvasMessageResult.SessionStartFailed PromptedLaunchError.Unexpected
-                  })
+                                  return result
+                              | CanvasBridge.PendingLaunchStarted ->
+                                  let provider = CodingToolStatus.readConfiguredProvider path
+                                  let prompt = CanvasPrompt.continueWorking path request.Filename
+                                  Log.log
+                                      "API"
+                                      $"sendCanvasMessage: no reachable session for {request.Filename}; launching one"
+
+                                  let! attempted =
+                                      terminalLaunch.StartPromptedAgent
+                                          provider
+                                          request.WorktreePath
+                                          prompt
+                                      |> Async.Catch
+
+                                  let launchResult =
+                                      match attempted with
+                                      | Choice1Of2 launched -> launched
+                                      | Choice2Of2 ex ->
+                                          Log.logException
+                                              "API"
+                                              $"Canvas session launch failed for worktree={JsonConvert.SerializeObject path}"
+                                              ex
+                                          Error PromptedLaunchError.Unexpected
+
+                                  match launchResult with
+                                  | Ok _ -> return result
+                                  | Error error ->
+                                      queueCancellation.Cancel()
+                                      do! CanvasBridge.cancelPendingLaunch path
+                                      return CanvasMessageResult.SessionStartFailed error
+                      }
+
+                      // Finish startup and queue rollback even if the requesting browser disconnects.
+                      Async.StartAsTask(send, cancellationToken = CancellationToken.None)
+                      |> Async.AwaitTask)
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req)

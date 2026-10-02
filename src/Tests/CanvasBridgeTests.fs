@@ -46,7 +46,7 @@ let private canvasWire payload =
 // directly against `resolveTarget` in SystemViewInteractionRoutingTests.
 let private sendMessage request =
     async {
-        match! Server.CanvasBridge.sendMessage [] request with
+        match! Server.CanvasBridge.sendMessage CancellationToken.None [] request with
         | Server.CanvasBridge.Routed result
         | Server.CanvasBridge.QueuedNeedingSession result -> return result
     }

@@ -62,7 +62,7 @@ let private deliverAgentPrompt path target text =
     tryDeliver { WorktreePath = path; Target = target; Prompt = Prompt.agentPrompt text } |> Async.StartAsTask
 
 let private sendPrompt path prompt =
-    send { WorktreePath = path; Target = SendTarget.Unspecified; Prompt = prompt }
+    send CancellationToken.None { WorktreePath = path; Target = SendTarget.Unspecified; Prompt = prompt }
     |> Async.RunSynchronously
 
 [<RequireQualifiedAccess>]
@@ -80,7 +80,7 @@ let private observeClock =
             { EnqueuedAt = enqueuedAt
               Target = SendTarget.Unspecified
               Prompt = Prompt.agentPrompt "q"
-              Delivery = PromptDelivery.Ordinary }
+              Delivery = PromptDelivery.Ordinary CancellationToken.None }
         cleanExpired clock [ queued ] |> List.isEmpty |> not
     | ClockProbe.SessionLiveness registeredAt ->
         isSessionAlive clock { registrationAged 90001 0 (Some "clock") with RegisteredAt = registeredAt }
@@ -532,6 +532,18 @@ type PromptTransportTests() =
         prompts |> List.iter (sendPrompt path >> ignore)
 
         Assert.That(drainPendingCanvas path, Is.EqualTo(prompts |> List.skip 2))
+
+    [<Test>]
+    member _.``cancelling one queued request preserves another with identical content``() =
+        let path = uniquePath "cancel-exact-queued-prompt"
+        let prompt = Prompt.canvas canvasPayload
+        let request = { WorktreePath = path; Target = SendTarget.Unspecified; Prompt = prompt }
+        use cancellation = new CancellationTokenSource()
+        send cancellation.Token request |> Async.RunSynchronously |> ignore
+        send CancellationToken.None request |> Async.RunSynchronously |> ignore
+        cancellation.Cancel()
+
+        Assert.That(drainPendingCanvas path, Is.EqualTo([ prompt ]))
 
     [<Test>]
     member _.``Bridge failure formatting excludes the response body``() =

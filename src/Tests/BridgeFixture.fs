@@ -1,6 +1,8 @@
 module Tests.BridgeFixture
 
+open System.IO
 open System.Net
+open System.Text.Json
 open Tests.TestUtils
 
 let withBridgesAt ports action =
@@ -21,3 +23,13 @@ let withBridgesAt ports action =
 
 let withBridges count action =
     withBridgesAt (getFreeTcpPorts count) action
+
+let readPrompt (context: HttpListenerContext) =
+    use reader = new StreamReader(context.Request.InputStream)
+    use document = JsonDocument.Parse(reader.ReadToEnd())
+    let readString (name: string) =
+        document.RootElement.GetProperty(name).GetString()
+        |> Option.ofObj
+        |> Option.defaultWith (fun () -> invalidOp $"Bridge {name} is missing")
+
+    readString "kind", readString "prompt"
