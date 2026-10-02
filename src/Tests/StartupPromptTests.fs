@@ -158,7 +158,6 @@ type StartupPromptTests() =
                 Is.True)
 
             let secondRequest = secondListener.GetContextAsync()
-            register (WorktreePath.value path) None secondUrl
             register (WorktreePath.value path) (Some "unrelated-session") firstUrl
             register (WorktreePath.value path) (Some secondId) secondUrl
             let secondContext = await secondRequest
@@ -185,8 +184,8 @@ type StartupPromptTests() =
 
             SessionBridge.send System.Threading.CancellationToken.None
                 { WorktreePath = WorktreePath.value path
-                  Target = SessionBridge.SendTarget.Unspecified
-                  Prompt = SessionBridge.Prompt.canvasFor "diff.html" interaction }
+                  Target = SessionBridge.SendTarget.DurableSession(SessionId sessionId)
+                  Prompt = SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" interaction }
             |> Async.RunSynchronously
             |> ignore
 
@@ -222,8 +221,8 @@ type StartupPromptTests() =
             let queue token payload =
                 SessionBridge.send token
                     { WorktreePath = WorktreePath.value path
-                      Target = SessionBridge.SendTarget.Unspecified
-                      Prompt = SessionBridge.Prompt.canvasFor "diff.html" payload }
+                      Target = SessionBridge.SendTarget.DurableSession(SessionId sessionId)
+                      Prompt = SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" payload }
                 |> Async.RunSynchronously
                 |> ignore
 
@@ -252,7 +251,7 @@ type StartupPromptTests() =
                     : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
 
             queue System.Threading.CancellationToken.None failedInteraction
-            register (WorktreePath.value path) (Some(Guid.NewGuid().ToString())) url
+            register (WorktreePath.value path) (Some sessionId) url
             let delivered =
                 [ 1 .. 2 ]
                 |> List.map (fun _ ->
@@ -304,8 +303,8 @@ type StartupPromptTests() =
                 |> List.iter (fun interaction ->
                     SessionBridge.send System.Threading.CancellationToken.None
                         { WorktreePath = WorktreePath.value path
-                          Target = SessionBridge.SendTarget.Unspecified
-                          Prompt = SessionBridge.Prompt.canvasFor "diff.html" interaction }
+                          Target = SessionBridge.SendTarget.DurableSession(SessionId sessionId)
+                          Prompt = SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" interaction }
                     |> Async.RunSynchronously
                     |> ignore)
 

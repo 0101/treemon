@@ -30,7 +30,7 @@ type CanvasRegisterRequest =
       shutdownUrl: string
       shutdownCapability: string
       sessionId: string
-      parentProcessId: int
+      parentProcessId: System.Nullable<int>
       terminalSessionId: string }
 
 [<CLIMutable>]
@@ -47,11 +47,8 @@ type AttributeOutcome =
     | Attributed                  // ownership recorded + persisted
     | NotAttributable             // a SystemView has no author — routing is resolved, not stored
     | UnknownWorktree             // well-formed but unmonitored worktree — nothing recorded
+    | PersistenceFailed of CanvasDocOwnership.PersistenceFailure
     | Invalid of reason: string   // missing/blank field — nothing recorded
-
-/// Ownership IDs later feed Resume, so every boundary uses the same canonical validation.
-let internal isValidSessionId (sessionId: string) =
-    SessionId.create sessionId |> Result.isOk
 
 /// Resolves a diff request's worktree against one scheduler snapshot, yielding both the comparison
 /// context Git needs and the `RepoId` that owns the worktree, so a linked worktree reads the root
@@ -89,25 +86,16 @@ let private isKnownWorktree agent path =
 /// drainQueue), so a non-local value would let a registrant make the server POST to arbitrary
 /// hosts (SSRF). Accept only well-formed absolute http(s) URLs whose host is a loopback IP
 /// (IPAddress.IsLoopback — IPv4 127.0.0.0/8 or IPv6 ::1) or the literal "localhost".
-let isLoopbackInjectUrl (injectUrl: string) : bool =
-    match System.Uri.TryCreate(injectUrl, System.UriKind.Absolute) with
-    | true, uri ->
-        (uri.Scheme = System.Uri.UriSchemeHttp || uri.Scheme = System.Uri.UriSchemeHttps)
-        && HttpSecurity.isLoopbackHost uri.Host
-    | false, _ -> false
+let isLoopbackInjectUrl = HttpSecurity.isLoopbackEndpoint
 
 let private registrationFailureText =
     function
-    | SessionBridge.RegistrationFailure.InvalidParentProcessId ->
-        "missing or invalid parentProcessId"
-    | SessionBridge.RegistrationFailure.ParentProcessNotRunning ->
-        "the parent Copilot process is not running"
-    | SessionBridge.RegistrationFailure.ParentProcessResolutionFailed ->
-        "could not resolve the parent Copilot process identity"
-    | SessionBridge.RegistrationFailure.ParentProcessReused ->
-        "the bridge parent process identity changed"
-    | SessionBridge.RegistrationFailure.ParentIdentityMismatch ->
-        "the bridge registration does not match the existing process identity"
+    | SessionBridge.RegistrationFailure.InvalidWorktreePath ->
+        "missing or invalid worktreePath"
+    | SessionBridge.RegistrationFailure.InvalidInjectUrl ->
+        "injectUrl must resolve to a loopback host"
+    | SessionBridge.RegistrationFailure.InvalidShutdownUrl ->
+        "shutdownUrl must resolve to a loopback host"
     | SessionBridge.RegistrationFailure.InvalidSessionId ->
         "invalid sessionId"
     | SessionBridge.RegistrationFailure.InvalidTerminalSessionId ->
@@ -122,52 +110,37 @@ let canvasRegisterHandler
     fun next ctx -> task {
         try
             let! body = ctx.BindJsonAsync<CanvasRegisterRequest>()
+            let request: SessionBridge.RegistrationRequest =
+                { WorktreePath = body.worktreePath
+                  InjectUrl = body.injectUrl
+                  ShutdownUrl = body.shutdownUrl
+                  ShutdownCapability = body.shutdownCapability
+                  SessionId = Option.ofObj body.sessionId
+                  ParentProcessId = Option.ofNullable body.parentProcessId
+                  TerminalSessionId = Option.ofObj body.terminalSessionId }
 
-            if System.String.IsNullOrWhiteSpace body.worktreePath then
-                Log.log "Canvas" "Registration failed: missing worktreePath"
-                return! RequestErrors.BAD_REQUEST "missing worktreePath" next ctx
-            elif System.String.IsNullOrWhiteSpace body.injectUrl then
-                Log.log "Canvas" $"Registration failed: missing injectUrl for {body.worktreePath}"
-                return! RequestErrors.BAD_REQUEST "missing injectUrl" next ctx
-            elif System.String.IsNullOrWhiteSpace body.shutdownUrl then
-                Log.log "Canvas" $"Registration failed: missing shutdownUrl for {body.worktreePath}"
-                return! RequestErrors.BAD_REQUEST "missing shutdownUrl" next ctx
-            elif System.String.IsNullOrWhiteSpace body.shutdownCapability then
-                Log.log "Canvas" $"Registration failed: missing shutdown capability for {body.worktreePath}"
-                return! RequestErrors.BAD_REQUEST "missing shutdown capability" next ctx
-            elif not (isLoopbackInjectUrl body.injectUrl) then
-                Log.log "Canvas" $"Registration failed: non-loopback injectUrl for {body.worktreePath}"
-                return! RequestErrors.BAD_REQUEST "injectUrl must resolve to a loopback host" next ctx
-            elif not (isLoopbackInjectUrl body.shutdownUrl) then
-                Log.log "Canvas" $"Registration failed: non-loopback shutdownUrl for {body.worktreePath}"
-                return! RequestErrors.BAD_REQUEST "shutdownUrl must resolve to a loopback host" next ctx
-            else
-                let worktreePath = body.worktreePath |> Server.PathUtils.normalizePath
+            match SessionBridge.validateRegistrationRequest request with
+            | Error failure ->
+                let reason = registrationFailureText failure
+                Log.log "Canvas" $"Registration rejected: {reason}"
+                return! RequestErrors.BAD_REQUEST reason next ctx
+            | Ok(worktreePath, _, _) ->
                 let! isKnown = isKnownWorktree agent worktreePath |> Async.StartAsTask
 
                 if not isKnown then
-                    Log.log "Canvas" $"Registration: unmonitored worktree — {worktreePath} (extension serves the doc in a browser)"
+                    Log.log "Canvas" "Registration skipped: unmonitored worktree; browser fallback is available"
                     return! Successful.ok (json {| registered = false; monitored = false |}) next ctx
                 else
-                    let request: SessionBridge.RegistrationRequest =
-                        { WorktreePath = worktreePath
-                          InjectUrl = body.injectUrl
-                          ShutdownUrl = body.shutdownUrl
-                          ShutdownCapability = body.shutdownCapability
-                          SessionId = Option.ofObj body.sessionId
-                          ParentProcessId = body.parentProcessId
-                          TerminalSessionId = Option.ofObj body.terminalSessionId }
-
                     match SessionBridge.registerSession processIdentityResolver request with
                     | Ok _ ->
                         return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
                     | Error failure ->
                         let reason = registrationFailureText failure
-                        Log.log "Canvas" $"Registration rejected for {worktreePath}: {reason}"
+                        Log.log "Canvas" $"Registration rejected: {reason}"
                         return! RequestErrors.BAD_REQUEST reason next ctx
         with ex ->
-            Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
-            return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
+            Log.log "Canvas" $"Registration failed: exceptionType={ex.GetType().Name}"
+            return! RequestErrors.BAD_REQUEST "Malformed registration request" next ctx
     }
 
 /// Validate a declared author and, only for a known (monitored) worktree, record it. Ownership is an
@@ -188,20 +161,21 @@ let attributeOwnership
             return Invalid "invalid canvas filename"
         elif System.String.IsNullOrWhiteSpace sessionId then
             return Invalid "missing sessionId"
-        elif not (isValidSessionId sessionId) then
-            return Invalid "invalid sessionId format"
-        elif CanvasDocKinds.classify filename = SystemView then
-            // Nothing reads a stored SystemView target, so recording one would silently mislead.
-            return NotAttributable
         else
-            let worktreePath = worktreePath |> Server.PathUtils.normalizePath
-            let! isKnown = isKnownWorktree agent worktreePath
-
-            if not isKnown then
-                return UnknownWorktree
-            else
-                do! CanvasDocOwnership.assign worktreePath filename sessionId
-                return Attributed
+            match SessionId.create sessionId, PathUtils.tryNormalizePath worktreePath, CanvasDocKinds.classify filename with
+            | Error _, _, _ -> return Invalid "invalid sessionId format"
+            | _, None, _ -> return Invalid "invalid worktreePath"
+            | Ok _, Some _, SystemView -> return NotAttributable
+            | Ok owner, Some worktreePath, AgentDoc ->
+                let! isKnown = isKnownWorktree agent worktreePath
+                if not isKnown then
+                    return UnknownWorktree
+                else
+                    match! CanvasDocOwnership.assign worktreePath filename (SessionId.value owner) with
+                    | Ok() ->
+                        SessionBridge.retryPending worktreePath
+                        return Attributed
+                    | Error failure -> return PersistenceFailed failure
     }
 
 /// POST /api/canvas/attribute {worktreePath, filename, sessionId}: the authoring session's
@@ -218,17 +192,19 @@ let canvasAttributeHandler (agent: MailboxProcessor<SchedulerState.StateMsg>) : 
                 Log.log "Canvas" $"Attribution failed: {reason}"
                 return! RequestErrors.BAD_REQUEST reason next ctx
             | UnknownWorktree ->
-                Log.log "Canvas" $"Attribution: unmonitored worktree — {body.worktreePath} (nothing recorded)"
+                Log.log "Canvas" "Attribution skipped: unmonitored worktree"
                 return! Successful.ok (json {| attributed = false; monitored = false |}) next ctx
             | NotAttributable ->
-                Log.log "Canvas" $"Attribution skipped: {body.filename} is a SystemView (routing is resolved, not stored)"
+                Log.log "Canvas" "Attribution skipped: generated SystemView"
                 return! Successful.ok (json {| attributed = false; monitored = true |}) next ctx
             | Attributed ->
-                Log.log "Canvas" $"Attribution recorded: {body.filename} -> {body.sessionId} for {body.worktreePath}"
+                Log.log "Canvas" "Attribution recorded durably"
                 return! Successful.ok (json {| attributed = true; monitored = true |}) next ctx
+            | PersistenceFailed _ ->
+                return! ServerErrors.INTERNAL_ERROR "Could not persist canvas ownership; previous ownership is unchanged" next ctx
         with ex ->
-            Log.log "Canvas" $"Attribution failed: malformed JSON — {ex.Message}"
-            return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
+            Log.log "Canvas" $"Attribution failed: exceptionType={ex.GetType().Name}"
+            return! RequestErrors.BAD_REQUEST "Malformed attribution request" next ctx
     }
 
 let bridgeStatusHandler : HttpHandler =
@@ -263,9 +239,8 @@ let private handleHeartbeat (agent: MailboxProcessor<SchedulerState.StateMsg>) (
                     do! ctx.Response.WriteAsync("Unknown worktree")
                 else
                     SessionBridge.registerPoll worktreePath
-                    let messages = CanvasBridge.drainPending worktreePath
                     ctx.Response.ContentType <- "application/json"
-                    do! ctx.Response.WriteAsJsonAsync(messages)
+                    do! ctx.Response.WriteAsJsonAsync([]: string list)
         | _ ->
             ctx.Response.StatusCode <- 400
             do! ctx.Response.WriteAsync("missing worktreePath")

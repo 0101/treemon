@@ -24,10 +24,10 @@ let [<Literal>] CanvasOrigin = "http://127.0.0.1:5002"
 // value (CanvasDocServerTests pins the helper's copy).
 let [<Literal>] private MaxPayloadBytes = 64_000
 
-let private isDocAlive (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =
+let private isDocAlive (bridgeLiveness: Map<string, BridgeLiveness>) worktreePath (doc: CanvasDoc) =
     match doc.OwnerSessionId with
     | None -> false
-    | Some ownerId -> BridgeLiveness.hasLiveSession ownerId bridgeLiveness
+    | Some ownerId -> BridgeLiveness.hasLiveSession worktreePath ownerId bridgeLiveness
 
 let private livenessDot (isAlive: bool) =
     Html.span [
@@ -63,9 +63,9 @@ let private playIcon =
 
 /// Render the liveness dot only for AgentDocs. A SystemView (e.g. the beads dashboard) is
 /// server-generated and has no owner session, so liveness is meaningless and the dot is omitted.
-let private livenessDotFor (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =
+let private livenessDotFor (bridgeLiveness: Map<string, BridgeLiveness>) worktreePath (doc: CanvasDoc) =
     match doc.Kind with
-    | AgentDoc -> livenessDot (isDocAlive bridgeLiveness doc)
+    | AgentDoc -> livenessDot (isDocAlive bridgeLiveness worktreePath doc)
     | SystemView -> Html.none
 
 /// Total beads issues for a worktree (Open + InProgress + Blocked + Closed). This is the label of
@@ -210,7 +210,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                                                         e.stopPropagation ()
                                                         onClickDoc scopedKey doc.Filename)
                                                     prop.children [
-                                                        livenessDotFor bridgeLiveness doc
+                                                        livenessDotFor bridgeLiveness scopedKey doc
                                                         Html.text (doc.Filename.Replace(".html", ""))
                                                     ]
                                                 ]
@@ -425,8 +425,8 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
-            let isFocusedDocAlive = isDocAlive bridgeLiveness doc
             let scopedKey = WorktreePath.value wt.Path
+            let isFocusedDocAlive = isDocAlive bridgeLiveness scopedKey doc
             let isTerminalLinked linkedDoc =
                 CanvasTerminalLink.effectiveSessionId
                     bridgeLiveness
@@ -466,7 +466,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                                 $"{d.Filename} — double-click to open in a browser tab (for full-page screenshots)"
                                 + terminalLinkTitleSuffix isLinked)
                             prop.children [
-                                livenessDotFor bridgeLiveness d
+                                livenessDotFor bridgeLiveness scopedKey d
                                 Html.text (d.Filename.Replace(".html", ""))
                                 Html.span [
                                     prop.className "canvas-tab-meta"
@@ -563,12 +563,10 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
     ]
 
 /// Callbacks the pane-internal `messageListener` raises for each recognized doc→pane message.
-/// Grouped into a record (mirroring CanvasPaneCallbacks) so they are passed by name: Dispatch and
-/// SelectDoc both share the type `string -> unit`, so positional passing let a silent argument
-/// transposition compile and surface only at runtime.
+/// Grouped into a record so application messages and pane-local actions are passed by name.
 type MessageListenerCallbacks =
     { /// Forward an unrecognized (normal) doc payload on to the session.
-      Dispatch: string -> unit
+      Dispatch: CanvasMessageRequest -> unit
       /// Switch the active tab to the named doc (navigate-canvas-doc).
       SelectDoc: string -> unit
       /// The active doc finished an idiomorph (morph-complete).
@@ -597,28 +595,22 @@ let messageListener (callbacks: MessageListenerCallbacks) =
             if me.origin = CanvasOrigin
                && Fable.Core.JsInterop.emitJsExpr<bool> me.data "$0 != null && typeof $0 === 'object'"
             then
-                // True when THIS message came from a mounted-but-HIDDEN canvas iframe (a visited doc that
-                // stays mounted and keeps running JS), including the selected doc in a closed pane.
-                // The origin check above
-                // already proves the sender is a canvas doc iframe, so a hidden-iframe match means a
-                // background/co-resident doc is posting. Session forwarding and navigate-canvas-doc honor
-                // only the active doc, so such a message is dropped — a hidden doc can't inject a payload
-                // (or force a tab switch) attributed to the active doc's owner session. The per-doc error
-                // path is exempt: it self-identifies via wt/doc and may legitimately report from any iframe.
-                let isFromHiddenCanvasIframe () =
-                    Fable.Core.JsInterop.emitJsExpr<bool> me "Array.prototype.some.call(document.querySelectorAll('.canvas-iframe'), function(f){return f.contentWindow === $0.source && (!f.classList.contains('canvas-iframe-active') || !f.closest('.canvas-pane.open'))})"
-                // Positively identify the ACTIVE doc as sender: me.source must equal the active iframe's
-                // window. Unlike the negative hidden-iframe filter, this rejects any canvas-origin sender
-                // that isn't the active doc — a detached/stale iframe, or a synthetic message with no
-                // source — rather than treating "not hidden" as "active".
+                let activeDocIdentity () =
+                    Fable.Core.JsInterop.emitJsExpr<obj> me
+                        "(function(f){return f && f.contentWindow === $0.source && f.closest('.canvas-pane.open') ? {scopedKey:f.getAttribute('data-canvas-scoped-key'),filename:f.getAttribute('data-canvas-filename')} : null})(document.querySelector('.canvas-iframe-active'))"
+                    |> Option.ofObj
+                    |> Option.map (fun identity ->
+                        Fable.Core.JsInterop.emitJsExpr<string> identity "$0.scopedKey",
+                        Fable.Core.JsInterop.emitJsExpr<string> identity "$0.filename")
+
                 let isFromActiveCanvasIframe () =
-                    Fable.Core.JsInterop.emitJsExpr<bool> me "(function(f){return !!f && f.contentWindow === $0.source})(document.querySelector('.canvas-iframe-active'))"
-                if Fable.Core.JsInterop.emitJsExpr<bool> me.data "typeof $0.action === 'string'" then
+                    activeDocIdentity () |> Option.isSome
+                if Fable.Core.JsInterop.emitJsExpr<bool> me.data "typeof $0.action === 'string' && $0.action.trim().length > 0" then
                     let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
                     if action = "navigate-canvas-doc" then
                         match Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.filename" |> Option.ofObj with
                         | Some filename when filename <> "" ->
-                            if isFromHiddenCanvasIframe () then
+                            if not (isFromActiveCanvasIframe ()) then
                                 Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: from an inactive document or hidden workspace pane"
                             else
                                 Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
@@ -645,13 +637,13 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                         // focus-reclaim listener, so the doc posts this instead (globalKeyboardScript).
                         // Positively require the ACTIVE doc's window as sender — a hidden background,
                         // stale/detached, or sourceless sender must never yank the dashboard.
-                        if isFromActiveCanvasIframe () && not (isFromHiddenCanvasIframe ()) then
+                        if isFromActiveCanvasIframe () then
                             Fable.Core.JS.console.log "[canvas] reclaim-focus received"
                             onReclaimFocus ()
                         else
                             Fable.Core.JS.console.warn "[canvas] reclaim-focus DROPPED: not from a visible active canvas doc iframe"
                     elif action = "open-worktree-search" then
-                        if isFromActiveCanvasIframe () && not (isFromHiddenCanvasIframe ()) then
+                        if isFromActiveCanvasIframe () then
                             Fable.Core.JS.console.log "[canvas] open-worktree-search received"
                             onOpenWorktreeSearch ()
                         else
@@ -679,13 +671,17 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                     else
                         let payload = Fable.Core.JS.JSON.stringify me.data
                         Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")
-                        if isFromHiddenCanvasIframe () then
-                            Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: from an inactive document or hidden workspace pane (action={action})")
-                        elif payload.Length <= MaxPayloadBytes then
-                            dispatch payload
-                        else
+                        match activeDocIdentity () with
+                        | None ->
+                            Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: not from a visible active canvas iframe (action={Fable.Core.JS.JSON.stringify action})")
+                        | Some(scopedKey, filename) when payload.Length <= MaxPayloadBytes ->
+                            dispatch
+                                { WorktreePath = WorktreePath scopedKey
+                                  Filename = filename
+                                  Payload = payload }
+                        | Some _ ->
                             Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
-                elif not (isFromHiddenCanvasIframe ()) then
+                elif isFromActiveCanvasIframe () then
                     // Canvas-origin, valid object, but no usable top-level string `action`. Surface it
                     // (banner + warn) only for the active doc; a hidden background iframe must stay silent
                     // so the banner only ever shows for the doc the user is looking at. Other origins are

@@ -50,7 +50,7 @@ export function promptForSession(body) {
 
   switch (transport.kind) {
     case "canvas":
-      return promptForCanvasMessage(transport.prompt);
+      return promptForCanvasMessage(transport.prompt, transport.source);
     case "agent-prompt":
     case "startup-prompt":
       return { kind: transport.kind, prompt: transport.prompt };
@@ -61,12 +61,19 @@ export function promptForSession(body) {
 
 /**
  * Validates a canvas message from either host and reinforces writing guidance for doc edits
- * inside the existing JSON payload, without scheduling another turn.
+ * in an envelope separate from the authored payload, without scheduling another turn.
  *
  * @param {string} body
+ * @param {unknown} source
  * @returns {SessionPrompt}
  */
-export function promptForCanvasMessage(body) {
+export function promptForCanvasMessage(body, source) {
+  if (!isRecord(source) ||
+      typeof source.worktreePath !== "string" || !source.worktreePath.trim() ||
+      !isValidCanvasFilename(source.filename)) {
+    throw new Error("missing or invalid canvas source");
+  }
+  const identity = { worktreePath: source.worktreePath, filename: source.filename };
   const message = parseJson(body);
   if (!isRecord(message) || !Object.hasOwn(message, "action")) {
     throw new Error("missing action");
@@ -87,10 +94,11 @@ export function promptForCanvasMessage(body) {
       typeof message.intent === "string" && ["explain", "remove", "comment"].includes(message.intent) &&
       typeof message.request === "string" && message.request.trim().length > 0);
   const remind =
-    isEdit && isValidCanvasFilename(message.doc) && !isSystemViewFilename(message.doc);
-  const prompt = remind
-    ? JSON.stringify({ ...message, authoringReminder: CANVAS_EDIT_REMINDER })
-    : serialized;
+    isEdit && !isSystemViewFilename(identity.filename);
+  const envelope = remind
+    ? JSON.stringify({ source: identity, payload: message, authoringReminder: CANVAS_EDIT_REMINDER })
+    : JSON.stringify({ source: identity, payload: message });
+  const prompt = envelope.replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
 
   return { kind: "canvas", prompt: `[canvas] ${prompt}` };
 }

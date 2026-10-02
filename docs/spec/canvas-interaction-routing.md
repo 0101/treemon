@@ -4,12 +4,30 @@
 
 - Route every canvas interaction to one session, chosen by document kind.
 - Preserve exact AgentDoc author routing: an authored document always reaches its author.
-- Let a SystemView reach the worktree's most recently active usable session without storing,
-  defending, or reconciling a routing target.
+- Let a SystemView choose the worktree's activity recipient per interaction without persisted
+  ownership or affinity.
 - Queue an interaction when no session can receive it, and start at most one session per worktree
   to drain it.
 
 ## Expected Behavior
+
+### Bridge Identity and Scope
+
+One current bridge is keyed by a required, validated durable Copilot `SessionId`. Every valid
+registration or heartbeat replaces that session's entry, including a later arrival from an older
+physical instance. Receipt timestamps and installation are atomic; server receipt time supplies
+the 60-second reachability window. Expiry is temporary loss of reachability, not retirement.
+
+The required worktree is normalized and validated against monitored worktrees. Delivery and owner
+liveness both require the bridge's registered worktree to equal the source document's worktree.
+A session moving to another monitored worktree replaces its only entry: its original documents
+remain owned but become offline and queued until it returns.
+
+Parent PID/start identity and terminal origin are optional location hints, never bridge identity
+keys or canvas-delivery vetoes. Missing or unverifiable hints leave canvas routing valid. Generic
+prompts require verified process metadata; exact prompts and shutdown additionally carry the
+expected durable session ID and exact process identity. A latest bridge in another process is not
+an exact-process fallback.
 
 ### Target Resolution
 
@@ -17,25 +35,25 @@ Resolution depends only on `CanvasDoc.Kind`.
 
 An **AgentDoc** has a real author. Its `(worktree, filename)` target is persisted in
 `data/canvas-owners.json`, assigned when the authoring extension reports a successful canvas write
-or when `canvas_take_ownership` claims it explicitly. That ownership is sticky: it changes only
-through another author write or another explicit claim. Both paths require the bare filename to
+or when `canvas_take_ownership` claims it explicitly. Ownership is sticky across registration,
+conversation switches, expiry, and restart: it changes only through another successful author write
+or explicit claim. Both paths require the bare filename to
 match the shared canvas filename contract; a full path, separator, traversal attempt, space, quote,
 or control character is rejected before ownership state is touched.
 
-A **SystemView** is server-generated and has no author, so nothing is persisted for it. Each
-interaction resolves, at send time, to the most recently active session that currently holds a live
-bridge registration for that worktree. Liveness and activity are separate inputs, fed by two
-independent extensions: the bridge registry says which exact processes can receive a prompt at all,
-and `StoredInstance.UpdatedAt` only *orders* them. A reachable session that has not reported activity is
-therefore still a valid target — resolution falls back to the freshest registration rather than
-reporting "no target", so Treemon does not spawn a second session beside a usable one. Heartbeat and
-usage timestamps never decide the target, preserving the rule that `LastSeen` is liveness-only.
-`BridgeLiveness` exposes this exact current target for canvas presentation; it remains computed
-state, not SystemView ownership or affinity. The client receives a polled snapshot, while delivery
-reruns the same selection at send time.
+The authoring extension observes successful create/edit/apply-patch destinations only in its startup
+`.agents/canvas` folder. Filename-only claims also stay in that startup worktree, even after the
+agent changes directory. Cross-worktree write attribution and claims are not supported. Scanner
+fallback remains change-gated: it fills only unowned AgentDocs when exactly one local durable
+session is reachable, never replacing an explicit owner.
 
-Because the routing target is recomputed for each interaction rather than stored, it cannot go
-stale, be raced by concurrent activity, or need pruning. A SystemView's owner is likewise absent from
+A **SystemView** is server-generated and has no author. Each interaction chooses the greatest
+activity among open instances in the source worktree, even when that recipient's bridge is
+temporarily absent. Without open activity, it falls back to the freshest local live bridge.
+`UpdatedAt` orders activity; heartbeat, usage, and `LastSeen` never do. `BridgeLiveness` exposes
+this computed recipient for presentation, including bridge gaps; it is not stored view affinity.
+
+A SystemView's owner is absent from
 `CanvasDoc.OwnerSessionId`, so liveness, Start session, archive, share, awareness, heartbeat, and
 morph behavior continue to depend only on `CanvasDoc.Kind`.
 
@@ -43,8 +61,17 @@ morph behavior continue to depend only on `CanvasDoc.Kind`.
 
 A resolved live target receives the payload immediately. Otherwise the interaction is queued.
 
-When a SystemView interaction resolves no target, Treemon starts one embedded session for that
-worktree and the queued interaction drains to it. The background launch does not open or retarget
+An open SystemView recipient without an eligible bridge gets three seconds of registration grace,
+using the same bounded seam as AutoSync. Registration during that gap drains the queue without
+launching. If the recipient remains unavailable, or there is no recipient, Treemon starts an
+embedded session for the source worktree.
+
+Fallback interactions retain the exact terminal ID returned by that launch. Each unsent dispatch
+joins that terminal to its current open activity session in the same worktree, then resolves that
+session's latest eligible bridge. An unrelated registration cannot capture the queue. Launch groups
+are ephemeral queue targeting, not persisted SystemView affinity.
+
+The background launch does not open or retarget
 the terminal pane; registry polling makes it attachable later. A started launch suppresses another
 spawn for the same worktree for 30 seconds; the suppression **expires on time** rather than waiting
 to be cleared by a registration, so a spawn that never registers cannot block later interactions,
@@ -54,6 +81,13 @@ retrying cannot deliver both the failed request and its retry. Unrelated queued 
 retained. Startup and this rollback finish even if the requesting browser disconnects. Sessions the
 user starts concurrently are not arbitrated — the guard covers only Treemon's own spawns.
 
+Spawn suppression is not an attachment lifetime. An active coordinator retains its own launch
+start and outcome until completion or cancellation, so live followers remain attached during the
+embedded launch's 150-second reply budget even after the 30-second cooldown expires. Completion
+and cancellation affect only that launch's group, not a replacement spawn. Once coordination
+finishes, a new interaction evaluates the cooldown normally; an expired completed launch has no
+special attachment affinity.
+
 An AgentDoc interaction with no reachable author is queued without launching, because a new session
 would not be that document's author.
 
@@ -62,19 +96,50 @@ in `docs/spec/embedded-terminal.md`: the complete initial instruction is reserve
 fresh session, delivered through its extension, and accepted before already-queued interactions.
 This transport does not assign an AgentDoc owner or change SystemView target resolution.
 
-Ordinary queued messages retain the existing cap of 10 and five-minute TTL. Startup reservations
-are separate from those limits and remain until their prompted-launch handshake settles. On drain,
-an AgentDoc prompt goes only to its recorded owner, so ownership changes made while a message waits
-are honored.
-A SystemView prompt stays bound to the session resolution picked, if any; when nothing was reachable
-it drains to the next identified registration — the session the queue caused to launch. An anonymous
-(session-less) registration never drains either kind.
+Ordinary queued messages retain the cap of 10 and five-minute TTL, measured from original enqueue
+time. Startup reservations are separate from those limits and remain until their prompted-launch
+handshake settles. One delivery lane per normalized worktree serializes immediate sends and drains.
+Before every unsent HTTP dispatch, routing rereads current document ownership, the latest session
+bridge, worktree eligibility, and message age. A durable claim, endpoint replacement, or
+registered-worktree change between two sends affects the second; already-issued HTTP requests need
+not be recalled. After asynchronous target lookup, an atomic take must still find the queued item
+within its original TTL; an expired or evicted item cannot issue HTTP. Heartbeats share one active
+drain and one coalesced notification per worktree. Routing changes restart ordered lookup, while an
+exact-terminal successor cannot overtake an older eligible message.
+
+Failed queued messages retain age and relative order. They do not immediately loop against an
+unchanged failed endpoint; a later valid registration after the failure can retry it, while a
+different endpoint can recover sooner. Failure and expiry remove only the observed registration,
+never its replacement. AgentDoc delivery always rereads the recorded owner. A SystemView selected
+recipient remains stable while queued; when Treemon starts a session, retained interactions bind to
+that launch's exact terminal. Anonymous registrations never drain either kind. Document heartbeat
+polls are liveness-only and return no queued prompts.
 
 ### Persistence and Cleanup
 
-Only AgentDoc ownership is persisted. It is removed when a view or worktree disappears; scheduler
+The existing nested worktree/filename owner-file format is unchanged. Atomic persistence through
+`JsonStore.tryPersist` must succeed before a proposed map becomes authoritative in memory or a
+claim is acknowledged. Failure is explicit, preserves the previous map and disk file, and permits
+the identical claim to retry. Successful declarations wake queued delivery only after that durable
+acknowledgement. Removal and pruning follow the same commit rule; failed scanner attribution remains
+eligible for retry rather than advancing its change baseline.
+
+Only AgentDocs use stored ownership for routing. It is removed when a view or worktree disappears; scheduler
 reconciliation prunes entries for worktrees that are no longer known **and** for documents whose file
 is gone, which is the only path that reclaims a per-document entry.
+
+### Authoritative Source Coordinates
+
+The client captures the visible active iframe's worktree and filename when its message arrives,
+validates that inventory identity, and carries it through `CanvasMessageRequest`. Authored `doc`,
+`filename`, or `source` payload fields cannot select another document; a later tab selection cannot
+replace the captured source.
+
+After monitored-path and safe-filename validation, HTTP transport carries
+`{kind:"canvas",prompt:<authored JSON>,source:{worktreePath,filename}}`. The Node parser produces
+`[canvas] {source,payload,authoringReminder?}` for `session.send`, with escaped JSON data separate
+from authored payload. The authoritative filename controls edit reminders. Footer formatting reads
+the nested payload while retaining the `[canvas]` glyph and historical flat-message formatting.
 
 ### Selection Metadata
 
@@ -90,10 +155,9 @@ before allocating an unbounded clone.
 ## Technical Approach
 
 `CanvasDocOwnership` is the mailbox-backed store for AgentDoc ownership, providing assignment,
-lookup, removal, and pruning. `SessionBridge` owns exact process-keyed registrations, secondary
-worktree and durable-SessionId lookup, the transport queue, limits, and liveness shared by canvas
-and agent prompts. Canvas-facing lookup collapses duplicate physical registrations for one durable
-SessionId to its freshest live registration; exact agent delivery keeps the physical identity.
+lookup, removal, and pruning. `SessionBridge` owns the session-keyed current bridge map, separate poll
+map, bounded transport queue, worktree delivery lanes, and reachability. Exact operations verify
+optional location metadata without changing the canvas identity model.
 `CanvasBridge` layers target resolution and worktree launch policy over that generic transport, and
 delegates a required spawn to the shared prompted-launch boundary.
 
@@ -107,23 +171,37 @@ the target is absent when no live registration can receive a SystemView interact
 `CanvasBridge.sendMessage` returns a routing outcome so the caller can
 distinguish "queued because nothing is reachable" from "queued behind a known session".
 
-The launch guard is a map from normalized worktree to the time a spawn started, suppressing another
-spawn for `launchSuppressionWindow`. It is time-bounded by design: correlating a later registration
-back to a specific launch is exactly the bookkeeping this model set out to remove, and an
-expiry cannot deadlock the way an uncleared entry can.
+The existing launch guard retains its start time and returned terminal ID. Its start time groups
+only pending fallback messages, so a delayed completion or cancellation cannot retarget a newer
+launch group after suppression expires. There is no bridge lease, generation, retirement history,
+duplicate-source registry, or first-seen preference.
+Reservation rechecks the same launch inside the mailbox turn that serializes completion and
+cancellation, binding a completed recipient or releasing a cancelled group before replying.
+Only one registration-grace/fallback workflow coordinates each worktree; additional queued
+interactions join an existing launch before returning promptly. Completion, cancellation, and
+follower admission share mailbox ordering. The coordinator rechecks the bounded pending work
+before finishing, preserving each interaction's independently selected recipient and its own grace
+opportunity rather than substituting the originator. The originating request still reports a
+launch failure.
+Handled work is tracked by live queued message identity, not by recipient. An earlier unassigned
+interaction does not make a newly unadmitted unassigned follower handled; retained metadata is
+bounded by the current queue.
+
+Activity remains process-keyed: acknowledged sequential A-to-B switches supersede the prior active
+binding while preserving durable history and terminal projection. Concurrent conversations within
+one exact CLI process and conversation shutdown barriers are not part of this model.
 
 `CanvasScanner` continues exposing `OwnerSessionId` only for AgentDocs, and the client continues
 gating every lifecycle affordance on `CanvasDoc.Kind`.
 
 ## Decisions
 
-- **Resolve SystemViews, store AgentDocs:** a routing target that is a pure function of live session
-  state is computed for interaction and presentation rather than cached. Caching it required compare-and-swap
-  ownership, pending-launch arbitration against concurrent activity, exact-session resume with
-  registration stamps, transport-failure invalidation, and a filesystem-revalidating prune — all to
-  keep a copy of a value that is cheap to derive.
-- **Reachability gates, activity orders:** bridge registration decides candidacy and `UpdatedAt`
-  ranks candidates. A more recently active session that cannot receive a prompt is never chosen.
+- **Resolve SystemViews, store AgentDocs:** generated-view recipients are cheap to derive from
+  current activity and reachability; authored ownership is a durable user-facing contract.
+- **Latest valid arrival wins:** durable session identity is sufficient; even an older physical
+  instance may become current again. Simultaneous instances of one session may alternate endpoints.
+- **Activity chooses, reachability gates dispatch:** a bridge gap waits briefly rather than
+  silently substituting a quieter co-located session.
 - **No resume:** an unreachable session is not restarted to receive an interaction. If nothing is
   reachable, a SystemView launches a new session; an AgentDoc waits for its author. Without a resume
   path there is no resume failure, and therefore no reassignment UI.
@@ -136,8 +214,8 @@ gating every lifecycle affordance on `CanvasDoc.Kind`.
   spawning duplicate sessions for concurrent interactions, and expires on a timer so a spawn that
   never registers cannot block later interactions. It deliberately does not arbitrate against
   sessions the user starts, which is accepted rather than defended.
-- **Pinning is out of scope:** choosing a fixed session for a SystemView is a separate feature; the
-  resolution rule above is the only policy today.
+- **No persisted SystemView pinning:** exact fallback terminal targeting lasts only as long as the
+  queued interaction; the next interaction chooses anew.
 
 ## Key Files
 

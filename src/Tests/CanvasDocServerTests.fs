@@ -718,7 +718,7 @@ type DiffComparisonContextTests() =
 // attributeOwnership is the HTTP-free core of canvasAttributeHandler (the same seam extraction
 // isLoopbackInjectUrl uses for canvasRegisterHandler). It records ownership only for a known
 // (monitored) worktree with a well-formed body; an unmonitored/blank worktree records nothing.
-// CanvasDocOwnership.attribute persists data/canvas-owners.json relative to CWD, so the fixture
+// CanvasDocOwnership.assign persists data/canvas-owners.json relative to CWD, so the fixture
 // runs under a throwaway CWD; it is NonParallelizable because that CWD swap and the ownership
 // agent are process-global.
 [<TestFixture>]
@@ -742,6 +742,86 @@ type AttributeOwnershipTests() =
 
         agent.Post(SchedulerState.UpdateWorktreeList(RepoId "attr-test-repo", [ info ]))
         agent
+
+    let registrationJson worktreePath sessionId =
+        System.Text.Json.JsonSerializer.Serialize(
+            {| worktreePath = worktreePath
+               sessionId = sessionId
+               injectUrl = "http://127.0.0.1:1/inject"
+               shutdownUrl = "http://127.0.0.1:1/shutdown"
+               shutdownCapability = System.String('A', 43) |})
+
+    [<Test>]
+    member _.``Registration accepts absent location hints and canonicalizes a monitored alias``() =
+        let worktree = uniquePath "registration-known"
+        let alias = Path.Combine(worktree, ".")
+        let sessionId = uniqueSid "registered"
+        let unavailable = ProcessIdentityResolver.create (fun _ -> Error "fixture probe unavailable")
+        let status, body =
+            handlerResponse
+                (canvasRegisterHandler unavailable (agentKnowing worktree))
+                (registrationJson alias sessionId)
+        use response = JsonDocument.Parse body
+        let entry = SessionBridge.canvasSessionsForWorktree worktree |> List.exactlyOne
+        Assert.Multiple(fun () ->
+            Assert.That(status, Is.EqualTo 200)
+            Assert.That(response.RootElement.GetProperty("registered").GetBoolean(), Is.True)
+            Assert.That(entry.WorktreePath, Is.EqualTo(PathUtils.normalizePath worktree))
+            Assert.That(entry.ProcessIdentity, Is.EqualTo(None: ProcessIdentity option))
+            Assert.That(entry.TerminalSessionId, Is.EqualTo(None: SessionActivity.TerminalSessionId option)))
+
+    [<Test>]
+    member _.``Unmonitored registration returns browser fallback without installing a bridge``() =
+        let known, unknown = uniquePath "registration-known", uniquePath "registration-unknown"
+        let status, body =
+            handlerResponse
+                (canvasRegisterHandler (ProcessIdentityResolver.create (fun _ -> Ok None)) (agentKnowing known))
+                (registrationJson unknown (uniqueSid "unmonitored"))
+        use response = JsonDocument.Parse body
+        Assert.Multiple(fun () ->
+            Assert.That(status, Is.EqualTo 200)
+            Assert.That(response.RootElement.GetProperty("registered").GetBoolean(), Is.False)
+            Assert.That(response.RootElement.GetProperty("monitored").GetBoolean(), Is.False)
+            Assert.That(SessionBridge.sessionsForWorktree unknown, Is.Empty))
+
+    [<TestCase("")>]
+    [<TestCase("bad session")>]
+    [<TestCase("$(command)")>]
+    member _.``Invalid session IDs are rejected even for otherwise unmonitored registrations``(invalidId: string) =
+        let unknown = uniquePath "registration-invalid"
+        let status, _ =
+            handlerResponse
+                (canvasRegisterHandler (ProcessIdentityResolver.create (fun _ -> Ok None)) (agentKnowing (uniquePath "known")))
+                (registrationJson unknown invalidId)
+        Assert.That(status, Is.EqualTo 400)
+        Assert.That(SessionBridge.sessionsForWorktree unknown, Is.Empty)
+
+    [<Test>]
+    member _.``Failed ownership persistence is an HTTP error and an identical retry is acknowledged``() =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attribute-http-failure"
+            let previous, desired = uniqueSid "old", uniqueSid "new"
+            runAsync (CanvasDocOwnership.assign worktree "report.html" previous)
+            |> Result.defaultWith (fun _ -> failwith "initial save failed")
+            let file = Path.Combine("data", "canvas-owners.json")
+            let disk = File.ReadAllText file
+            Directory.CreateDirectory(file + ".tmp") |> ignore
+            let handler = canvasAttributeHandler (agentKnowing worktree)
+            let body =
+                System.Text.Json.JsonSerializer.Serialize(
+                    {| worktreePath = worktree; filename = "report.html"; sessionId = desired |})
+            let failed, text = handlerResponse handler body
+            Assert.Multiple(fun () ->
+                Assert.That(failed, Is.EqualTo 500)
+                Assert.That(text, Does.Contain "previous ownership is unchanged")
+                Assert.That(runAsync (CanvasDocOwnership.getOwner worktree "report.html"), Is.EqualTo(Some previous))
+                Assert.That(File.ReadAllText file, Is.EqualTo disk))
+            Directory.Delete(file + ".tmp")
+            let retry, response = handlerResponse handler body
+            use parsed = JsonDocument.Parse response
+            Assert.That(retry, Is.EqualTo 200)
+            Assert.That(parsed.RootElement.GetProperty("attributed").GetBoolean(), Is.True)
+            Assert.That(runAsync (CanvasDocOwnership.getOwner worktree "report.html"), Is.EqualTo(Some desired)))
 
     [<Test>]
     member _.``a valid declaration for a known worktree records the posted owner``() =
@@ -820,7 +900,7 @@ type AttributeOwnershipTests() =
     member _.``a malformed body (blank sessionId) is rejected and records no ownership``() =
         withTempCwd (fun () ->
             // The worktree IS known, so only the blank sessionId can reject — proving the
-            // rejection short-circuits before CanvasDocOwnership.attribute is ever called.
+            // rejection short-circuits before CanvasDocOwnership.assign is ever called.
             let worktree = uniquePath "attr-malformed"
             let agent = agentKnowing worktree
 

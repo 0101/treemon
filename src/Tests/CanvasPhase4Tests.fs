@@ -219,7 +219,8 @@ type CanvasPhase4Tests() =
                 $"() => {{
                     window.dispatchEvent(new MessageEvent('message', {{
                         data: {{ action: 'test-queue', data: 'e2e-waiting-banner' }},
-                        origin: '{canvasOrigin}'
+                        origin: '{canvasOrigin}',
+                        source: document.querySelector('.canvas-iframe-active').contentWindow
                     }}));
                 }}")
 

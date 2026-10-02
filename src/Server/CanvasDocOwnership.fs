@@ -2,9 +2,9 @@ module Server.CanvasDocOwnership
 
 open System
 open System.IO
-open System.Text
 open System.Text.Json
 open Shared
+open Server.SessionActivity
 
 let private normalizePath = Server.PathUtils.normalizePath
 
@@ -12,13 +12,21 @@ let private defaultFilePath = Path.Combine("data", "canvas-owners.json")
 
 type internal Targets = Map<string, Map<string, string>>
 
+[<RequireQualifiedAccess>]
+type PersistenceFailure =
+    | SaveFailed
+
+type private Assignment =
+    | Claim
+    | FillUnowned
+
 type private Msg =
-    | Assign of worktreeKey: string * filename: string * sessionId: string * AsyncReplyChannel<unit> option
+    | Assign of Assignment * worktreeKey: string * filename: string * sessionId: string * AsyncReplyChannel<Result<unit, PersistenceFailure>>
     | GetOwner of worktreeKey: string * filename: string * AsyncReplyChannel<string option>
     | GetAll of worktreeKey: string * AsyncReplyChannel<Map<string, string>>
-    | RemoveView of worktreeKey: string * filename: string * AsyncReplyChannel<unit>
-    | RemoveWorktree of worktreeKey: string * AsyncReplyChannel<unit>
-    | Prune of knownWorktrees: Set<string> * AsyncReplyChannel<unit>
+    | RemoveView of worktreeKey: string * filename: string * AsyncReplyChannel<Result<unit, PersistenceFailure>>
+    | RemoveWorktree of worktreeKey: string * AsyncReplyChannel<Result<unit, PersistenceFailure>>
+    | Prune of knownWorktrees: Set<string> * AsyncReplyChannel<Result<unit, PersistenceFailure>>
     | Replace of targets: Targets * AsyncReplyChannel<unit>
 
 let private ownerFor worktreeKey filename targets =
@@ -44,35 +52,15 @@ let private removeTarget worktreeKey filename targets =
         else targets |> Map.add worktreeKey remaining
 
 let private persist (filePath: string) (targets: Targets) =
-    async {
-        try
-            let dir = Path.GetDirectoryName(filePath)
-            if not (String.IsNullOrEmpty dir) then Directory.CreateDirectory(dir) |> ignore
-
-            let options = JsonWriterOptions(Indented = true)
-            use stream = new MemoryStream()
-            use writer = new Utf8JsonWriter(stream, options)
+    JsonStore.tryPersist "CanvasDocOwnership" filePath (fun writer ->
+        writer.WriteStartObject()
+        targets
+        |> Map.iter (fun worktreeKey views ->
+            writer.WritePropertyName(worktreeKey)
             writer.WriteStartObject()
-
-            targets
-            |> Map.iter (fun worktreeKey views ->
-                writer.WritePropertyName(worktreeKey)
-                writer.WriteStartObject()
-                views |> Map.iter (fun filename sessionId -> writer.WriteString(filename, sessionId))
-                writer.WriteEndObject())
-
-            writer.WriteEndObject()
-            writer.Flush()
-
-            let tempPath = filePath + ".tmp"
-            let json = Encoding.UTF8.GetString(stream.ToArray())
-            do! File.WriteAllTextAsync(tempPath, json) |> Async.AwaitTask
-            File.Move(tempPath, filePath, overwrite = true)
-            return true
-        with ex ->
-            Log.log "CanvasDocOwnership" $"Failed to persist: {ex.Message}"
-            return false
-    }
+            views |> Map.iter (fun filename sessionId -> writer.WriteString(filename, sessionId))
+            writer.WriteEndObject())
+        writer.WriteEndObject())
 
 let private readTargets filePath =
     try
@@ -99,6 +87,21 @@ let private readTargets filePath =
         Error ex.Message
 
 type internal OwnershipStore internal (filePath: string, initialTargets: Targets) =
+    let commit targets proposed (reply: AsyncReplyChannel<Result<unit, PersistenceFailure>>) =
+        async {
+            let! saved =
+                if proposed = targets then async.Return(Ok())
+                else persist filePath proposed
+
+            match saved with
+            | Ok() ->
+                reply.Reply(Ok())
+                return proposed
+            | Error _ ->
+                reply.Reply(Error PersistenceFailure.SaveFailed)
+                return targets
+        }
+
     let agent =
         MailboxProcessor.Start(fun inbox ->
             let rec loop targets =
@@ -106,12 +109,14 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
                     let! msg = inbox.Receive()
 
                     match msg with
-                    | Assign(worktreeKey, filename, sessionId, reply) ->
-                        let targets' = targets |> addTarget worktreeKey filename sessionId
-                        if targets' <> targets then
-                            do! persist filePath targets' |> Async.Ignore
-                        reply |> Option.iter _.Reply()
-                        return! loop targets'
+                    | Assign(assignment, worktreeKey, filename, sessionId, reply) ->
+                        let proposed =
+                            match assignment, ownerFor worktreeKey filename targets with
+                            | FillUnowned, Some _ -> targets
+                            | Claim, _
+                            | FillUnowned, None -> targets |> addTarget worktreeKey filename sessionId
+                        let! committed = commit targets proposed reply
+                        return! loop committed
 
                     | GetOwner(worktreeKey, filename, reply) ->
                         targets
@@ -129,18 +134,12 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
                         return! loop targets
 
                     | RemoveView(worktreeKey, filename, reply) ->
-                        let targets' = targets |> removeTarget worktreeKey filename
-                        if targets' <> targets then
-                            do! persist filePath targets' |> Async.Ignore
-                        reply.Reply()
-                        return! loop targets'
+                        let! committed = commit targets (removeTarget worktreeKey filename targets) reply
+                        return! loop committed
 
                     | RemoveWorktree(worktreeKey, reply) ->
-                        let targets' = targets |> Map.remove worktreeKey
-                        if targets' <> targets then
-                            do! persist filePath targets' |> Async.Ignore
-                        reply.Reply()
-                        return! loop targets'
+                        let! committed = commit targets (Map.remove worktreeKey targets) reply
+                        return! loop committed
 
                     | Prune(knownWorktrees, reply) ->
                         // Worktree removal is handled by the known-worktree filter; the file check
@@ -175,10 +174,8 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
                                 if Map.isEmpty kept then None else Some(worktreeKey, kept))
                             |> Map.ofList
 
-                        if targets' <> targets then
-                            do! persist filePath targets' |> Async.Ignore
-                        reply.Reply()
-                        return! loop targets'
+                        let! committed = commit targets targets' reply
+                        return! loop committed
 
                     | Replace(targets', reply) ->
                         reply.Reply()
@@ -187,19 +184,16 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
 
             loop initialTargets)
 
-    member _.Attribute(worktreePath: string, filename: string, sessionId: string) =
-        agent.Post(Assign(normalizePath worktreePath, filename, sessionId, None))
-
     member _.Assign(worktreePath: string, filename: string, sessionId: string) =
         agent.PostAndAsyncReply(fun reply ->
-            Assign(normalizePath worktreePath, filename, sessionId, Some reply))
+            Assign(Claim, normalizePath worktreePath, filename, sessionId, reply))
+
+    member _.Attribute(worktreePath: string, filename: string, sessionId: string) =
+        agent.PostAndAsyncReply(fun reply ->
+            Assign(FillUnowned, normalizePath worktreePath, filename, sessionId, reply))
 
     member _.GetOwner(worktreePath: string, filename: string) =
         agent.PostAndAsyncReply(fun reply ->
-            GetOwner(normalizePath worktreePath, filename, reply))
-
-    member _.GetOwnerSync(worktreePath: string, filename: string) =
-        agent.PostAndReply(fun reply ->
             GetOwner(normalizePath worktreePath, filename, reply))
 
     member _.GetAll(worktreePath: string) =
@@ -238,17 +232,27 @@ let load () =
     defaultStore.Load()
     |> Async.RunSynchronously
 
-let attribute worktreePath filename sessionId =
-    defaultStore.Attribute(worktreePath, filename, sessionId)
-
 let assign worktreePath filename sessionId =
     defaultStore.Assign(worktreePath, filename, sessionId)
+
+let attribute worktreePath filename sessionId =
+    defaultStore.Attribute(worktreePath, filename, sessionId)
 
 let getOwner worktreePath filename =
     defaultStore.GetOwner(worktreePath, filename)
 
-let internal getOwnerSync worktreePath filename =
-    defaultStore.GetOwnerSync(worktreePath, filename)
+let internal getOwnerSessionId worktreePath filename =
+    async {
+        let! owner = getOwner worktreePath filename
+        return
+            owner
+            |> Option.bind (fun value ->
+                match SessionId.create value with
+                | Ok sessionId -> Some sessionId
+                | Error _ ->
+                    Log.log "CanvasDocOwnership" "Ignored invalid persisted canvas owner"
+                    None)
+    }
 
 let getAll worktreePath =
     defaultStore.GetAll(worktreePath)

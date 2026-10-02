@@ -28,8 +28,8 @@ type internal PresenceDiagnostic =
 
 type internal BridgeRegistrationDiagnostic =
     { Kind: BridgeRegistrationKind
-      ProcessIdentity: ProcessIdentity
-      SessionId: SessionId option
+      ProcessIdentity: ProcessIdentity option
+      SessionId: SessionId
       TerminalSessionId: TerminalSessionId option }
 
 type internal MultipleSessionsDiagnostic =
@@ -47,6 +47,7 @@ type internal SameSessionMultiplicityDiagnostic =
 [<RequireQualifiedAccess>]
 type internal ShutdownRejection =
     | MissingRegistration
+    | LocationUnavailable
     | StaleRegistration
     | InvalidCapability
     | NonLoopbackRequest
@@ -146,6 +147,7 @@ let private boundaryText =
 let private shutdownRejectionText =
     function
     | ShutdownRejection.MissingRegistration -> "missing_registration"
+    | ShutdownRejection.LocationUnavailable -> "location_unavailable"
     | ShutdownRejection.StaleRegistration -> "stale_registration"
     | ShutdownRejection.InvalidCapability -> "invalid_capability"
     | ShutdownRejection.NonLoopbackRequest -> "non_loopback_request"
@@ -197,7 +199,7 @@ let internal format =
             | BridgeRegistrationKind.Added -> "added"
             | BridgeRegistrationKind.Refreshed -> "refreshed"
 
-        $"event=bridge_registration kind={kind} process={processIdentityText registration.ProcessIdentity} session={optionText sessionIdText registration.SessionId} terminal={optionText terminalSessionIdText registration.TerminalSessionId}"
+        $"event=bridge_registration kind={kind} process={optionText processIdentityText registration.ProcessIdentity} session={sessionIdText registration.SessionId} terminal={optionText terminalSessionIdText registration.TerminalSessionId}"
     | Diagnostic.MultipleSessionsObserved multiple ->
         let sessionFields =
             boundedFields

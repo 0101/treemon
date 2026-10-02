@@ -57,10 +57,9 @@ The summary route is `GET /<encoded-known-worktree>/diff-summary?committed=<bool
 - diff2html 3.4.52 is vendored and served from a versioned immutable local route; no renderer asset is fetched from a third-party origin. The viewer's own stylesheet and script are self-hosted the same way but from stable, unversioned routes, so they are served revalidating rather than immutable — an edited viewer must not be shadowed by a frozen cache entry.
 - Over-limit summaries and patches are rejected as explicit states; partial patches are not rendered because an incomplete patch is not reliable input for diff2html.
 - Agent-mediated review uses generic SystemView selection interactions rather than renderer-specific comment widgets.
-- Diff selection interactions resolve, per interaction, to the most recently active session holding
-  a live bridge registration for the worktree; nothing is stored, and heartbeat or usage reports
-  never move the target. When no session is reachable the interaction queues and one session is
-  launched to drain it. See `docs/spec/canvas-interaction-routing.md`.
+- Diff selections follow the source-worktree activity policy in
+  `docs/spec/canvas-interaction-routing.md`: bounded bridge-gap waiting, exact returned-terminal
+  fallback, and ordered queues without persisted affinity. Heartbeats and usage never order activity.
 - The generated diff view remains a SystemView, not an AgentDoc, so it stays non-archivable, non-shareable, and independent of authored-document morphing.
 - Only the exact Treemon-owned `.agents/canvas/diff.html` artifact is excluded; other `.agents/` files remain visible worktree changes.
 - Diff HTTP results use stable status-tagged JSON rather than serializing F# discriminated unions directly, keeping the browser contract explicit while the shared domain model remains strongly typed.

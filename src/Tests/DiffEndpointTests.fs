@@ -1,6 +1,7 @@
 module Tests.DiffEndpointTests
 
 open System
+open System.Collections.Concurrent
 open System.Diagnostics
 open System.IO
 open System.Net
@@ -892,30 +893,34 @@ type DiffEndpointHttpTests() =
     member _.``earlier Git work consumes the shared deadline before a later command times out``() =
         let worktree = fakePath "timeout-deadline"
         let responseDeadlineMs = 3_000
+        let milestones = ConcurrentQueue<string * int>()
 
-        let runDelayedGit deadline seconds =
+        let runGit deadline arguments =
             ProcessRunner.capture
                 { ProcessRunner.Spawn.create "git" with
                     Context = "DiffEndpointDeadlineTest"
                     Limits = ProcessRunner.CaptureLimits.tiny
                     Deadline = ProcessRunner.SharedDeadline deadline }
-                [ "-c"
-                  $"alias.pause=!sleep {seconds}"
-                  "pause" ]
+                arguments
 
         let service: WorktreeDiffApi.Service =
             { GetSummary =
                 fun deadline _ _ ->
                     async {
-                        let! earlier = runDelayedGit deadline 1
+                        let! earlier = runGit deadline [ "--version" ]
 
                         match earlier with
                         | Ok output when output.ExitCode = 0 ->
-                            let! later = runDelayedGit deadline 30
+                            milestones.Enqueue(("earlier-success", ProcessRunner.responseDeadlineRemainingMs deadline))
+                            // Elapsed earlier work is the contract; shell startup must not supply it.
+                            do! Async.Sleep 1_000
+                            milestones.Enqueue(("later-start", ProcessRunner.responseDeadlineRemainingMs deadline))
+                            let! later = runGit deadline [ "-c"; "alias.pause=!sleep 30"; "pause" ]
 
                             return
                                 match later with
                                 | Error ProcessRunner.TimedOut ->
+                                    milestones.Enqueue(("later-timeout", ProcessRunner.responseDeadlineRemainingMs deadline))
                                     Error(
                                         WorktreeDiff.GitTimedOut
                                             WorktreeDiff.EnumerateTracked
@@ -949,6 +954,19 @@ type DiffEndpointHttpTests() =
                 Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                 body
                 |> assertJson ("""{"status":"timeout"}""" |> withUniformLayerCount 0)
+
+                let observed = milestones.ToArray()
+                observed
+                |> Array.map (fun (stage, remaining) -> $"{stage}={remaining}ms")
+                |> String.concat ", "
+                |> TestContext.WriteLine
+                match observed with
+                | [| ("earlier-success", before); ("later-start", remaining); ("later-timeout", after) |] ->
+                    Assert.Multiple(fun () ->
+                        Assert.That(remaining, Is.LessThan before, "Earlier successful work must spend the original budget")
+                        Assert.That(remaining, Is.GreaterThan 750, "The later capture must start with budget beyond both reserves")
+                        Assert.That(after, Is.LessThan remaining, "The later real Git command must spend the same remainder"))
+                | _ -> Assert.Fail "Expected earlier success, consumed budget, then later timeout in that order"
 
                 Assert.That(
                     stopwatch.ElapsedMilliseconds,
@@ -2221,7 +2239,11 @@ type DiffIdentityLifecycleHttpTests() =
                     WorktreeApi.deleteWorktreeWith
                         (fun _ _ _ -> async.Return(Ok()))
                         (fun _ operation -> operation ())
-                        WorktreeDiffApi.removeWorktree
+                        (fun path ->
+                            async {
+                                do! WorktreeDiffApi.removeWorktree path
+                                return Ok()
+                            })
                         (fun _ -> Ok ())
                         deleteAgent
                         (RefreshScheduler.buildRootPaths [ repoRoot ])

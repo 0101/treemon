@@ -39,7 +39,7 @@ if (window.parent === window) {
   window.__canvasTopLevelTransportAvailable = true;
   window.addEventListener('message', function(e) {
     if (e.source === window && e.data && typeof e.data.action === 'string') {
-      fetch('http://127.0.0.1:__PORT__/_message', {
+      fetch('http://127.0.0.1:__PORT__/_message/__FILENAME__', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(e.data)
@@ -61,7 +61,8 @@ const CONTENT_POLL_SCRIPT = `<script>
 })();
 </script>`;
 
-const CANVAS_DIR = resolve(process.cwd(), ".agents", "canvas");
+const worktreePath = process.cwd();
+const CANVAS_DIR = resolve(worktreePath, ".agents", "canvas");
 
 const { enqueue: enqueueSend, enqueueAndWait: sendStartupPrompt } = createSendQueue({ log });
 
@@ -78,7 +79,9 @@ function hashContent(content) {
 }
 
 function injectScripts(html, port, filename) {
-  const shim = TRANSPORT_SHIM.replaceAll("__PORT__", String(port));
+  const shim = TRANSPORT_SHIM
+    .replaceAll("__PORT__", String(port))
+    .replaceAll("__FILENAME__", encodeURIComponent(filename));
   const agentDocScripts =
     isSystemViewFilename(filename)
       ? ""
@@ -165,11 +168,17 @@ function startHttpServer(session, state, shutdownCapability) {
       }
 
       if (state.browserMode) {
-        if (req.method === "POST" && req.url === "/_message") {
+        const messageFilename = req.url?.match(/^\/_message\/([^/?]+)$/)?.[1];
+        if (req.method === "POST" && messageFilename) {
           if (!isTrustedInjectionHeaders(req.headers)) {
             log(`/_message rejected: untrusted request (content-type=${req.headers["content-type"] ?? ""}, origin=${req.headers["origin"] ?? ""})`);
             res.writeHead(403, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: "forbidden" }));
+            return;
+          }
+          if (!isValidCanvasFilename(messageFilename)) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "invalid canvas source filename" }));
             return;
           }
           let body;
@@ -181,7 +190,10 @@ function startHttpServer(session, state, shutdownCapability) {
           log(`/_message received: payload length=${body.length}`);
           let transport;
           try {
-            transport = promptForCanvasMessage(body);
+            transport = promptForCanvasMessage(body, {
+              worktreePath,
+              filename: messageFilename,
+            });
           } catch (err) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: err.message }));
@@ -361,7 +373,6 @@ async function handleCanvasWrite(state, filename) {
   log(`canvas write: serving ${filename} in browser mode → ${url}`);
 }
 
-const worktreePath = process.cwd();
 /**
  * @type {{
  *   browserMode: boolean,

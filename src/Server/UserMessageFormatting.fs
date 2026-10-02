@@ -72,7 +72,13 @@ let private readableMalformedPayload (payload: string) =
 let private formatCanvasPayload (payload: string) =
     try
         use document = JsonDocument.Parse payload
-        let root = document.RootElement
+        let root =
+            if document.RootElement.ValueKind = JsonValueKind.Object then
+                match document.RootElement.TryGetProperty("payload") with
+                | true, payload when payload.ValueKind = JsonValueKind.Object
+                                     && (document.RootElement.TryGetProperty("source") |> fst) -> payload
+                | _ -> document.RootElement
+            else document.RootElement
         let fallback () =
             match formatJsonElement root with
             | "" -> "Canvas interaction"

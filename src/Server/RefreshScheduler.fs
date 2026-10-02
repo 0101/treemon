@@ -670,9 +670,8 @@ module CanvasWatchers =
     /// Fallback attribution target for a worktree's scanner. Explicit `/api/canvas/attribute`
     /// declarations are the primary attribution path; the scanner only fills the gap for docs
     /// with no declared owner, and only when it can do so *unambiguously* — i.e. exactly one
-    /// durable session owns a live registration for the worktree. Duplicate physical processes
-    /// for that same durable session collapse to their freshest registration; zero or several
-    /// durable sessions (or one anonymous registration) leave the doc unowned.
+    /// durable session has a live registration for the worktree. Zero or several durable sessions
+    /// leave the doc unowned.
     let fallbackOwner
         (now: DateTime)
         (sessions: SessionBridge.SessionEntry list)
@@ -681,7 +680,7 @@ module CanvasWatchers =
             sessions
             |> SessionBridge.collapseLiveRegistrations now
         with
-        | [ single ] -> single.SessionId |> Option.map SessionId.value
+        | [ single ] -> Some(SessionId.value single.SessionId)
         | _ -> None
 
     /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. An AgentDoc is
@@ -697,22 +696,35 @@ module CanvasWatchers =
         (previousDocs: CanvasDoc list)
         (currentDocs: CanvasDoc list)
         =
-        let now = DateTime.UtcNow
-
-        match fallbackOwner now sessions with
-        | None -> ()
-        | Some sessionId ->
-            let prevByName = previousDocs |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
-            currentDocs
-            |> List.iter (fun doc ->
-                let isNewOrChanged =
-                    match prevByName |> Map.tryFind doc.Filename with
-                    | None -> true
-                    | Some prevHash -> prevHash <> doc.ContentHash
-                if isNewOrChanged && Option.isNone doc.OwnerSessionId then
-                    match doc.Kind with
-                    | AgentDoc -> CanvasDocOwnership.attribute worktreePath doc.Filename sessionId
-                    | SystemView -> ())
+        async {
+            match fallbackOwner DateTime.UtcNow sessions with
+            | None -> return Ok()
+            | Some sessionId ->
+                let prevByName = previousDocs |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
+                let changed =
+                    currentDocs
+                    |> List.filter (fun doc ->
+                        let isNewOrChanged =
+                            match prevByName |> Map.tryFind doc.Filename with
+                            | None -> true
+                            | Some prevHash -> prevHash <> doc.ContentHash
+                        isNewOrChanged && doc.OwnerSessionId.IsNone && doc.Kind = AgentDoc)
+                let! outcomes =
+                    changed
+                    |> List.map (fun doc ->
+                        async {
+                            let! result = CanvasDocOwnership.attribute worktreePath doc.Filename sessionId
+                            match result with
+                            | Ok() -> SessionBridge.retryPending worktreePath
+                            | Error _ -> ()
+                            return result
+                        })
+                    |> Async.Sequential
+                return
+                    outcomes
+                    |> Array.tryPick (function Error failure -> Some(Error failure) | Ok() -> None)
+                    |> Option.defaultValue (Ok())
+        }
 
     let reconcile
         (agent: MailboxProcessor<StateMsg>)
@@ -727,7 +739,10 @@ module CanvasWatchers =
                 |> Set.ofSeq
 
             if repos |> Map.forall (fun _ repo -> repo.IsReady) then
-                do! CanvasDocOwnership.prune allPaths
+                match! CanvasDocOwnership.prune allPaths with
+                | Ok() -> ()
+                | Error _ ->
+                    Log.log "CanvasWatcher" "Ownership pruning failed; previous durable owners remain authoritative"
                 do! WorktreeDiffApi.prune allPaths
 
             let removed =
@@ -769,9 +784,14 @@ module CanvasWatchers =
                             // primary path. The scanner only attributes a no-owner changed doc when exactly one
                             // session is registered for the worktree — never the old last-registered guess that
                             // misattributed every changed doc whenever two sessions shared a worktree.
-                            attributeChangedDocs (SessionBridge.sessionsForWorktree path) path prev canvasDocs
-                            previousDocs.Value <- canvasDocs
-                            agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
+                            async {
+                                match! attributeChangedDocs (SessionBridge.sessionsForWorktree path) path prev canvasDocs with
+                                | Ok() -> previousDocs.Value <- canvasDocs
+                                | Error _ ->
+                                    Log.log "CanvasWatcher" "Ownership attribution failed; unchanged documents remain eligible for retry"
+                                agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
+                            }
+                            |> Async.Start
                         return
                             CanvasScanner.tryCreateWatcher post path
                             |> Option.map (fun watcher ->

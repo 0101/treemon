@@ -569,23 +569,19 @@ let navigateCanvasDoc (filename: string) (model: Model) =
         Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: no active canvas worktree"
         model, Cmd.none
 
-let canvasMessageReceived (payload: string) (model: Model) =
-    let visibleDoc = activeVisibleDoc model
-    let worktree = visibleDoc |> Option.bind (fun (sk, _) -> findWorktree sk model)
-    match visibleDoc, worktree with
-    | Some (scopedKey, filename), Some wt ->
-        Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} doc={filename} (payload length={payload.Length})")
+let canvasMessageReceived (request: CanvasMessageRequest) (model: Model) =
+    let scopedKey = WorktreePath.value request.WorktreePath
+    match findWorktree scopedKey model with
+    | Some wt when isKnownCanvasDoc model scopedKey request.Filename ->
+        Fable.Core.JS.console.log ($"[canvas] Forwarding message from {request.Filename} (payload length={request.Payload.Length})")
         model,
         Cmd.OfAsync.either
             worktreeApi.Value.sendCanvasMessage
-            { WorktreePath = wt.Path; Filename = filename; Payload = payload }
-            (fun result -> CanvasSendResult(result, scopedKey, filename))
-            (fun ex -> CanvasSendResult(CanvasMessageResult.Error ex.Message, scopedKey, filename))
-    | Some (scopedKey, _), None ->
-        Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
-        model, Cmd.none
-    | None, _ ->
-        Fable.Core.JS.console.warn "[canvas] Message DROPPED: no active visible doc"
+            { request with WorktreePath = wt.Path }
+            (fun result -> CanvasSendResult(result, scopedKey, request.Filename))
+            (fun ex -> CanvasSendResult(CanvasMessageResult.Error ex.Message, scopedKey, request.Filename))
+    | _ ->
+        Fable.Core.JS.console.warn "[canvas] Message DROPPED: source document is no longer in the canvas inventory"
         model, Cmd.none
 
 /// `CanvasSendState` is pane-global, but a send result arrives asynchronously and may belong to a

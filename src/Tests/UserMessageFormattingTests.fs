@@ -18,6 +18,8 @@ type UserMessageFormattingTests() =
     [<TestCase("[canvas] {\"action\":\"canvas-selection\",\"intent\":\"comment\",\"doc\":\"review.html\",\"request\":\"User commented: too long\",\"authoringReminder\":\"Keep this edit concise.\"}", "Canvas", "User commented: too long")>]
     [<TestCase("[canvas] {\"action\":\"custom-action\",\"text\":\"Use SQLite\"}", "Canvas", "Use SQLite")>]
     [<TestCase("[canvas] {\"action\":\"custom-action\",\"payload\":{\"value\":42}}", "Canvas", "action: custom-action, payload: value: 42")>]
+    [<TestCase("[canvas] {\"source\":{\"worktreePath\":\"Q:\\\\repo\",\"filename\":\"review.html\"},\"payload\":{\"action\":\"expand-section\",\"section\":\"evidence\",\"doc\":\"diff.html\"},\"authoringReminder\":\"Keep concise\"}", "Canvas", "Expand evidence")>]
+    [<TestCase("[canvas] {\"source\":{\"worktreePath\":\"Q:\\\\repo\",\"filename\":\"diff.html\"},\"payload\":{\"action\":\"canvas-selection\",\"request\":\"Explain this change\"}}", "Canvas", "Explain this change")>]
     [<TestCase("[canvas] {\"topic\":\"recommendation\"}", "Canvas", "topic: recommendation")>]
     [<TestCase("[canvas] {\"action\":\"comment\",\"text\":\"   \"}", "Canvas", "action: comment, text: ")>]
     [<TestCase("[canvas] [\"unexpected\",\"array\"]", "Canvas", "unexpected, array")>]

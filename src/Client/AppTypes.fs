@@ -187,7 +187,7 @@ type Msg =
     | ClipboardWriteResult of scopedKey: string * filename: string * url: string * Result<unit, string>
     | DismissClipboardNotice
     | NavigateCanvasDoc of filename: string
-    | CanvasMessageReceived of payload: string
+    | CanvasMessageReceived of CanvasMessageRequest
     | CanvasSendResult of CanvasMessageResult * scopedKey: string * filename: string
     | DismissCanvasMessageError
     // Doc-side JS error forwarded from an AgentDoc iframe (window.onerror / unhandledrejection via

@@ -29,7 +29,7 @@ type LifecycleDiagnosticFormattingTests() =
         let diagnostic =
             LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved
                 { Boundary =
-                    LifecycleDiagnostics.ObservationBoundary.Bridge
+                    LifecycleDiagnostics.ObservationBoundary.Presence
                   SessionId = sessionId 1
                   ProcessIdentities =
                     [ 1..12 ] |> List.map processIdentity

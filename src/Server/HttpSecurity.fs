@@ -14,6 +14,13 @@ let internal isLoopbackHost (host: string) : bool =
         | true, ip -> System.Net.IPAddress.IsLoopback ip
         | false, _ -> false)
 
+let isLoopbackEndpoint (value: string) =
+    match System.Uri.TryCreate(value, System.UriKind.Absolute) with
+    | true, uri ->
+        (uri.Scheme = System.Uri.UriSchemeHttp || uri.Scheme = System.Uri.UriSchemeHttps)
+        && isLoopbackHost uri.Host
+    | false, _ -> false
+
 /// Decide whether a request whose Origin/Referer headers hold these values originates from the
 /// same machine. Origin is authoritative when present; the Referer is only consulted when Origin
 /// is absent. A MISSING pair is treated as same-origin (returns true) so the non-browser Cli client

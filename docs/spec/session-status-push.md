@@ -116,7 +116,9 @@ shared state; no session-log parsing remains.
   `settleWindow` (30 s). Otherwise it takes the greatest-`UpdatedAt` open session that has settled,
   and only then a retained identity when no session is open. That ordering keeps any fallback prompt
   on an existing bridge rather than launching a second CLI. An open target is delivered to its
-  exact process registration; a retained offline identity is used only for a guarded launch.
+  expected durable session ID and exact process identity. The latest session-addressed bridge must
+  have matching, currently verifiable location metadata; another process's canvas bridge is not an
+  exact fallback. A retained offline identity is used only for guarded fallback delivery or launch.
 
 ### Terminal origin
 
@@ -239,9 +241,9 @@ event-specific fields, and CSRF origin. The server resolves the PID's process-st
 uses server receipt time for presence while retaining bounded producer timestamps for lifecycle
 ordering. Free text is bounded before persistence. An optional terminal origin must be the
 canonical 32-hex TerminalHost session ID and is normalized to lowercase; blank values mean no
-origin. Exact process resolution is one injected shared boundary used by activity ingestion,
-SessionBridge registration, shutdown waiting, and survivor verification so every subsystem compares
-the same PID/start identity and PID-reuse behavior remains deterministic in tests.
+origin. Exact process resolution is one shared injected boundary. It is required for activity ingress and
+exact operations; bridge registration uses it only to enrich optional location hints and never
+rejects canvas routing solely because those hints are unavailable.
 
 Runtime `<system_reminder>` messages arrive through the genuine `user.message` channel, so the
 server classifies them after validation and the known-worktree guard but before the single-writer
@@ -302,9 +304,10 @@ all exact rows, fixture processes, and isolated filesystem state are closed or r
 
 `LifecycleDiagnostics` receives only validated `SessionId`, `TerminalSessionId`, exact
 `ProcessIdentity`, bounded counts, and closed outcome unions. A successful presence write emits
-`first_seen` or `reconnected` only after the exact row is durable. Presence and process-keyed bridge
-registration also report normal distinct-session concurrency separately from neutral
-same-`SessionId` physical multiplicity. Identity and session lists show at most eight sorted values
+`first_seen` or `reconnected` only after the exact row is durable. Presence reports distinct-session
+concurrency and same-session physical multiplicity. Bridge diagnostics instead report required
+durable identities, additions/replacements, and optional verified process hints; the bridge map
+cannot contain physical multiplicity for one session. Identity and session lists show at most eight sorted values
 while retaining full total and omitted counts. Paths, URLs, capabilities, prompts, messages, tokens,
 environment values, exception text, and raw reports are not diagnostic inputs.
 
@@ -369,7 +372,8 @@ reads open exact instances separately from durable representatives. A session mi
 idle within the settle window — makes the worktree busy, and the observation is deferred without
 delivering anything. Otherwise — no session, or one that has settled or is waiting on its user —
 AutoSync attempts the bounded mechanical path defined in `docs/spec/worktree-monitor.md`. Agent
-fallback addresses the selected open process through `SessionBridge.SendTarget.ExactProcess`;
+fallback addresses the selected open process and expected durable session through
+`SessionBridge.SendTarget.ExactProcess`;
 retained identity is consulted only when no process is open and can cause only a guarded launch.
 Transient delivery failure queues the exact-process prompt for retry. The passive reporting
 extension never originates prompts.
@@ -429,10 +433,10 @@ into lifecycle status.
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
 | `src/Server/SchedulerState.fs` | Exact live process-instance state and collapsed `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, durable representative merge, direct snapshot history API, and resume command wiring. |
-| `src/Server/SessionBridge.fs` | Process-keyed session registration, durable-session/worktree lookup, separate poll registration, exact prompt/shutdown delivery, retry queue, and bridge liveness. |
+| `src/Server/SessionBridge.fs` | One latest bridge per durable session, worktree-scoped reachability, verified exact prompt/shutdown operations, separate poll liveness, and bounded retry queues. |
 | `src/Server/WorktreeCleanup.fs` | User-authorized terminal/worktree teardown sequencing, host cleanup, and exact survivor verification. |
 | `src/Server/TerminalSessionCleanup.fs` | Session-activity-backed exact shutdown requests, post-host reconciliation, monotonic closure recording, and lifecycle diagnostics for terminal cleanup. |
-| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `request-body.mjs` | Exact bridge identity registration, shared bounded request reading, and capability-guarded loopback routine shutdown. |
+| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `request-body.mjs` | Session-addressed bridge registration with optional location hints, bounded request reading, and capability-guarded loopback shutdown. |
 | `src/Tests/SessionIsolationVerifier/` and `scripts/verify-session-isolation.ps1` | Durable five-phase same-session exact-process isolation verifier and clean-checkout runner. |
 | `src/Server/AutoSync.fs` | Delivery-aware session selection and guarded sync-prompt fallback launch. |
 | `src/Shared/Types.fs` | `AgentActivity`, context usage, exact-instance marker IDs, and worktree wire types. |

@@ -1559,6 +1559,7 @@ type AutoSyncDeliveryTests() =
             { WorktreePath = "/repo/wt"
               Target =
                 SessionBridge.SendTarget.ExactProcess(
+                    SessionId "session-a",
                     TestUtils.collisionResistantProcessIdentityForSessionId "session-a"
                 )
               Prompt = SessionBridge.Prompt.agentPrompt "Sync with upstream/main." }
@@ -1639,6 +1640,7 @@ type AutoSyncDeliveryTests() =
                         value.Target,
                         Is.EqualTo(
                             SessionBridge.SendTarget.ExactProcess(
+                                SessionId "open-idle",
                                 TestUtils.collisionResistantProcessIdentityForSessionId "open-idle"
                             )
                         )
@@ -1813,7 +1815,7 @@ type AutoSyncDeliveryTests() =
     [<Test>]
     [<Category("AutoSyncVerification")>]
     member _.``Transient bridge POST failure queues the prompt for retry on registration``() =
-        let path = $"/test/auto-sync-retry/{Guid.NewGuid():N}"
+        let path = TestUtils.uniquePath "auto-sync-retry"
         let sessionId = $"session-{Guid.NewGuid():N}"
         let port = TestUtils.getFreeTcpPort ()
         // Delivery callbacks cross async HTTP boundaries, so counters must be captured mutably.
