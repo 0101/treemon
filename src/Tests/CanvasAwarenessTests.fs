@@ -786,6 +786,35 @@ type AutoDisplayIdleLogicTests() =
 type CanvasSendStateTests() =
 
     [<Test>]
+    member _.``typed canvas startup failure replaces waiting with its cleanup status``() =
+        let filename = "diff.html"
+        let scopedKey = "r/feat"
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeSystemDoc filename "hash" ] ] ]
+                FocusedElement = Some(Card scopedKey)
+                Canvas.CanvasPaneOpen = true
+                Canvas.ActiveCanvasDoc = Map.ofList [ scopedKey, filename ]
+                Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey }
+        let error =
+            PromptedLaunchError.StartupCleanupFailed(
+                StartupPromptFailure.Rejected,
+                EmbeddedTerminalId "00000000000000000000000000000001")
+        let updated, _ =
+            App.update
+                (CanvasSendResult(CanvasMessageResult.SessionStartFailed error, scopedKey, filename))
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                updated.Canvas.CanvasSendState,
+                Is.EqualTo(
+                    CanvasSendState.Failed
+                        "Could not start an interaction session for diff.html: Copilot's Treemon extension rejected the startup prompt. Could not confirm cleanup of the new terminal. Check the server log for details."))
+            Assert.That(updated.EmbeddedTerminals, Is.EqualTo model.EmbeddedTerminals)
+            Assert.That(updated.FocusedElement, Is.EqualTo model.FocusedElement))
+
+    [<Test>]
     member _.``Waiting clears to Idle when the target worktree's doc changes``() =
         let waiting = CanvasSendState.Waiting "r/feat"
         let agentChangedDocs = [ ("r/feat", "status.html") ]

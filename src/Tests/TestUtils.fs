@@ -106,6 +106,16 @@ let msg (text: string) (t: string) : Message = { Text = text; At = ts t }
 let uniquePath prefix =
     Path.Combine(Path.GetTempPath(), $"treemon-{prefix}-{Guid.NewGuid():N}")
 
+let copilotRecorderExecutable =
+    let output = DirectoryInfo AppContext.BaseDirectory
+    Path.Combine(
+        __SOURCE_DIRECTORY__,
+        "TestAgentRecorder",
+        "bin",
+        output.Parent.Name,
+        output.Name,
+        "copilot.exe")
+
 let serverLogDirectory runtimeDirectory =
     Path.Combine(runtimeDirectory, "server-logs")
 

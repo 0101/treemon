@@ -36,6 +36,17 @@ test("agent-prompt transport reaches the session without a canvas prefix", () =>
   );
 });
 
+test("startup transport delivers multiline instructions and document identity unchanged", () => {
+  const prompt =
+    "Take over the canvas doc identified by the JSON object below.\r\n" +
+    '{"worktreePath":"Q:\\\\owner\'s repo with spaces","filename":"selected.html"}\n\n' +
+    "Use the canvas skill and claim the selected document.";
+  assert.deepEqual(
+    promptForSession(JSON.stringify({ kind: "startup-prompt", prompt })),
+    { kind: "startup-prompt", prompt },
+  );
+});
+
 test("invalid transport is rejected instead of reaching session.send", () => {
   assert.throws(() => promptForSession("not-json"), /invalid JSON/);
   assert.throws(

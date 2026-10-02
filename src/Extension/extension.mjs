@@ -63,7 +63,7 @@ const CONTENT_POLL_SCRIPT = `<script>
 
 const CANVAS_DIR = resolve(process.cwd(), ".agents", "canvas");
 
-const { enqueue: enqueueSend } = createSendQueue({ log });
+const { enqueue: enqueueSend, enqueueAndWait: sendStartupPrompt } = createSendQueue({ log });
 
 async function readCanvasFile(filename) {
   const filePath = resolve(CANVAS_DIR, filename);
@@ -148,7 +148,17 @@ function startHttpServer(session, state, shutdownCapability) {
         }
         const { kind, prompt } = transport;
         log(`/inject received: transport length=${body.length}, prompt length=${prompt.length}`);
-        enqueueSend(session, kind, prompt);
+        if (kind === "startup-prompt") {
+          try {
+            await sendStartupPrompt(session, kind, prompt);
+          } catch {
+            res.writeHead(503, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "startup prompt rejected" }));
+            return;
+          }
+        } else {
+          enqueueSend(session, kind, prompt);
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
         return;
