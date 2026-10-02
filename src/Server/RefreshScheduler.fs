@@ -10,10 +10,11 @@ open Server.SessionActivity
 open Server.SchedulerState
 
 type SchedulerServices =
-    { StartEmbeddedCommand:
+    { StartPromptedAgent:
+        CodingToolProvider option ->
         WorktreePath ->
         string ->
-        Async<Result<EmbeddedTerminalStartResult, string>>
+        Async<Result<EmbeddedTerminalStartResult, PromptedLaunchError>>
       ActivityStore: SessionActivityStore.SessionActivityStore option
       MergedPrStore: MergedPrStore.Store
       AutoSyncStore: AutoSyncStore.Store }
@@ -67,23 +68,22 @@ let internal reloadGitData (agent: MailboxProcessor<StateMsg>) (repoId: RepoId) 
 
 let internal autoSyncDependencies
     (agent: MailboxProcessor<StateMsg>)
-    (startEmbeddedCommand:
+    (startPromptedAgent:
+        CodingToolProvider option ->
         WorktreePath ->
         string ->
-        Async<Result<EmbeddedTerminalStartResult, string>>)
+        Async<Result<EmbeddedTerminalStartResult, PromptedLaunchError>>)
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (autoSyncStore: AutoSyncStore.Store option)
     : AutoSync.TriggerDependencies =
     let launch worktreePath text =
         async {
             let provider = CodingToolStatus.readConfiguredProvider (WorktreePath.value worktreePath)
-            let command =
-                CodingToolCli.build provider (CodingToolCli.Interactive text)
-
             let! result =
-                startEmbeddedCommand
+                startPromptedAgent
+                    provider
                     worktreePath
-                    command.AsShellString
+                    text
 
             return result |> Result.map ignore
         }
@@ -433,7 +433,7 @@ let internal executeTask
             AutoSync.triggerInBackground
                 (autoSyncDependencies
                     agent
-                    services.StartEmbeddedCommand
+                    services.StartPromptedAgent
                     services.ActivityStore
                     (Some services.AutoSyncStore))
                 repoRoot

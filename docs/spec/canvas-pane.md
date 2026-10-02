@@ -172,7 +172,10 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   then tells the replacement session to load the canvas skill, claim the focused doc using the JSON
   `filename`, and read `.agents/canvas/<filename>` beneath the JSON `worktreePath` before handling
   user interactions through the doc. The direct action opens the terminal pane and selects the
-  exact new terminal.
+  exact new terminal after SDK acceptance. The full instruction reaches the fresh session through
+  the shared `startup-prompt` bridge handshake, never through a multiline `-i` shell argument; the
+  source worktree and bare filename come from the pane's selected document, not document-authored
+  interaction payloads. See `docs/spec/embedded-terminal.md`.
 - AgentDoc messages route to the selected doc's author session.
 - If the recorded owner is unreachable, the message queues. After a replacement session claims the doc, its next bridge registration can deliver the waiting message; doc identity never changes.
 - SystemView interactions resolve the current effective session at send time. It is not surfaced as
@@ -217,7 +220,11 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 
 ### Message Queue
 
-- If no live bridge can take the message, the server queues it per worktree (cap 10, 5-min TTL) and returns `Queued`. Draining re-resolves the current target — see `docs/spec/canvas-interaction-routing.md`.
+- If no live bridge can take the message, the server queues it per worktree (cap 10 ordinary
+  messages, 5-min TTL) and returns `Queued`. A prompted startup reservation is exempt from those
+  limits and must be accepted before queued interactions drain. A failed automatic startup
+  returns the shared typed launch error and the client renders it in the existing failure banner.
+  Draining re-resolves the current target — see `docs/spec/canvas-interaction-routing.md`.
 - While queued, the client shows a `Waiting for session…` banner instead of an immediate error.
 - The banner clears to `Idle` only when the target worktree's session actually delivers (never flipped to `Failed` by a wall-clock timer). The user may dismiss it manually, and the server may silently expire the message after its TTL.
 

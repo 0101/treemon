@@ -1,6 +1,7 @@
 module Server.CanvasBridge
 
 open System
+open System.Threading
 open System.Threading.Tasks
 open Shared
 open Server.SessionActivity
@@ -147,13 +148,17 @@ type internal CanvasSendOutcome =
     | QueuedNeedingSession of CanvasMessageResult
 
 /// Route one canvas interaction.
-let internal sendMessage (sessionInstances: StoredInstance seq) (request: CanvasMessageRequest) =
+let internal sendMessage
+    (queueCancellationToken: CancellationToken)
+    (sessionInstances: StoredInstance seq)
+    (request: CanvasMessageRequest)
+    =
     async {
         let worktreePath = WorktreePath.value request.WorktreePath
         let! target = resolveTarget sessionInstances worktreePath request.Filename
 
         let! sendResult =
-            SessionBridge.send
+            SessionBridge.send queueCancellationToken
                 { WorktreePath = worktreePath
                   Target = SessionBridge.SendTarget.ofSessionId target
                   Prompt = SessionBridge.Prompt.canvasFor request.Filename request.Payload }

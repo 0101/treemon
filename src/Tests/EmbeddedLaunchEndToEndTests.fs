@@ -55,7 +55,13 @@ type private RecorderEvidence =
     { Raw: string
       TerminalSessionId: string
       WorktreePath: string
-      Arguments: string list }
+      Arguments: string list
+      InitialPrompt: string option }
+
+[<RequireQualifiedAccess>]
+type private LaunchExpectation =
+    | Arguments of string list
+    | Prompt of string
 
 type private ProcessResult =
     { ExitCode: int
@@ -112,17 +118,7 @@ let private hostExecutable =
 let private ttydExecutable =
     Path.Combine(Path.GetDirectoryName(hostExecutable), TerminalHostLayout.TtydExecutableName)
 
-let private recorderExecutable =
-    Path.Combine(
-        repoRoot,
-        "src",
-        "Tests",
-        "TestAgentRecorder",
-        "bin",
-        configuration,
-        "net10.0",
-        "copilot.exe"
-    )
+let private recorderExecutable = Tests.TestUtils.copilotRecorderExecutable
 
 let private emit (message: string) =
     TestContext.Progress.WriteLine(message)
@@ -131,7 +127,7 @@ let private ensure (condition: bool) (message: string) =
     if not condition then
         raise (InvalidOperationException(message))
 
-let private requireOk (context: string) (result: Result<'a, string>) =
+let private requireOk (context: string) (result: Result<'a, 'error>) =
     match result with
     | Ok value -> value
     | Error error -> raise (InvalidOperationException($"{context}: {error}"))
@@ -189,7 +185,8 @@ let private parseRecorderLine (raw: string) : RecorderEvidence =
     { Raw = raw
       TerminalSessionId = jsonString "terminalSessionId" root
       WorktreePath = jsonString "worktreePath" root
-      Arguments = parsedArguments }
+      Arguments = parsedArguments
+      InitialPrompt = root.GetProperty("initialPrompt").GetString() |> Option.ofObj }
 
 let private readRecorder (path: string) =
     if File.Exists(path) then
@@ -545,7 +542,7 @@ let private windowsTerminalHandles () =
 
 let private startResultId
     (context: string)
-    (result: Result<EmbeddedTerminalStartResult, string>)
+    (result: Result<EmbeddedTerminalStartResult, 'error>)
     =
     result
     |> requireOk context
@@ -559,7 +556,7 @@ let private runRoute
     (server: RunningProcess)
     (name: string)
     (expectedPath: string)
-    (expectedArguments: string list)
+    (expectation: LaunchExpectation)
     (invoke: unit -> Async<string option>)
     =
     async {
@@ -636,11 +633,21 @@ let private runRoute
             ($"Route '{name}' recorder worktree mismatch: "
              + $"{addedRecorder.WorktreePath}")
 
-        ensure
-            (addedRecorder.Arguments = expectedArguments)
-            ($"Route '{name}' recorder args mismatch.{Environment.NewLine}"
-             + $"Expected: {JsonSerializer.Serialize(expectedArguments)}{Environment.NewLine}"
-             + $"Actual: {addedRecorder.Raw}")
+        match expectation with
+        | LaunchExpectation.Arguments expected ->
+            ensure
+                (addedRecorder.Arguments = expected && addedRecorder.InitialPrompt.IsNone)
+                $"Route '{name}' recorder command mismatch: {addedRecorder.Raw}"
+        | LaunchExpectation.Prompt expected ->
+            let freshSessionCommand =
+                match addedRecorder.Arguments with
+                | [ "--experimental"; "--yolo"; selector ] when selector.StartsWith("--session-id=") ->
+                    Guid.TryParse(selector.Substring("--session-id=".Length)) |> fst
+                | _ -> false
+
+            ensure
+                (freshSessionCommand && addedRecorder.InitialPrompt = Some expected)
+                $"Route '{name}' did not preserve its complete bridge startup prompt: {addedRecorder.Raw}"
 
         do! Async.Sleep 500
         let! stable = readRegistry client manifest
@@ -805,7 +812,9 @@ let private startServer fixture port =
               fixture.HostStateDirectory
               "TREEMON_TERMINAL_HOST_EXECUTABLE", hostExecutable
               "TREEMON_CONFIG_DIR", fixture.ConfigDirectory
+              "TREEMON_PORT", string port
               "TM_COPILOT_RECORDER", fixture.RecorderPath
+              "TM_COPILOT_BRIDGE_STARTUP", "1"
               "PATH",
               $"{Path.GetDirectoryName(recorderExecutable)}{Path.PathSeparator}{originalPath}" ]
 
@@ -1024,6 +1033,24 @@ let private cleanupRuntime
     =
     async {
         let errors = ConcurrentQueue<string>()
+        let api = Cli.Program.createApi serverPort
+
+        for path in
+            [ fixture.Repository
+              fixture.RoutesWorktree
+              fixture.CanvasWorktree
+              fixture.CliWorktree
+              fixture.AutoSyncWorktree
+              fixture.CreatedWorktree ]
+            |> List.filter Directory.Exists do
+            match! api.killSession (WorktreePath path) |> Async.Catch with
+            | Choice1Of2(Ok())
+            | Choice1Of2(Error "No active session for this worktree") -> ()
+            | Choice1Of2(Error error) ->
+                errors.Enqueue($"Session cleanup failed for fixture worktree '{path}': {error}")
+            | Choice2Of2 error ->
+                errors.Enqueue($"Session cleanup crashed for fixture worktree '{path}': {error.Message}")
+
         let manifestPath =
             Path.Combine(
                 fixture.HostStateDirectory,
@@ -1229,7 +1256,7 @@ let private verifyForcedDeliveryFailure
                 let command =
                     CodingToolCli.build
                         None
-                        (CodingToolCli.Interactive prompt)
+                        (CodingToolCli.NewSession(Guid.NewGuid().ToString()))
 
                 let! result =
                     EmbeddedTerminal.startWithCommand
@@ -1239,7 +1266,7 @@ let private verifyForcedDeliveryFailure
 
                 let reduced = result |> Result.map ignore
                 launchResults.Enqueue(reduced)
-                return reduced
+                return reduced |> Result.mapError (fun _ -> PromptedLaunchError.TerminalStartFailed)
             }
 
         let deliver request =
@@ -1468,7 +1495,7 @@ let private runScenario client fixture server api port =
                 server
                 "launchSession"
                 fixture.RoutesWorktree
-                [ "--experimental"; "--yolo"; "-i"; directPrompt ]
+                (LaunchExpectation.Prompt directPrompt)
                 (fun () ->
                     async {
                         let! result =
@@ -1493,7 +1520,7 @@ let private runScenario client fixture server api port =
                 server
                 "startAgent"
                 fixture.RoutesWorktree
-                [ "--yolo" ]
+                (LaunchExpectation.Arguments [ "--yolo" ])
                 (fun () ->
                     async {
                         let! result =
@@ -1517,7 +1544,7 @@ let private runScenario client fixture server api port =
                 server
                 "tm-launch"
                 fixture.CliWorktree
-                [ "--experimental"; "--yolo"; "-i"; Cli.Program.metaPrompt ]
+                (LaunchExpectation.Prompt Cli.Program.metaPrompt)
                 (fun () ->
                     async {
                         let! result =
@@ -1589,7 +1616,7 @@ let private runScenario client fixture server api port =
                 server
                 "launchAction"
                 fixture.RoutesWorktree
-                [ "--experimental"; "--yolo"; "-i"; actionPrompt ]
+                (LaunchExpectation.Prompt actionPrompt)
                 (fun () ->
                     async {
                         let! result =
@@ -1614,7 +1641,7 @@ let private runScenario client fixture server api port =
                 server
                 "resumeSession"
                 fixture.RoutesWorktree
-                [ "--experimental"; "--yolo"; "--continue" ]
+                (LaunchExpectation.Arguments [ "--experimental"; "--yolo"; "--continue" ])
                 (fun () ->
                     async {
                         let! result =
@@ -1642,9 +1669,8 @@ let private runScenario client fixture server api port =
                 server
                 "resumeSessionWithDurableId"
                 fixture.RoutesWorktree
-                [ "--experimental"
-                  "--yolo"
-                  $"--session-id={durableSessionId}" ]
+                (LaunchExpectation.Arguments
+                    [ "--experimental"; "--yolo"; $"--session-id={durableSessionId}" ])
                 (fun () ->
                     async {
                         let! result =
@@ -1675,7 +1701,7 @@ let private runScenario client fixture server api port =
                 server
                 "explicit-canvas-session"
                 fixture.CanvasWorktree
-                [ "--experimental"; "--yolo"; "-i"; canvasPrompt ]
+                (LaunchExpectation.Prompt canvasPrompt)
                 (fun () ->
                     async {
                         let! result =
@@ -1703,7 +1729,7 @@ let private runScenario client fixture server api port =
                 server
                 "create-worktree-with-prompt"
                 fixture.CreatedWorktree
-                [ "--experimental"; "--yolo"; "-i"; createPrompt ]
+                (LaunchExpectation.Prompt createPrompt)
                 (fun () ->
                     async {
                         let! result =
@@ -1740,7 +1766,7 @@ let private runScenario client fixture server api port =
                 server
                 "queued-canvas-fallback"
                 fixture.CanvasWorktree
-                [ "--experimental"; "--yolo"; "-i"; queuedPrompt ]
+                (LaunchExpectation.Prompt queuedPrompt)
                 (fun () ->
                     async {
                         let! result =
@@ -1798,7 +1824,7 @@ let private runScenario client fixture server api port =
                 server
                 "autosync-fallback"
                 fixture.AutoSyncWorktree
-                [ "--experimental"; "--yolo"; "-i"; autoSyncPrompt ]
+                (LaunchExpectation.Prompt autoSyncPrompt)
                 (fun () ->
                     async {
                         let! result =

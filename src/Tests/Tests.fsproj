@@ -8,6 +8,8 @@
 
   <ItemGroup>
     <Compile Include="TestUtils.fs" />
+    <Compile Include="BridgeFixture.fs" />
+    <Compile Include="BridgeFixtureTests.fs" />
     <Compile Include="CanvasFilenameTests.fs" />
     <Compile Include="SqliteTestDatabase.fs" />
     <Compile Include="WorktreeFixtures.fs" />
@@ -83,6 +85,7 @@
     <Compile Include="RemoveWorktreeTests.fs" />
     <Compile Include="CanvasTestHelpers.fs" />
     <Compile Include="CanvasPromptTests.fs" />
+    <Compile Include="StartupPromptTests.fs" />
     <Compile Include="WorkspaceLayoutTests.fs" />
     <Compile Include="CanvasPathCopyTests.fs" />
     <Compile Include="CanvasPaneTests.fs" />

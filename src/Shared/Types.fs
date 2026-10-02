@@ -249,6 +249,42 @@ type EmbeddedTerminalStartResult =
     { Snapshot: EmbeddedTerminalSnapshot
       TerminalId: EmbeddedTerminalId }
 
+[<RequireQualifiedAccess>]
+type StartupPromptFailure =
+    | TimedOut
+    | Rejected
+
+[<RequireQualifiedAccess>]
+type PromptedLaunchError =
+    | UnknownWorktree of WorktreePath
+    | Unavailable of mode: string
+    | TerminalStartFailed
+    | StartupFailed of StartupPromptFailure
+    | StartupCleanupFailed of StartupPromptFailure * terminalId: EmbeddedTerminalId
+    | Unexpected
+
+module PromptedLaunchError =
+    let private startupMessage =
+        function
+        | StartupPromptFailure.TimedOut ->
+            "Timed out waiting for Copilot's Treemon extension to accept the startup prompt."
+        | StartupPromptFailure.Rejected ->
+            "Copilot's Treemon extension rejected the startup prompt."
+
+    let message =
+        function
+        | PromptedLaunchError.UnknownWorktree path ->
+            $"Unknown worktree path: {WorktreePath.value path}"
+        | PromptedLaunchError.Unavailable mode ->
+            $"Session management is not available in {mode}"
+        | PromptedLaunchError.TerminalStartFailed ->
+            "Could not start the embedded terminal. Check the server log for details."
+        | PromptedLaunchError.StartupFailed failure -> startupMessage failure
+        | PromptedLaunchError.StartupCleanupFailed(failure, _) ->
+            $"{startupMessage failure} Could not confirm cleanup of the new terminal. Check the server log for details."
+        | PromptedLaunchError.Unexpected ->
+            "Could not start the coding session. Try again."
+
 type CanvasDocKind =
     | AgentDoc      // authored & owned by a session; interactive; file-driven
     | SystemView    // server-generated; data-driven; no owner (e.g. the beads dashboard)
@@ -399,6 +435,7 @@ type CanvasMessageResult =
     | Ok
     | Error of string
     | Queued
+    | SessionStartFailed of PromptedLaunchError
 
 type BridgeLiveness =
     { IsAlive: bool

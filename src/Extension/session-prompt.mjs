@@ -1,7 +1,7 @@
 import { isSystemViewFilename } from "./canvas-doc-kinds.mjs";
 import { isValidCanvasFilename } from "./canvas-filename.mjs";
 
-/** @typedef {"canvas" | "agent-prompt"} SessionPromptKind */
+/** @typedef {"canvas" | "agent-prompt" | "startup-prompt"} SessionPromptKind */
 export const MAX_CANVAS_MESSAGE_CHARS = 64000;
 
 const CANVAS_EDIT_REMINDER =
@@ -52,6 +52,7 @@ export function promptForSession(body) {
     case "canvas":
       return promptForCanvasMessage(transport.prompt);
     case "agent-prompt":
+    case "startup-prompt":
       return { kind: transport.kind, prompt: transport.prompt };
     default:
       throw new Error("unknown prompt kind");

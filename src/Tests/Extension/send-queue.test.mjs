@@ -85,5 +85,57 @@ test("a rejected send leaves no stale pending key", async () => {
   await drain(gates);
 
   assert.deepEqual(sent, ["retry me", "retry me"]);
-  assert.ok(failures.some((message) => message.includes("bridge closed")));
+  assert.ok(failures.some((message) => message.includes("session.send FAILED")));
+  assert.ok(failures.every((message) => !message.includes("bridge closed")));
+});
+
+test("startup acceptance waits for session.send and preserves the complete prompt", async () => {
+  const { session, sent, gates } = gatedSession();
+  const queue = createSendQueue();
+  const prompt =
+    "Take over the canvas doc identified by the JSON object below.\n" +
+    '{"worktreePath":"Q:\\\\owner\'s repo with spaces","filename":"selected.html"}\n\n' +
+    "Use the canvas skill, claim the selected file, and read its current state.";
+  let accepted = false;
+  const completion = queue.enqueueAndWait(session, "startup-prompt", prompt);
+  completion.then(() => { accepted = true; });
+
+  await tick();
+  assert.deepEqual(sent, [prompt]);
+  assert.equal(accepted, false, "queueing alone must not acknowledge startup");
+
+  gates[0].resolve();
+  await completion;
+  assert.equal(accepted, true);
+});
+
+test("startup rejection reaches its caller without wedging subsequent sends", async () => {
+  const { session, sent, gates } = gatedSession();
+  const queue = createSendQueue();
+  const completion = queue.enqueueAndWait(session, "startup-prompt", "initial task");
+  const rejection = assert.rejects(completion, /SDK rejected startup/);
+
+  await tick();
+  gates[0].reject(new Error("SDK rejected startup"));
+  await rejection;
+
+  queue.enqueue(session, "agent-prompt", "later task");
+  await tick();
+  gates[1].resolve();
+  await tick();
+  assert.deepEqual(sent, ["initial task", "later task"]);
+});
+
+test("coalesced startup callers await the same SDK acceptance", async () => {
+  const { session, sent, gates } = gatedSession();
+  const queue = createSendQueue();
+
+  const first = queue.enqueueAndWait(session, "startup-prompt", "initial task");
+  const duplicate = queue.enqueueAndWait(session, "startup-prompt", "initial task");
+  assert.equal(first, duplicate);
+  await tick();
+  assert.deepEqual(sent, ["initial task"]);
+
+  gates[0].resolve();
+  await Promise.all([first, duplicate]);
 });
