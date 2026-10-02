@@ -445,10 +445,10 @@ type BridgeLiveness =
       SystemViewTargetSessionId: string option }
 
 module BridgeLiveness =
-    let hasLiveSession sessionId (byWorktree: Map<string, BridgeLiveness>) =
+    let hasLiveSession worktreePath sessionId (byWorktree: Map<string, BridgeLiveness>) =
         byWorktree
-        |> Map.values
-        |> Seq.exists (fun liveness -> liveness.LiveSessionIds |> List.contains sessionId)
+        |> Map.tryFind worktreePath
+        |> Option.exists (fun liveness -> liveness.LiveSessionIds |> List.contains sessionId)
 
 type ActionKind =
     | FixPr of url: string

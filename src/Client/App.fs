@@ -1719,7 +1719,7 @@ let update msg model =
 
     | NavigateCanvasDoc filename -> CanvasUpdate.navigateCanvasDoc filename model
 
-    | CanvasMessageReceived payload -> CanvasUpdate.canvasMessageReceived payload model
+    | CanvasMessageReceived request -> CanvasUpdate.canvasMessageReceived request model
 
     | CanvasSendResult (result, scopedKey, filename) -> CanvasUpdate.canvasSendResult result scopedKey filename model
 

@@ -43,10 +43,9 @@ let internal terminalSessionCleanupWithDiagnostics
                             originPaths
                             |> Map.tryFind session.TerminalSessionId
                             |> Option.map (fun worktreePath ->
-                                ({ WorktreePath =
-                                    WorktreePath.value worktreePath
-                                   ProcessIdentity =
-                                    session.ProcessIdentity }
+                                ({ WorktreePath = WorktreePath.value worktreePath
+                                   SessionId = session.CopilotSessionId
+                                   ProcessIdentity = session.ProcessIdentity }
                                  : SessionBridge.ShutdownTarget)))
 
                     let! _ =

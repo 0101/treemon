@@ -11,8 +11,30 @@ open System.Text
 open System.Text.RegularExpressions
 open System.Threading.Tasks
 open NUnit.Framework
+open Giraffe
+open Microsoft.AspNetCore.Http
+open Microsoft.Extensions.DependencyInjection
 open Server
 open Server.SessionActivity
+
+let handlerResponse (handler: HttpHandler) (requestBody: string) =
+    let services = ServiceCollection()
+    services.AddGiraffe() |> ignore
+    use provider = services.BuildServiceProvider()
+    let context = DefaultHttpContext()
+    let requestBytes = Encoding.UTF8.GetBytes requestBody
+    use body = new MemoryStream(requestBytes)
+    use response = new MemoryStream()
+    context.RequestServices <- provider
+    context.Request.ContentType <- "application/json"
+    context.Request.ContentLength <- requestBytes.LongLength
+    context.Request.Body <- body
+    context.Response.Body <- response
+    let next: HttpFunc = fun current -> Task.FromResult(Some current)
+    handler next context |> _.GetAwaiter().GetResult() |> ignore
+    response.Position <- 0L
+    use reader = new StreamReader(response)
+    context.Response.StatusCode, reader.ReadToEnd()
 
 let syntheticProcessIdForSessionId (sessionId: string) =
     sessionId
@@ -73,7 +95,7 @@ let bridgeRegistrationRequest
       ShutdownUrl = "http://127.0.0.1:1/shutdown"
       ShutdownCapability = shutdownCapability
       SessionId = sessionId
-      ParentProcessId = ProcessIdentity.processId identity
+      ParentProcessId = Some(ProcessIdentity.processId identity)
       TerminalSessionId = terminalSessionId }
 
 let registerExactSession
@@ -233,7 +255,7 @@ let withTempDir (prefix: string) (action: string -> 'a) =
 
 /// Run `action` with the process CWD swapped to a throwaway temp directory, then
 /// restore and delete it. Tests that persist relative to the current directory
-/// (e.g. CanvasDocOwnership.attribute writes data/canvas-owners.json under CWD) use
+/// (e.g. CanvasDocOwnership.assign writes data/canvas-owners.json under CWD) use
 /// this so they never touch the real data file. CWD is process-global, so callers
 /// must stay non-parallel (the canvas fixtures are [<NonParallelizable>]).
 let withTempCwd (action: unit -> unit) =
@@ -435,7 +457,8 @@ let startServerProcess (repoRoot: string) (rootArgs: string) (port: int) (canvas
         "dotnet"
         $""""{serverAssemblyPath}" {rootArgs} --port {port} --canvas-port {canvasPort} --test-fixtures "{fixturePath}" --log-dir "{logDirectory}" """
         repoRoot
-        [ "TREEMON_TERMINAL_HOST_STATE_DIR", terminalHostStateDirectory ]
+        [ "TREEMON_TERMINAL_HOST_STATE_DIR", terminalHostStateDirectory
+          "TREEMON_CONFIG_DIR", Path.Combine(terminalHostStateDirectory, "treemon-config") ]
         false
 
 /// Launch the installed Vite script directly so teardown owns Node rather than an `npx` wrapper.

@@ -295,35 +295,6 @@ let private idleEvent kind =
     | "went_idle" -> WentIdle
     | other -> invalidArg (nameof kind) $"unknown idle event: {other}"
 
-let private handlerResponse
-    (handler: HttpHandler)
-    (requestBody: string)
-    =
-    let services = ServiceCollection()
-    services.AddGiraffe() |> ignore
-    use provider = services.BuildServiceProvider()
-    let context = DefaultHttpContext()
-    let requestBytes = Encoding.UTF8.GetBytes requestBody
-    use body = new MemoryStream(requestBytes)
-    use response = new MemoryStream()
-    context.RequestServices <- provider
-    context.Request.ContentType <- "application/json"
-    context.Request.ContentLength <- requestBytes.LongLength
-    context.Request.Body <- body
-    context.Response.Body <- response
-
-    let next: HttpFunc =
-        fun current -> Task.FromResult(Some current)
-
-    handler next context
-    |> _.GetAwaiter().GetResult()
-    |> ignore
-
-    response.Position <- 0L
-    use reader = new StreamReader(response)
-    context.Response.StatusCode, reader.ReadToEnd()
-
-
 // ── DTO → domain parse ────────────────────────────────────────────────────────
 [<TestFixture>]
 [<Category("Unit")>]

@@ -600,7 +600,7 @@ let internal deleteWorktreeWith
         WorktreePath ->
         (unit -> Async<Result<unit, string>>) ->
         Async<Result<unit, string>>)
-    (removeWorktreeState: string -> Async<unit>)
+    (removeWorktreeState: string -> Async<Result<unit, string>>)
     (recordDeletedWorktree: string -> Result<unit, string>)
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
@@ -645,8 +645,10 @@ let private deleteWorktree
     wtPath
     =
     let removeWorktreeState path =
-        async {
-            do! CanvasDocOwnership.removeWorktree path
+        asyncResult {
+            do!
+                CanvasDocOwnership.removeWorktree path
+                |> Async.map (Result.mapError (fun _ -> "Could not remove durable canvas ownership"))
             do! WorktreeDiffApi.removeWorktree path
             clearAcceptedSync path
         }
@@ -754,7 +756,9 @@ type internal WorktreeApiDependencies =
       AppVersion: string
       DeployBranch: string option }
 
-let internal worktreeApiWithLaunch
+let internal worktreeApiWithLaunchUsing
+    (registrationDelay: int -> Async<unit>)
+    (beginInteractionLaunch: string -> Async<CanvasBridge.PendingLaunchResult>)
     (terminalLaunch: TerminalLaunch.Operations)
     (dependencies: WorktreeApiDependencies)
     : IWorktreeApi =
@@ -1265,65 +1269,87 @@ let internal worktreeApiWithLaunch
                           | None -> return! start ()
                   })
           sendCanvasMessage = fun request ->
-              withValidatedPathValue
-                  request.WorktreePath
-                  "sendCanvasMessage"
-                  (fun path -> CanvasMessageResult.Error $"Unknown worktree path: {WorktreePath.value path}")
-                  (fun () ->
+              let rawPath = WorktreePath.value request.WorktreePath
+              let normalized =
+                  if String.IsNullOrWhiteSpace rawPath || not (Path.IsPathFullyQualified rawPath) then None
+                  else PathUtils.tryNormalizePath rawPath
+              match normalized with
+              | None -> async.Return(CanvasMessageResult.Error "Invalid canvas worktree path")
+              | Some path ->
+                  let request = { request with WorktreePath = WorktreePath path }
+                  withValidatedPathValue
+                      request.WorktreePath
+                      "sendCanvasMessage"
+                      (WorktreePath.value >> fun unknown -> CanvasMessageResult.Error $"Unknown worktree path: {unknown}")
+                      (fun () ->
                       let send = async {
                           use queueCancellation = new CancellationTokenSource()
-                          let path = WorktreePath.value request.WorktreePath
-                          let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
-                          let! outcome =
-                              CanvasBridge.sendMessage
-                                  queueCancellation.Token
-                                  (state.SessionInstances |> Map.values)
-                                  request
-
-                          match outcome with
-                          | CanvasBridge.Routed result -> return result
-                          | CanvasBridge.QueuedNeedingSession result ->
-                              match! CanvasBridge.beginPendingLaunch path with
-                              | CanvasBridge.PendingLaunchJoined ->
-                                  Log.log
-                                      "API"
-                                      $"sendCanvasMessage: a launch is already starting for {request.Filename}"
-
-                                  return result
-                              | CanvasBridge.PendingLaunchStarted ->
-                                  let provider = CodingToolStatus.readConfiguredProvider path
-                                  let prompt = CanvasPrompt.continueWorking path request.Filename
-                                  Log.log
-                                      "API"
-                                      $"sendCanvasMessage: no reachable session for {request.Filename}; launching one"
-
-                                  let! attempted =
-                                      terminalLaunch.StartPromptedAgent
-                                          provider
-                                          request.WorktreePath
-                                          prompt
-                                      |> Async.Catch
-
-                                  let launchResult =
-                                      match attempted with
-                                      | Choice1Of2 launched -> launched
-                                      | Choice2Of2 ex ->
-                                          Log.logException
-                                              "API"
-                                              $"Canvas session launch failed for worktree={JsonConvert.SerializeObject path}"
-                                              ex
-                                          Error PromptedLaunchError.Unexpected
-
-                                  match launchResult with
-                                  | Ok _ -> return result
-                                  | Error error ->
-                                      queueCancellation.Cancel()
-                                      do! CanvasBridge.cancelPendingLaunch path
-                                      return CanvasMessageResult.SessionStartFailed error
+                          if not (CanvasFilename.isValid request.Filename) then
+                              return CanvasMessageResult.Error "Invalid canvas filename"
+                          else
+                              match CanvasBridge.validateCanvasPayload request.Payload with
+                              | Error error -> return CanvasMessageResult.Error error
+                              | Ok() ->
+                                  let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+                                  let! outcome =
+                                      CanvasBridge.sendMessage
+                                          queueCancellation.Token
+                                          (state.SessionInstances |> Map.values)
+                                          request
+                                  match outcome with
+                                  | CanvasBridge.Routed result -> return result
+                                  | CanvasBridge.QueuedNeedingSession(recipient, result) ->
+                                      let completeLaunch launchAt terminalId =
+                                          async {
+                                              match TerminalSessionId.create (EmbeddedTerminalId.value terminalId) with
+                                              | Error _ ->
+                                                  do! CanvasBridge.cancelPendingLaunchAt path launchAt
+                                                  return CanvasMessageResult.Error "Interaction launch returned an invalid terminal identity"
+                                              | Ok exactTerminal ->
+                                                  let resolveSession () =
+                                                      async {
+                                                          let! current = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+                                                          return
+                                                              TerminalSessionActivity.tryFindCurrentSessionForTerminal
+                                                                  DateTimeOffset.UtcNow
+                                                                  request.WorktreePath
+                                                                  exactTerminal
+                                                                  (current.SessionInstances |> Map.values)
+                                                      }
+                                                  do! CanvasBridge.completePendingLaunch path launchAt exactTerminal resolveSession
+                                                  return result
+                                          }
+                                      return!
+                                          CanvasBridge.coordinateSystemViewFallbackUsing registrationDelay path recipient (fun () ->
+                                              async {
+                                                  match! beginInteractionLaunch path with
+                                                  | CanvasBridge.PendingLaunchJoined(launchAt, _) ->
+                                                      let! _ = CanvasBridge.reservePendingLaunch path launchAt
+                                                      return result
+                                                  | CanvasBridge.PendingLaunchStarted launchAt ->
+                                                      let! reserved = CanvasBridge.reservePendingLaunch path launchAt
+                                                      if not reserved then return result
+                                                      else
+                                                          let provider = CodingToolStatus.readConfiguredProvider path
+                                                          let prompt = CanvasPrompt.continueWorking path request.Filename
+                                                          Log.log "API" $"sendCanvasMessage: launching an interaction terminal for {request.Filename}"
+                                                          match! terminalLaunch.StartPromptedAgent provider request.WorktreePath prompt |> Async.Catch with
+                                                          | Choice1Of2(Ok started) ->
+                                                              return! completeLaunch launchAt started.TerminalId
+                                                          | Choice1Of2(Error error) ->
+                                                              queueCancellation.Cancel()
+                                                              do! CanvasBridge.cancelPendingLaunchAt path launchAt
+                                                              Log.log "API" "Interaction terminal launch rejected"
+                                                              return CanvasMessageResult.SessionStartFailed error
+                                                          | Choice2Of2 ex ->
+                                                              queueCancellation.Cancel()
+                                                              do! CanvasBridge.cancelPendingLaunchAt path launchAt
+                                                              Log.logException "API" "Interaction terminal launch failed" ex
+                                                              return CanvasMessageResult.SessionStartFailed PromptedLaunchError.Unexpected
+                                              })
                       }
 
-                      // Finish startup and queue rollback even if the requesting browser disconnects.
                       Async.StartAsTask(send, cancellationToken = CancellationToken.None)
                       |> Async.AwaitTask)
           archiveCanvasDoc = fun req ->
@@ -1355,6 +1381,7 @@ let internal worktreeApiWithLaunch
                       |> Option.defaultValue []
                       |> fun instances ->
                           CanvasBridge.selectSystemViewTarget
+                              DateTimeOffset.UtcNow
                               instances
                               liveSessions
                       |> Option.map SessionId.value
@@ -1401,6 +1428,9 @@ let internal worktreeApiWithLaunch
                                 )
                             )
                     } }
+
+let internal worktreeApiWithLaunch terminalLaunch dependencies =
+    worktreeApiWithLaunchUsing Async.Sleep CanvasBridge.beginPendingLaunch terminalLaunch dependencies
 
 let internal worktreeApi
     (dependencies: WorktreeApiDependencies)

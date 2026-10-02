@@ -149,18 +149,20 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 
 ### Liveness and Session Routing
 
-- The bridge registry is keyed by exact Copilot process identity. Secondary worktree and durable
-  `SessionId` lookup keeps multiple sessions in one worktree and multiple physical processes for one
-  durable session without overwriting either. Canvas ownership collapses same-`SessionId` duplicates
-  to the freshest live physical registration (see `docs/spec/canvas-interaction-routing.md`).
+- The bridge registry has one current entry per required, validated durable `SessionId`. Latest
+  valid registration or heartbeat receipt wins, even from an older physical instance. The required
+  normalized monitored worktree scopes delivery and liveness. Registering that session elsewhere
+  replaces its one entry, leaving original documents owned but offline and queued.
 - Only AgentDocs have a persistent routing target in `CanvasDocOwnership.fs`, assigned from
-  authoring writes. A SystemView target is computed from current live bridge registrations and is
+  authoring writes. A SystemView target is computed from current worktree activity and reachability and is
   never stored.
-- `BridgeLiveness.LiveSessionIds` exposes every identified session whose registration is within
-  the liveness TTL. It also exposes the exact current activity-aware SystemView target for each
-  worktree, or none when no live registration exists. Heartbeat and usage timestamps do not choose
-  that target.
-- The liveness dot shown in tabs and overview checks the doc's `OwnerSessionId` against `LiveSessionIds`, so two concurrently heartbeating sessions in one worktree both keep their own documents alive regardless of heartbeat order. It renders only for `AgentDoc` docs (via `livenessDotFor`); a `SystemView` has no owner session and shows no liveness dot.
+- `BridgeLiveness.LiveSessionIds` exposes sessions whose latest bridge is live in that worktree.
+  It also exposes the computed SystemView activity recipient, including a temporary bridge gap.
+  Heartbeat and usage timestamps do not choose that recipient.
+- Tabs, overview dots, and Start-session visibility check the owner's ID only in the source
+  worktree's liveness snapshot. A bridge solely in another worktree cannot light the original
+  document's dot. AgentDoc dots are independent of the freshest co-located session; SystemViews
+  have no owner and no liveness dot.
 - A canvas tab's effective session is its AgentDoc owner or its SystemView target. A dark green
   background tint and green primary text appear only when that session is present in the selected
   running terminal and the Terminal pane is visible. Unowned tabs retain their original colors;
@@ -177,11 +179,15 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   source worktree and bare filename come from the pane's selected document, not document-authored
   interaction payloads. See `docs/spec/embedded-terminal.md`.
 - AgentDoc messages route to the selected doc's author session.
-- If the recorded owner is unreachable, the message queues. After a replacement session claims the doc, its next bridge registration can deliver the waiting message; doc identity never changes.
+- AgentDoc messages route to the sending iframe's document owner, not a later selected tab.
+- If the owner is unreachable, the message queues without starting a nonowner session. A successful
+  durable claim wakes waiting delivery immediately when the new owner's local bridge is already
+  live; otherwise it waits for registration. Save failure retains the prior owner and allows retry.
 - SystemView interactions resolve the current effective session at send time. It is not surfaced as
   `OwnerSessionId`, so authored-document liveness UI is unaffected. If no session can receive the
   interaction, the
-  server starts one embedded session with a SystemView-specific prompt without stealing dashboard
+  server allows bounded bridge-gap registration grace, then starts one embedded session when
+  needed with a SystemView-specific prompt without stealing dashboard
   focus: load the canvas skill for its interaction protocol, but do not apply its authoring
   instructions because the view is generated and must not be edited or claimed; the queued user
   request will arrive separately. See
@@ -197,23 +203,28 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   document updates or another selection starts.
 - A trusted SystemView may add bounded structured `sourceContext`; it is never merged into the
   human-readable request.
-- The Elmish client accepts only messages from `http://127.0.0.1:5002`, validates the payload shape, and turns it into Elmish messages.
-- The client forwards valid payloads through Fable.Remoting with `sendCanvasMessage`.
+- The client accepts interaction messages only from the actual visible active iframe at this
+  build's canvas origin. Its parent-owned worktree/filename attributes are captured in
+  `CanvasMessageReceived`; detached, hidden, or sourceless senders are rejected. Authored identity
+  fields never override those coordinates.
+- The client validates the captured inventory identity and forwards it separately from payload
+  through Fable.Remoting. The server validates and normalizes the monitored worktree and safe
+  filename before queueing.
 - The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
-- `SessionBridge` wraps the payload in a typed `{kind:"canvas",prompt}` envelope. Both bridge
-  endpoints validate the canvas JSON and its 64,000 UTF-16-code-unit input limit, then forward a
-  `[canvas] {payload}` prompt through the serialized `enqueueSend` chain. For a contract-valid
-  AgentDoc filename, `expand-section` with a nonblank section and `canvas-selection` with a known
-  intent and nonblank request receive one fixed `authoringReminder` field. It reinforces concise,
-  audience-appropriate edits without an extra turn, SDK hook, or write-triggered feedback loop.
-  The reminder replaces any supplied value of that field; all other payload fields are preserved.
-  SystemViews, missing or invalid doc identities, and other actions receive no reminder.
+- HTTP transport is `{kind:"canvas",prompt,source:{worktreePath,filename}}`, with source identity
+  escaped through the shared JSON convention independently of authored payload. Both bridge
+  endpoints validate canvas JSON and its 64,000 UTF-16-code-unit input limit, then send
+  `[canvas] {source,payload,authoringReminder?}` through `enqueueSend`. The authoritative filename
+  controls AgentDoc/SystemView reminder classification, never authored `doc` or `source` fields.
+  Recognized edit actions receive one fixed outer reminder; authored fields remain quoted data
+  nested under `payload`. SystemViews and non-edit actions receive no reminder.
   Identical session prompts already queued but not started are coalesced; once `session.send`
   starts, the same prompt may be queued again.
 - When the reporting extension later publishes that `[canvas]` prompt as session activity, the
   dashboard collapse projects it through `UserMessageFormatting`: the first-party
   `canvas-selection` action displays its human-readable `request`, other known actions get concise
-  summaries, and unknown valid JSON preserves string values. The resulting dashboard field is
+  summaries, and unknown valid JSON preserves string values. The formatter reads the nested
+  payload while still handling historical flat `[canvas]` messages. The resulting dashboard field is
   `UserFooterMessage { Glyph; Text; Timestamp }`; activity titles use the same text projection so
   duplicate footer lines remain suppressible.
 - Client send state is modeled as `CanvasSendState = Idle | Waiting of scopedKey: string | Failed of message: string`. The `Waiting` case carries the target worktree's `scopedKey` rather than a timestamp, so the banner is cleared only by that worktree's delivery (see Message Queue and the `CanvasSendState` decision).
@@ -224,17 +235,23 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   messages, 5-min TTL) and returns `Queued`. A prompted startup reservation is exempt from those
   limits and must be accepted before queued interactions drain. A failed automatic startup
   returns the shared typed launch error and the client renders it in the existing failure banner.
-  Draining re-resolves the current target — see `docs/spec/canvas-interaction-routing.md`.
+  Immediate sends and drains share one worktree lane. Every unsent dispatch rereads owner,
+  latest endpoint, and registered-worktree eligibility; in-flight HTTP need not be recalled.
+  Failures retain age/order and cannot erase replacement registrations. SystemView fallback queues
+  are targeted to the exact launched terminal via current activity-origin joins, never the next
+  arbitrary registration. See `docs/spec/canvas-interaction-routing.md`.
 - While queued, the client shows a `Waiting for session…` banner instead of an immediate error.
 - The banner clears to `Idle` only when the target worktree's session actually delivers (never flipped to `Failed` by a wall-clock timer). The user may dismiss it manually, and the server may silently expire the message after its TTL.
 
 ### Bridge Protocol
 
 - The session bridge is the extension process started inside a coding session.
-- It calls `POST /api/canvas/register` with `worktreePath`, `injectUrl`, `sessionId`, its parent
-  Copilot PID, optional inherited `TerminalSessionId`, and an opaque loopback shutdown URL and
-  capability. The server resolves PID start ticks through the same injected process-identity
-  resolver as activity ingestion and rejects dead, reused, mismatched, or malformed registrations.
+- It calls `POST /api/canvas/register` with `worktreePath`, `injectUrl`, `sessionId`, optional parent
+  Copilot PID and inherited `TerminalSessionId`, and an opaque loopback shutdown URL
+  and capability. Session ID, canonical monitored worktree, endpoints, capability, and any supplied
+  terminal ID are validated. PID/start and terminal hints do not veto otherwise valid canvas
+  routing. Exact generic prompts and shutdown are unavailable when current location metadata
+  cannot be verified against the expected durable session and exact process.
 - Registration is loopback-only: `/api/canvas/register` accepts an `injectUrl` only when it is an
   absolute `http(s)` URL whose host is a loopback IP (`IPAddress.IsLoopback`) or the literal
   `localhost` (rejected `400` otherwise). A known worktree records the bridge; an unmonitored
@@ -248,7 +265,9 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 - After startup it re-registers every 30 seconds as a heartbeat.
 - Failed extension heartbeats back off exponentially up to 120 seconds, then reset after reconnect.
 - Served docs receive an injected heartbeat script that posts to `/bridge/heartbeat` every 30 seconds.
-- `SessionBridge` keeps separate `sessionRegistry` and `pollRegistry` maps so poll heartbeats do not overwrite session registrations. `CanvasBridge` adds document-owner routing and canvas queue policy on top.
+- Separate session and poll maps prevent iframe heartbeats from replacing session registrations.
+  Document polls are liveness-only and return no queued messages. Ownership is durable only after
+  an atomic save, independent of bridge registration, expiry, and restart.
 - `GET /api/canvas/bridge-status?worktreePath=...` exposes bridge registration, heartbeat age, liveness, and session ID.
 
 ### Doc Server
@@ -395,7 +414,7 @@ changed rows already use).
 | `src/Server/IdiomorphScript.fs` | Vendored idiomorph runtime (library only — the controller lives in `CanvasMorphScript.fs`) |
 | `src/Server/CanvasMorphScript.fs` | Morph controller injection: the embedded `canvas-morph.js` source plus the `canvas-updated` highlight style |
 | `src/Extension/canvas-morph.js` | Live-update controller — morphs body-only changes, reloads scripts and document-shell changes, and marks the blocks a morph changed |
-| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, `injection-request.mjs`, `session-prompt.mjs`, `send-queue.mjs` | Exact-process bridge registration, guarded local HTTP headers and prompt/shutdown endpoints, SDK session-ID compatibility, typed prompt-transport decoding, serialized send queue with pending-duplicate coalescing, heartbeat, and reconnect backoff |
+| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, `injection-request.mjs`, `session-prompt.mjs`, `send-queue.mjs` | Session-addressed bridge registration with optional location hints, guarded prompt/shutdown endpoints, source-coordinate decoding, serialized send queue, heartbeat, and reconnect backoff |
 | `src/Extension/skill/SKILL.md` | Authoring contract for agent-created canvas docs |
 | `src/Extension/skill/audience.md` | Optional recipient-focused writing workflow and private reusable audience profiles |
 
@@ -412,7 +431,8 @@ changed rows already use).
   JSON object, then use only fixed instructions to resolve `.agents/canvas/<filename>` beneath the
   worktree. The Client and Shared projects remain free of `System.IO` because they are Fable-compiled.
 - **Split bridge registry** — `SessionBridge.sessionRegistry` and `pollRegistry` are separate so iframe heartbeats cannot clobber session-backed routing.
-- **Injected heartbeat script** — agent-authored docs participate in liveness and queued-message drain without extra per-doc setup.
+- **Injected heartbeat script** — authored documents report poll liveness without gaining authority
+  to consume session-addressed queues.
 - **`CanvasSendState` DU** — send state is `Idle`, `Waiting of scopedKey`, or `Failed of message`, avoiding illegal combinations of optional fields. `Waiting` carries **only** the target worktree's `scopedKey` (`WorktreePath.value`, the same key space as `agentChangedDocs`); the earlier `queuedAt` timestamp and the wall-clock failure timer were removed (Finding C-02) because a queued message lives in the server-side queue and is delivered when its *target* session registers, so `Waiting` is cleared on delivery (`clearWaitingOnDelivery`) and is never reported as a failure on a timer. `CanvasSendResult` likewise dropped its `now` argument, removing two `Date.now()` reads from the send command and keeping `update` wall-clock-free.
 - **Kind-split routing** — an AgentDoc persists its author `sessionId` and only AgentDocs expose it for liveness UI; a SystemView stores nothing and resolves its target per interaction from live session activity.
 - **Two canvas doc kinds** — `CanvasDoc.Kind` (`AgentDoc | SystemView`, classified by filename in `CanvasScanner`) gates authored-document machinery. A `SystemView` opts out of author liveness, Start-session, morph, content-hash awareness, and archiving, but participates in generic selected-text interactions through resolved routing. It gets a distinct far-left `.canvas-system-tab` affordance instead of a normal doc tab.

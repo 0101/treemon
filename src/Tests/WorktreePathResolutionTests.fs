@@ -104,7 +104,7 @@ let private deleteWorktree agent worktreeRoots wtPath =
     WorktreeApi.deleteWorktreeWith
         (fun _ _ _ -> async { return Ok () })
         (closeThen (fun _ -> async { return Ok() }))
-        (fun _ -> async { return () })
+        (fun _ -> async { return Ok() })
         (fun _ -> Ok ())
         agent
         (RefreshScheduler.buildRootPaths worktreeRoots)
@@ -388,6 +388,7 @@ type DeleteWorktreeResolutionTests() =
                     (fun _ ->
                         async {
                             calls.Add("state")
+                            return Ok()
                         })
                     (fun _ -> Ok ())
                     agent
@@ -426,7 +427,7 @@ type DeleteWorktreeResolutionTests() =
                 WorktreeApi.deleteWorktreeWith
                     (fun _ _ _ -> async { return failwith "Git removal must not run" })
                     (fun _ _ -> async { return Error "terminal close failed" })
-                    (fun _ -> async { return () })
+                    (fun _ -> async { return Ok() })
                     (DeletedWorktreeStore.recordAtPath file)
                     agent
                     (RefreshScheduler.buildRootPaths [ tempDirA ])
@@ -462,7 +463,7 @@ type DeleteWorktreeResolutionTests() =
                 WorktreeApi.deleteWorktreeWith
                     (fun _ _ _ -> async { return failwith "Git removal must not run" })
                     (fun _ _ -> async { return failwith "Terminal cleanup must not run" })
-                    (fun _ -> async { return () })
+                    (fun _ -> async { return Ok() })
                     (fun _ -> Error "disk unavailable")
                     agent
                     (RefreshScheduler.buildRootPaths [ tempDirA ])
@@ -507,6 +508,7 @@ type DeleteWorktreeResolutionTests() =
                     (fun _ ->
                         async {
                             calls.Add("state")
+                            return Ok()
                         })
                     (fun _ -> Ok ())
                     agent
@@ -565,6 +567,7 @@ type DeleteWorktreeResolutionTests() =
                     (fun _ ->
                         async {
                             calls.Add("state")
+                            return Ok()
                         })
                     (fun _ -> Ok ())
                     agent

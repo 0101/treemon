@@ -147,3 +147,27 @@ test("attributes all buffered apply_patch writes only after successful completio
   assert.deepEqual(writes, ["one.html", "two.html"]);
   watcher.stop();
 });
+
+test("startup-local write observation never attributes successful writes in another worktree", () => {
+  const startup = resolve("startup-worktree");
+  const other = resolve("other-worktree");
+  const session = fakeSession();
+  const watcher = watchCanvasWrites(session, startup);
+  const writes = [];
+  watcher.activate((filename) => writes.push(filename));
+  for (const [toolCallId, path] of [
+    ["local", join(startup, ".agents", "canvas", "local.html")],
+    ["foreign", join(other, ".agents", "canvas", "foreign.html")],
+  ]) {
+    session.emit("tool.execution_start", { toolCallId, toolName: "edit", arguments: { path } });
+    session.emit("tool.execution_complete", { toolCallId, success: true });
+  }
+  assert.deepEqual(writes, ["local.html"]);
+  assert.equal(canvasFilenameForClaim(join(other, ".agents", "canvas", "foreign.html")), null);
+  watcher.stop();
+  session.emit("tool.execution_start", {
+    toolCallId: "stopped", toolName: "create", arguments: { path: ".agents/canvas/stopped.html" },
+  });
+  session.emit("tool.execution_complete", { toolCallId: "stopped", success: true });
+  assert.deepEqual(writes, ["local.html"]);
+});

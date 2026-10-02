@@ -7,6 +7,7 @@ open NUnit.Framework
 open Shared
 open Server
 open Server.CanvasDocServer
+open Server.SessionActivity
 open Tests.TestUtils
 
 // baseStyle, linkInterceptor and bridgeScript are private to the server module, so we assert on
@@ -337,7 +338,7 @@ type BuildInjectionTests() =
         Assert.That(extension, Does.Contain("from \"./canvas-doc-kinds.mjs\""))
         Assert.That(extension, Does.Contain("isSystemViewFilename(filename)"))
         Assert.That(extension, Does.Contain("window.__canvasTopLevelTransportAvailable = true"))
-        Assert.That(extension, Does.Contain("injectScripts(content, port, canvasRoute.filename)"))
+        Assert.That(extension, Does.Contain("injectScripts(content, canvasRoute, canvasRoute.filename)"))
         Assert.That(extension, Does.Contain("\"Content-Security-Policy\": \"frame-ancestors 'none'\""))
 
     [<Test>]
@@ -718,7 +719,7 @@ type DiffComparisonContextTests() =
 // attributeOwnership is the HTTP-free core of canvasAttributeHandler (the same seam extraction
 // isLoopbackInjectUrl uses for canvasRegisterHandler). It records ownership only for a known
 // (monitored) worktree with a well-formed body; an unmonitored/blank worktree records nothing.
-// CanvasDocOwnership.attribute persists data/canvas-owners.json relative to CWD, so the fixture
+// CanvasDocOwnership.assign persists data/canvas-owners.json relative to CWD, so the fixture
 // runs under a throwaway CWD; it is NonParallelizable because that CWD swap and the ownership
 // agent are process-global.
 [<TestFixture>]
@@ -743,6 +744,140 @@ type AttributeOwnershipTests() =
         agent.Post(SchedulerState.UpdateWorktreeList(RepoId "attr-test-repo", [ info ]))
         agent
 
+    let registrationJson worktreePath sessionId =
+        System.Text.Json.JsonSerializer.Serialize(
+            {| worktreePath = worktreePath
+               sessionId = sessionId
+               injectUrl = "http://127.0.0.1:1/inject"
+               shutdownUrl = "http://127.0.0.1:1/shutdown"
+               shutdownCapability = System.String('A', 43) |})
+
+    [<Test>]
+    member _.``Registration accepts absent location hints and canonicalizes a monitored alias``() =
+        let worktree = uniquePath "registration-known"
+        let alias = Path.Combine(worktree, ".")
+        let sessionId = uniqueSid "registered"
+        let unavailable = ProcessIdentityResolver.create (fun _ -> Error "fixture probe unavailable")
+        let status, body =
+            handlerResponse
+                (canvasRegisterHandler unavailable (agentKnowing worktree))
+                (registrationJson alias sessionId)
+        use response = JsonDocument.Parse body
+        let entry = SessionBridge.canvasSessionsForWorktree worktree |> List.exactlyOne
+        Assert.Multiple(fun () ->
+            Assert.That(status, Is.EqualTo 200)
+            Assert.That(response.RootElement.GetProperty("registered").GetBoolean(), Is.True)
+            Assert.That(entry.WorktreePath, Is.EqualTo(PathUtils.normalizePath worktree))
+            Assert.That(entry.ProcessIdentity, Is.EqualTo(None: ProcessIdentity option))
+            Assert.That(entry.TerminalSessionId, Is.EqualTo(None: SessionActivity.TerminalSessionId option)))
+
+    [<Test>]
+    member _.``Unmonitored registration returns browser fallback without installing a bridge``() =
+        let known, unknown = uniquePath "registration-known", uniquePath "registration-unknown"
+        let status, body =
+            handlerResponse
+                (canvasRegisterHandler (ProcessIdentityResolver.create (fun _ -> Ok None)) (agentKnowing known))
+                (registrationJson unknown (uniqueSid "unmonitored"))
+        use response = JsonDocument.Parse body
+        Assert.Multiple(fun () ->
+            Assert.That(status, Is.EqualTo 200)
+            Assert.That(response.RootElement.GetProperty("registered").GetBoolean(), Is.False)
+            Assert.That(response.RootElement.GetProperty("monitored").GetBoolean(), Is.False)
+            Assert.That(SessionBridge.sessionsForWorktree unknown, Is.Empty))
+
+    [<TestCase("")>]
+    [<TestCase("bad session")>]
+    [<TestCase("$(command)")>]
+    member _.``Invalid session IDs are rejected even for otherwise unmonitored registrations``(invalidId: string) =
+        let unknown = uniquePath "registration-invalid"
+        let status, _ =
+            handlerResponse
+                (canvasRegisterHandler (ProcessIdentityResolver.create (fun _ -> Ok None)) (agentKnowing (uniquePath "known")))
+                (registrationJson unknown invalidId)
+        Assert.That(status, Is.EqualTo 400)
+        Assert.That(SessionBridge.sessionsForWorktree unknown, Is.Empty)
+
+    [<Test>]
+    member _.``Malformed registration JSON is a client error``() =
+        let status, _ =
+            handlerResponse
+                (canvasRegisterHandler (ProcessIdentityResolver.create (fun _ -> Ok None)) (agentKnowing (uniquePath "known")))
+                "{"
+
+        Assert.That(status, Is.EqualTo 400)
+
+    [<Test>]
+    member _.``Null registration body is a client error``() =
+        let status, _ =
+            handlerResponse
+                (canvasRegisterHandler (ProcessIdentityResolver.create (fun _ -> Ok None)) (agentKnowing (uniquePath "known")))
+                "null"
+
+        Assert.That(status, Is.EqualTo 400)
+
+    [<Test>]
+    member _.``Unexpected registration failures are server errors``() =
+        let worktree = uniquePath "registration-failure"
+        let sessionId = uniqueSid "registered"
+        let identity = syntheticProcessIdentityForSessionId sessionId
+        let body =
+            System.Text.Json.JsonSerializer.Serialize(
+                {| worktreePath = worktree
+                   sessionId = sessionId
+                   parentProcessId = ProcessIdentity.processId identity
+                   injectUrl = "http://127.0.0.1:1/inject"
+                   shutdownUrl = "http://127.0.0.1:1/shutdown"
+                   shutdownCapability = System.String('A', 43) |})
+        let failingResolver =
+            ProcessIdentityResolver.create (fun _ ->
+                raise (System.InvalidOperationException("fixture resolver failed")))
+
+        let status, text =
+            handlerResponse
+                (canvasRegisterHandler failingResolver (agentKnowing worktree))
+                body
+
+        Assert.Multiple(fun () ->
+            Assert.That(status, Is.EqualTo 500)
+            Assert.That(text, Does.Contain "Canvas registration failed")
+            Assert.That(text, Does.Not.Contain "fixture resolver failed"))
+
+    [<Test>]
+    member _.``Failed ownership persistence is an HTTP error and an identical retry is acknowledged``() =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attribute-http-failure"
+            let previous, desired = uniqueSid "old", uniqueSid "new"
+            runAsync (CanvasDocOwnership.assign worktree "report.html" (SessionId previous))
+            |> Result.defaultWith (fun _ -> failwith "initial save failed")
+            let file = Path.Combine("data", "canvas-owners.json")
+            let disk = File.ReadAllText file
+            Directory.CreateDirectory(file + ".tmp") |> ignore
+            let handler = canvasAttributeHandler (agentKnowing worktree)
+            let body =
+                System.Text.Json.JsonSerializer.Serialize(
+                    {| worktreePath = worktree; filename = "report.html"; sessionId = desired |})
+            let failed, text = handlerResponse handler body
+            Assert.Multiple(fun () ->
+                Assert.That(failed, Is.EqualTo 500)
+                Assert.That(text, Does.Contain "previous ownership is unchanged")
+                Assert.That(runAsync (CanvasDocOwnership.getOwner worktree "report.html"), Is.EqualTo(Some(SessionId previous)))
+                Assert.That(File.ReadAllText file, Is.EqualTo disk))
+            Directory.Delete(file + ".tmp")
+            let retry, response = handlerResponse handler body
+            use parsed = JsonDocument.Parse response
+            Assert.That(retry, Is.EqualTo 200)
+            Assert.That(parsed.RootElement.GetProperty("attributed").GetBoolean(), Is.True)
+            Assert.That(runAsync (CanvasDocOwnership.getOwner worktree "report.html"), Is.EqualTo(Some(SessionId desired))))
+
+    [<Test>]
+    member _.``Null attribution body is a client error``() =
+        let status, _ =
+            handlerResponse
+                (canvasAttributeHandler (agentKnowing (uniquePath "known")))
+                "null"
+
+        Assert.That(status, Is.EqualTo 400)
+
     [<Test>]
     member _.``a valid declaration for a known worktree records the posted owner``() =
         withTempCwd (fun () ->
@@ -755,7 +890,7 @@ type AttributeOwnershipTests() =
                         "A well-formed body for a monitored worktree must record ownership")
 
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
-            Assert.That(owner, Is.EqualTo(Some sessionId),
+            Assert.That(owner, Is.EqualTo(Some(SessionId sessionId)),
                         "getOwner must return the sessionId the authoring session declared"))
 
     [<TestCase("unsafe name.html")>]
@@ -771,7 +906,7 @@ type AttributeOwnershipTests() =
             Assert.That(outcome, Is.EqualTo(Invalid "invalid canvas filename"))
             Assert.That(
                 runAsync (CanvasDocOwnership.getOwner worktree filename),
-                Is.EqualTo(None: string option),
+                Is.EqualTo(None: SessionId option),
                 "A filename outside the shared contract must never enter ownership state"))
 
     [<Test>]
@@ -788,7 +923,7 @@ type AttributeOwnershipTests() =
 
             Assert.That(
                 runAsync (CanvasDocOwnership.getOwner worktree "diff.html"),
-                Is.EqualTo(None: string option),
+                Is.EqualTo(None: SessionId option),
                 "Nothing reads a stored SystemView target, so nothing may be written"))
 
     [<Test>]
@@ -802,7 +937,7 @@ type AttributeOwnershipTests() =
             Assert.That(outcome, Is.EqualTo(UnknownWorktree), "An unmonitored worktree must be rejected")
 
             let owner = runAsync (CanvasDocOwnership.getOwner unknown "a.html")
-            Assert.That(owner, Is.EqualTo(None: string option),
+            Assert.That(owner, Is.EqualTo(None: SessionId option),
                         "No ownership may be recorded for an unknown worktree"))
 
     [<Test>]
@@ -820,7 +955,7 @@ type AttributeOwnershipTests() =
     member _.``a malformed body (blank sessionId) is rejected and records no ownership``() =
         withTempCwd (fun () ->
             // The worktree IS known, so only the blank sessionId can reject — proving the
-            // rejection short-circuits before CanvasDocOwnership.attribute is ever called.
+            // rejection short-circuits before CanvasDocOwnership.assign is ever called.
             let worktree = uniquePath "attr-malformed"
             let agent = agentKnowing worktree
 
@@ -831,7 +966,7 @@ type AttributeOwnershipTests() =
             | other -> Assert.Fail($"A blank sessionId must be Invalid, got {other}")
 
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
-            Assert.That(owner, Is.EqualTo(None: string option),
+            Assert.That(owner, Is.EqualTo(None: SessionId option),
                         "A rejected declaration must record no ownership"))
 
     // F9 (security, defense-in-depth): a sessionId carrying shell/PowerShell metacharacters must be
@@ -854,7 +989,7 @@ type AttributeOwnershipTests() =
             | other -> Assert.Fail($"An unsafe sessionId must be Invalid, got {other}")
 
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
-            Assert.That(owner, Is.EqualTo(None: string option),
+            Assert.That(owner, Is.EqualTo(None: SessionId option),
                         "A rejected sessionId must record no ownership"))
 
     // A realistic provider session id (GUID-like: alphanumerics + hyphens) must still be accepted,
@@ -870,7 +1005,7 @@ type AttributeOwnershipTests() =
             Assert.That(outcome, Is.EqualTo(Attributed), "A GUID sessionId must be accepted")
 
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
-            Assert.That(owner, Is.EqualTo(Some sessionId),
+            Assert.That(owner, Is.EqualTo(Some(SessionId sessionId)),
                         "An accepted declaration must record the owner"))
 
     [<Test>]
@@ -884,4 +1019,4 @@ type AttributeOwnershipTests() =
             Assert.That(outcome, Is.EqualTo(Attributed))
 
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
-            Assert.That(owner, Is.EqualTo(Some sessionId)))
+            Assert.That(owner, Is.EqualTo(Some(SessionId sessionId))))

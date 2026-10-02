@@ -168,7 +168,11 @@ Resume action while that worktree already has a start in flight re-targets the p
 a second launch; the in-flight state clears on both success and failure, so a rejected launch never
 wedges the action. Agent actions do not coalesce with an in-flight start: each one queues a fresh
 Copilot launch and selects and focuses its exact returned terminal in order.
-Background and CLI launches never steal dashboard focus. The browser polls the
+Background and CLI launches never steal dashboard focus.
+Queued SystemView fallback retains the exact returned terminal ID in its ephemeral message target.
+Current open activity-origin joins select that terminal's recipient; unrelated bridge registration
+cannot capture its queue. Bridge-gap waiting and queue policy belong to
+`docs/spec/canvas-interaction-routing.md`. The browser polls the
 authoritative terminal registry on its normal activity cadence even when its current snapshot is
 empty, so the first background-created terminal becomes visible without a reload. That poll is
 single-flight: a tick starts no new registry request while one is outstanding, and the next tick
@@ -532,6 +536,10 @@ Production lifecycle commands still require an external PowerShell window when t
 `TREEMON_TERMINAL_SESSION_ID`.
 
 SessionBridge's graceful shutdown capability remains available for explicit close/delete/archive.
+Requests carry the expected durable conversation and exact process identity. Only matching current
+bridge location metadata verified through the exact resolver permits that optional operation;
+missing or conflicting hints report it unavailable without rejecting canvas reachability.
+Authoritative host teardown and exact closure publication remain unchanged.
 The update path does not contact individual bridges, so a partial bridge shutdown cannot leave the
 old host connected while reporter heartbeats disappear.
 
@@ -646,8 +654,8 @@ and dynamically allocated non-production ports. Tests never bind production port
 | `src/Server/TerminalSessionActivity.fs` | Exact terminal-origin projection for tab activity and distinct live SessionIds, live-terminal reuse, and one durable restart session per terminal |
 | `src/Server/SessionActivityStoreSchema.fs` and `SessionActivityStore.fs` | Durable process-instance schema/migration, resume identity, event dedupe keys, and retention |
 | `src/Extension/reporting/extension.mjs` | Acknowledged process presence, passive activity, heartbeat, background lifecycle, and shutdown reports |
-| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `src/Server/SessionBridge.fs` | Shared exact registration plus capability-guarded graceful shutdown endpoint and bounded typed server control client |
-| `src/Server/CodingToolCli.fs` | Provider-specific fresh-session and resume command construction without startup prompt arguments |
+| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `src/Server/SessionBridge.fs` | Session-addressed registration with optional location hints, startup-prompt delivery, verified exact shutdown, and bounded capability-guarded control |
+| `src/Server/CodingToolCli.fs` | Provider-specific fresh-session and exact-session resume command construction without startup prompt arguments |
 | `src/Server/Program.fs` | Host/API lifecycle and TerminalHost restart-session query wiring |
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/AppTypes.fs` and `src/Client/App.fs` | Reconnect view generation, Elmish messages, guarded load completion, and focus effect |

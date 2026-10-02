@@ -535,6 +535,7 @@ type CanvasPaneTests() =
     // ── Step 8: PostMessage Dispatch ────────────────────────────────────
 
     [<Test>]
+    [<Category("CanvasTerminalLinks")>]
     member this.``PostMessage from canvas iframe triggers sendCanvasMessage API call``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
@@ -543,44 +544,43 @@ type CanvasPaneTests() =
             let iframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
             do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
-            // Set up network interception to capture the sendCanvasMessage Remoting call
-            let apiCallReceived = System.Threading.Tasks.TaskCompletionSource<bool>()
-
-            this.Page.Request.Add(fun req ->
-                if req.Url.Contains("sendCanvasMessage") then
-                    apiCallReceived.TrySetResult(true) |> ignore)
-
-            let! src = iframe.GetAttributeAsync("src")
-            Assert.That(src, Is.Not.Null, "Iframe must have src")
-
-            // Execute postMessage from within the iframe context
-            // We evaluate JS in the page context that posts a message as if from the canvas origin
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let captured = TaskCompletionSource<CanvasMessageRequest>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let dropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            this.Page.Console.Add(fun message ->
+                if message.Text.Contains("postMessage DROPPED") then dropped.TrySetResult() |> ignore)
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/sendCanvasMessage",
+                    fun route ->
+                        let requests = JsonConvert.DeserializeObject<CanvasMessageRequest array>(route.Request.PostData, converter)
+                        captured.TrySetResult(requests[0]) |> ignore
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = JsonConvert.SerializeObject(CanvasMessageResult.Ok, converter))))
+            let! scopedKey = iframe.GetAttributeAsync("data-canvas-scoped-key")
+            let! filename = iframe.GetAttributeAsync("data-canvas-filename")
             let! _ = this.Page.EvaluateAsync(
                 $"() => {{
-                    const iframe = document.querySelector('.canvas-iframe');
-                    if (iframe && iframe.contentWindow) {{
-                        const msg = {{ action: 'test', data: 'e2e-probe' }};
-                        window.dispatchEvent(new MessageEvent('message', {{
-                            data: msg,
-                            origin: '{canvasOrigin}'
-                        }}));
-                    }}
+                    window.dispatchEvent(new MessageEvent('message', {{
+                        data: {{ action: 'forged-source' }},
+                        origin: '{canvasOrigin}'
+                    }}));
                 }}")
-
-            // Wait for the API call (with timeout)
-            let timeoutTask = System.Threading.Tasks.Task.Delay(5000)
-            let! completed = System.Threading.Tasks.Task.WhenAny(apiCallReceived.Task, timeoutTask)
-
-            if Object.ReferenceEquals(completed, apiCallReceived.Task) then
-                let! result = apiCallReceived.Task
-                Assert.That(result, Is.True, "sendCanvasMessage API call should be triggered by postMessage")
-            else
-                // API call might fail if no bridge is registered — that's OK for this test.
-                // The key assertion is that the Elmish dispatch happened, which we verify
-                // by checking the network request was attempted.
-                Assert.Inconclusive(
-                    "sendCanvasMessage API call not observed within 5s. " +
-                    "This may happen if no canvas bridge is registered (extension not running).")
+            do! dropped.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+            Assert.That(captured.Task.IsCompleted, Is.False)
+            let! _ =
+                this.Page.FrameLocator(".canvas-iframe-active").Locator("body").EvaluateAsync(
+                    """() => parent.postMessage({
+                        action:'test',doc:'forged.html',
+                        source:{worktreePath:'Q:\\forged',filename:'other.html'},data:'e2e-probe'
+                    }, '*')""")
+            let! request = captured.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+            Assert.Multiple(fun () ->
+                Assert.That(WorktreePath.value request.WorktreePath, Is.EqualTo scopedKey)
+                Assert.That(request.Filename, Is.EqualTo filename)
+                Assert.That(request.Payload, Does.Contain("forged.html")))
         }
 
     [<Test>]
@@ -808,7 +808,8 @@ type CanvasPaneTests() =
                 $"() => {{
                     window.dispatchEvent(new MessageEvent('message', {{
                         data: 'just a string',
-                        origin: '{canvasOrigin}'
+                        origin: '{canvasOrigin}',
+                        source: document.querySelector('.canvas-iframe-active').contentWindow
                     }}));
                 }}")
 
@@ -1041,12 +1042,16 @@ type CanvasPaneTests() =
                 Map.ofList [
                     WorktreePath.value worktreePath,
                     { IsAlive = true
-                      SessionId = Some externalSession
+                      SessionId = Some linkedSession
                       LiveSessionIds =
-                        [ externalSession
-                          linkedSession ]
+                        [ linkedSession ]
                       SystemViewTargetSessionId =
                         Some linkedSession }
+                    WorktreePath.value worktreePath + "-other",
+                    { IsAlive = true
+                      SessionId = Some externalSession
+                      LiveSessionIds = [ externalSession ]
+                      SystemViewTargetSessionId = Some externalSession }
                 ]
 
             do!
@@ -1125,6 +1130,8 @@ type CanvasPaneTests() =
 
             do! dashboardTab.ClickAsync()
             do! Assertions.Expect(dashboardTab).ToBeFocusedAsync()
+            do! Assertions.Expect(dashboardTab.Locator(".canvas-liveness-dot.alive")).ToHaveCountAsync(1)
+            do! Assertions.Expect(this.Page.Locator(".canvas-launch-btn")).ToHaveCountAsync(0)
             do!
                 Assertions.Expect(
                     this.Page.Locator(".terminal-pane.open"))
@@ -1196,6 +1203,9 @@ type CanvasPaneTests() =
                 Assert.That(unownedReadPresentation[4], Is.EqualTo("0.5")))
 
             do! statusTab.ClickAsync()
+            do! Assertions.Expect(statusTab).ToBeFocusedAsync()
+            do! Assertions.Expect(statusTab.Locator(".canvas-liveness-dot.alive")).ToHaveCountAsync(0)
+            do! Assertions.Expect(this.Page.Locator(".canvas-launch-btn")).ToHaveCountAsync(1)
             let! unownedSelectedPresentation =
                 tabPresentation statusTab
 
@@ -1249,6 +1259,14 @@ type CanvasPaneTests() =
                     Is.EqualTo("rgb(166, 227, 161)"),
                     "Owned SystemViews must use the green session text color"
                 )
+            do! focusCanvasCard this.Page "feature-recent"
+            let overview = this.Page.Locator(".canvas-overview")
+            do! overview.WaitForAsync()
+            let entry =
+                overview.Locator(".canvas-overview-entry", LocatorLocatorOptions(
+                    Has = this.Page.Locator(".canvas-overview-branch", PageLocatorOptions(HasText = FixtureSystemViewBranch))))
+            do! Assertions.Expect(entry.Locator(".canvas-overview-doc", LocatorLocatorOptions(HasText = "dashboard")).Locator(".canvas-liveness-dot.alive")).ToHaveCountAsync(1)
+            do! Assertions.Expect(entry.Locator(".canvas-overview-doc", LocatorLocatorOptions(HasText = "status")).Locator(".canvas-liveness-dot.alive")).ToHaveCountAsync(0)
         }
 
     [<Test>]
