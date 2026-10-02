@@ -4,7 +4,7 @@
     <OutputType>Exe</OutputType>
     <AssemblyName>Treemon</AssemblyName>
     <TargetFramework>net10.0</TargetFramework>
-    <RollForward>LatestMajor</RollForward>
+    <RollForward>LatestPatch</RollForward>
   </PropertyGroup>
 
   <ItemGroup>
