@@ -13,9 +13,9 @@ open Server.SessionActivity
 open Server.SessionActivityStoreSchema
 open Server.SqliteStorage
 
-// SQLite is the durable single-writer mirror behind exact process-instance activity. Pre-upgrade
-// session rows contribute only their durable identity to resume_sessions so explicit Resume keeps
-// working; runtime writes target session_instances and dedupe-only activity_events.
+// SQLite is the durable single-writer mirror behind exact process-instance activity. A new exact
+// binding inherits only the latest context snapshot for the same durable session and worktree;
+// runtime writes otherwise target session_instances and dedupe-only activity_events.
 
 // --- Row shapes -------------------------------------------------------------------------------
 
@@ -648,6 +648,32 @@ ORDER BY updated_at DESC, session_id DESC, process_id DESC, process_start_ticks 
 LIMIT 1;
 """
 
+let private latestContextForSessionSql =
+    """
+SELECT context_current_tokens, context_token_limit, context_usage_at
+FROM (
+    SELECT context_current_tokens, context_token_limit, context_usage_at,
+           1 AS source_rank, process_id, process_start_ticks
+    FROM session_instances
+    WHERE session_id = $sessionId
+      AND worktree_path = $worktreePath
+
+    UNION ALL
+
+    SELECT context_current_tokens, context_token_limit, context_usage_at,
+           0 AS source_rank, 0 AS process_id, 0 AS process_start_ticks
+    FROM resume_sessions
+    WHERE session_id = $sessionId
+      AND worktree_path = $worktreePath
+)
+WHERE context_current_tokens IS NOT NULL
+  AND context_token_limit IS NOT NULL
+  AND context_usage_at IS NOT NULL
+ORDER BY source_rank DESC, context_usage_at DESC,
+         process_id DESC, process_start_ticks DESC
+LIMIT 1;
+"""
+
 let private pruneSql =
     """
 DELETE FROM activity_events
@@ -776,6 +802,67 @@ let private upsertInstance
     bindInstance command stored
     command.ExecuteNonQuery() |> ignore
 
+let private readLatestContext
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction)
+    sessionId
+    worktreePath
+    =
+    use command = connection.CreateCommand()
+    command.Transaction <- transaction
+    command.CommandText <- latestContextForSessionSql
+    command.Parameters.AddWithValue("$sessionId", SessionId.value sessionId) |> ignore
+    command.Parameters.AddWithValue("$worktreePath", WorktreePath.value worktreePath) |> ignore
+    use reader = command.ExecuteReader()
+
+    if reader.Read() then
+        readContextUsage reader 0 1 2
+        |> Result.map (fun (usage, usageAt) ->
+            Option.map2
+                (fun context timestamp -> context, timestamp)
+                usage
+                usageAt)
+    else
+        Ok None
+
+let private inheritLatestContext
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction)
+    (stored: StoredInstance)
+    =
+    match stored.Status.ContextUsage, stored.ContextUsageAt with
+    | Some _, Some _ -> Ok stored
+    | None, None ->
+        readLatestContext
+            connection
+            transaction
+            stored.SessionId
+            stored.WorktreePath
+        |> Result.map (function
+            | None -> stored
+            | Some(usage, usageAt) ->
+                { stored with
+                    Status.ContextUsage = Some usage
+                    ContextUsageAt = Some usageAt })
+    | _ -> Error PersistedDataError.IncompleteContextUsage
+
+let private upsertAndReadInstance
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction)
+    (stored: StoredInstance)
+    =
+    upsertInstance connection (Some transaction) stored
+
+    readInstanceByBinding
+        connection
+        (Some transaction)
+        stored.ProcessIdentity
+        stored.SessionId
+    |> persistedValue
+    |> Option.defaultWith (fun () ->
+        raisePersistedDataError
+            PersistedDataError.MissingPersistedInstance)
+
 let private closeInstance
     (connection: SqliteConnection)
     (transaction: SqliteTransaction)
@@ -852,18 +939,25 @@ type SessionActivityStore
     member _.UpsertInstance(stored: StoredInstance) =
         use connection = openConnection ()
         use transaction = connection.BeginTransaction()
-        upsertInstance connection (Some transaction) stored
+        let persisted = upsertAndReadInstance connection transaction stored
+
+        transaction.Commit()
+        persisted
+
+    /// Insert or refresh a presence row, inheriting only missing context from the newest durable
+    /// snapshot for the same session and worktree.
+    member internal _.EstablishInstance(stored: StoredInstance) =
+        use connection = openConnection ()
+        use transaction = connection.BeginTransaction()
+        let established =
+            inheritLatestContext connection transaction stored
+            |> persistedValue
 
         let persisted =
-            readInstanceByBinding
+            upsertAndReadInstance
                 connection
-                (Some transaction)
-                stored.ProcessIdentity
-                stored.SessionId
-            |> persistedValue
-            |> Option.defaultWith (fun () ->
-                raisePersistedDataError
-                    PersistedDataError.MissingPersistedInstance)
+                transaction
+                established
 
         transaction.Commit()
         persisted
@@ -951,18 +1045,15 @@ type SessionActivityStore
             prior.TerminalSessionId
         |> ignore
 
-        upsertInstance connection (Some transaction) next
+        let established =
+            inheritLatestContext connection transaction next
+            |> persistedValue
 
         let persisted =
-            readInstanceByBinding
+            upsertAndReadInstance
                 connection
-                (Some transaction)
-                next.ProcessIdentity
-                next.SessionId
-            |> persistedValue
-            |> Option.defaultWith (fun () ->
-                raisePersistedDataError
-                    PersistedDataError.MissingPersistedInstance)
+                transaction
+                established
 
         transaction.Commit()
         persisted
