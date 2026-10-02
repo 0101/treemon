@@ -68,7 +68,7 @@ type StartupPromptTests() =
     member _.``full initial prompt crosses the bridge and launch waits for acceptance``(kind: string) =
         withBridges 1 (fun bridges ->
             let listener, url = List.exactlyOne bridges
-            let path = WorktreePath("Q:\\owner's repo with spaces & %PATH%\\" + Guid.NewGuid().ToString("N"))
+            let path = WorktreePath(uniquePath "owner's repo with spaces & %PATH%")
             let sessionId = Guid.NewGuid().ToString()
             let expectedStart = started path
             let commands = ConcurrentQueue<WorktreePath * string>()
