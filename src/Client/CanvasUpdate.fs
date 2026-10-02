@@ -599,6 +599,12 @@ let canvasSendResult (result: CanvasMessageResult) (scopedKey: string) (filename
         | CanvasMessageResult.Error msg ->
             Fable.Core.JS.console.error ("Canvas message error:", msg)
             { model with Canvas.CanvasSendState = CanvasSendState.Failed msg }, Cmd.none
+        | CanvasMessageResult.SessionStartFailed error ->
+            let message =
+                $"Could not start an interaction session for {filename}: {PromptedLaunchError.message error}"
+
+            { model with Canvas.CanvasSendState = CanvasSendState.Failed message },
+            Cmd.ofEffect (fun _ -> Fable.Core.JS.console.error ("Canvas session launch error:", message))
         | CanvasMessageResult.Ok ->
             { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none
         | CanvasMessageResult.Queued ->

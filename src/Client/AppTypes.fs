@@ -108,6 +108,9 @@ type Msg =
     | AgentStarted of
         WorktreePath *
         Result<EmbeddedTerminalStartResult, string>
+    | PromptedAgentStarted of
+        WorktreePath *
+        Result<EmbeddedTerminalStartResult, PromptedLaunchError>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
     | SelectEmbeddedTerminal of EmbeddedTerminalId
     | ReconnectEmbeddedTerminalView of EmbeddedTerminalId

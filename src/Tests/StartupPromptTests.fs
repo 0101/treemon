@@ -10,23 +10,11 @@ open NUnit.Framework
 open Shared
 open Server
 open Server.SessionActivity
+open Tests.BridgeFixture
 open Tests.TestUtils
 
 let private await (task: Task<'a>) =
     task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
-
-let private withBridges count action =
-    let bridges =
-        getFreeTcpPorts count
-        |> List.map (fun port ->
-            let listener = new HttpListener()
-            let url = $"http://127.0.0.1:{port}/"
-            listener.Prefixes.Add url
-            listener.Start()
-            listener, url)
-
-    try action bridges
-    finally bridges |> List.iter (fun (listener, _) -> listener.Close())
 
 let private register path sessionId url =
     let identity =
@@ -67,10 +55,10 @@ let private start timeout launch close sessionId path prompt =
         prompt
     |> Async.StartAsTask
 
-let private assertStarted expected (result: Result<EmbeddedTerminalStartResult, string>) =
+let private assertStarted expected (result: Result<EmbeddedTerminalStartResult, PromptedLaunchError>) =
     match result with
     | Ok actual -> Assert.That(actual, Is.EqualTo expected)
-    | Error error -> Assert.Fail($"Startup failed: {error}")
+    | Error error -> Assert.Fail($"Startup failed: {PromptedLaunchError.message error}")
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -228,6 +216,73 @@ type StartupPromptTests() =
             respond 200 second
             await launched |> assertStarted (started path))
 
+    [<TestCase(10)>]
+    [<TestCase(12)>]
+    member _.``ordinary queue pressure preserves the required startup instruction``(messageCount: int) =
+        withBridges 1 (fun bridges ->
+            let listener, url = List.exactlyOne bridges
+            let path = WorktreePath(uniquePath "startup-queue-pressure")
+            let sessionId = Guid.NewGuid().ToString()
+            let initial = CanvasPrompt.continueWorking (WorktreePath.value path) "diff.html"
+            let launchEntered = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseLaunch = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let closes = ConcurrentQueue<EmbeddedTerminalId>()
+            let incoming = listener.GetContextAsync()
+            let launched =
+                start
+                    (TimeSpan.FromSeconds 5.0)
+                    (fun _ _ ->
+                        async {
+                            launchEntered.TrySetResult() |> ignore
+                            do! releaseLaunch.Task |> Async.AwaitTask
+                            register (WorktreePath.value path) (Some sessionId) url
+                            return Ok(started path)
+                        })
+                    (fun id ->
+                        closes.Enqueue id
+                        async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                    sessionId
+                    path
+                    initial
+
+            try
+                await launchEntered.Task
+                let interactions =
+                    [ 1 .. messageCount ]
+                    |> List.map (fun index -> $"""{{"action":"canvas-selection","request":"Explain change {index}"}}""")
+
+                interactions
+                |> List.iter (fun interaction ->
+                    SessionBridge.send
+                        { WorktreePath = WorktreePath.value path
+                          Target = SessionBridge.SendTarget.Unspecified
+                          Prompt = SessionBridge.Prompt.canvasFor "diff.html" interaction }
+                    |> Async.RunSynchronously
+                    |> ignore)
+
+                releaseLaunch.TrySetResult() |> ignore
+                let first = await incoming
+                let ordinary = listener.GetContextAsync()
+                Assert.Multiple(fun () ->
+                    Assert.That(readPrompt first, Is.EqualTo(("startup-prompt", initial)))
+                    Assert.That(ordinary.IsCompleted, Is.False, "Interactions must wait for startup acceptance"))
+                respond 200 first
+
+                let expected = interactions |> List.skip (messageCount - 10)
+                expected
+                |> List.iteri (fun index interaction ->
+                    let request =
+                        if index = 0 then ordinary
+                        else listener.GetContextAsync()
+                    let context = await request
+                    Assert.That(readPrompt context, Is.EqualTo(("canvas", interaction)))
+                    respond 200 context)
+
+                await launched |> assertStarted (started path)
+                Assert.That(closes, Is.Empty)
+            finally
+                releaseLaunch.TrySetResult() |> ignore)
+
     [<TestCase(false)>]
     [<TestCase(true)>]
     member _.``SDK rejection closes only the new terminal and reports cleanup failure``(cleanupFails: bool) =
@@ -258,13 +313,50 @@ type StartupPromptTests() =
             respond 503 context
             let result = await launched
 
-            Assert.That(closes.ToArray(), Is.EqualTo([| expectedStart.TerminalId |]))
-            match result with
-            | Ok _ -> Assert.Fail("Rejected SDK startup must fail the launch")
-            | Error error ->
-                Assert.That(error, Does.Contain("rejected the startup prompt"))
+            let expected =
                 if cleanupFails then
-                    Assert.That(error, Does.Contain("Could not close the new terminal: exact cleanup failed")))
+                    PromptedLaunchError.StartupCleanupFailed(
+                        StartupPromptFailure.Rejected,
+                        expectedStart.TerminalId)
+                else
+                    PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected
+
+            Assert.Multiple(fun () ->
+                Assert.That(closes.ToArray(), Is.EqualTo([| expectedStart.TerminalId |]))
+                Assert.That(
+                    result,
+                    Is.EqualTo(Error expected : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))))
+
+    [<Test>]
+    member _.``unexpected cleanup failure preserves rejection without exposing exception text``() =
+        withBridges 1 (fun bridges ->
+            let listener, url = List.exactlyOne bridges
+            let path = WorktreePath(uniquePath "startup-cleanup-exception")
+            let sessionId = Guid.NewGuid().ToString()
+            let incoming = listener.GetContextAsync()
+            let launched =
+                start
+                    (TimeSpan.FromSeconds 5.0)
+                    (fun _ _ ->
+                        register (WorktreePath.value path) (Some sessionId) url
+                        async.Return(Ok(started path)))
+                    (fun _ ->
+                        async { return raise (InvalidOperationException "private cleanup diagnostics") })
+                    sessionId
+                    path
+                    "Initial task"
+
+            let context = await incoming
+            readPrompt context |> ignore
+            respond 503 context
+            let expected =
+                PromptedLaunchError.StartupCleanupFailed(
+                    StartupPromptFailure.Rejected,
+                    (started path).TerminalId)
+
+            Assert.That(
+                await launched,
+                Is.EqualTo(Error expected : Result<EmbeddedTerminalStartResult, PromptedLaunchError>)))
 
     [<Test>]
     member _.``startup timeout removes the pending prompt and closes its terminal``() =
@@ -286,9 +378,11 @@ type StartupPromptTests() =
                     "Expired initial task"
                 |> await
 
-            match result with
-            | Ok _ -> Assert.Fail("A startup without bridge acceptance must time out")
-            | Error error -> Assert.That(error, Does.StartWith("Timed out waiting"))
+            Assert.That(
+                result,
+                Is.EqualTo(
+                    Error(PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut)
+                    : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
             Assert.That(closes.ToArray(), Is.EqualTo([| expectedStart.TerminalId |]))
 
             let incoming = listener.GetContextAsync()
@@ -325,7 +419,36 @@ type StartupPromptTests() =
             |> await
 
         Assert.Multiple(fun () ->
-            Assert.That(result, Is.EqualTo(Error "shell launch failed" : Result<EmbeddedTerminalStartResult, string>))
+            Assert.That(
+                result,
+                Is.EqualTo(
+                    Error PromptedLaunchError.TerminalStartFailed
+                    : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
+            Assert.That(closes, Is.Empty))
+
+    [<Test>]
+    member _.``unexpected launch failure becomes a generic typed error``() =
+        let path = WorktreePath(uniquePath "startup-launch-exception")
+        let closes = ConcurrentQueue<EmbeddedTerminalId>()
+        let result =
+            start
+                (TimeSpan.FromSeconds 5.0)
+                (fun _ _ ->
+                    async { return raise (InvalidOperationException "private launch diagnostics") })
+                (fun id ->
+                    closes.Enqueue id
+                    async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                (Guid.NewGuid().ToString())
+                path
+                "Initial task"
+            |> await
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                result,
+                Is.EqualTo(
+                    Error PromptedLaunchError.Unexpected
+                    : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
             Assert.That(closes, Is.Empty))
 
     [<Test>]

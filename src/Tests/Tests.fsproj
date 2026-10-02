@@ -8,6 +8,8 @@
 
   <ItemGroup>
     <Compile Include="TestUtils.fs" />
+    <Compile Include="BridgeFixture.fs" />
+    <Compile Include="BridgeFixtureTests.fs" />
     <Compile Include="CanvasFilenameTests.fs" />
     <Compile Include="SqliteTestDatabase.fs" />
     <Compile Include="WorktreeFixtures.fs" />

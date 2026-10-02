@@ -189,6 +189,12 @@ Launch succeeds only after the SDK accepts the startup message, not merely when 
 succeeds or the agent finishes its turn. Acceptance has a 30-second deadline after terminal
 startup. Timeout or rejection removes the reserved prompt, closes only the newly created terminal
 through exact-session cleanup, and returns an explicit error; incomplete cleanup is also reported.
+Prompted-launch API results preserve unknown-worktree, unavailable-mode, terminal-start,
+startup-timeout/rejection, and cleanup-failure cases in a shared error union. Unexpected failures
+are logged with operation context and return a generic case; the dashboard and CLI render the
+user-facing text. Backend failure details remain in the server log, while incomplete cleanup
+retains the exact new terminal ID in its typed result. Automatic Canvas startup carries the same
+typed failure in its send result.
 Acceptance and cleanup continue if the requesting browser disconnects. The transport does not
 depend on the CLI's `-i` submission during plugin loading, but still requires Treemon's extension
 to join and submit through the SDK; a missing bridge fails startup.
@@ -371,7 +377,10 @@ after a start cannot distinguish it from a terminal a background launch created 
 reserves its startup prompt before the terminal starts, targets the fresh durable session ID, and
 delivers it before already-queued canvas interactions. The startup transport's HTTP success
 acknowledges SDK message acceptance; ordinary canvas and agent-prompt queueing retain their existing
-semantics. Failed startup never reroutes its instructions to another session.
+semantics. Active startup reservations are not subject to the ordinary queue's ten-message cap or
+five-minute TTL; their launch deadline and cleanup own their lifetime. Ordinary prompts still keep
+only the ten newest entries, and draining waits for startup acceptance before delivering them.
+Failed startup never reroutes its instructions to another session.
 
 `CodingToolCli` builds only the identity-bearing shell command for these launches.
 `TerminalHostClient` separately validates the raw command and mirrors the host's 16,384-byte

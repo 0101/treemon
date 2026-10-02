@@ -21,14 +21,14 @@ type IWorktreeApi =
       recordDeletedWorktree: WorktreePath -> Async<Result<unit, string>>
       listDeletedWorktrees: unit -> Async<Result<string list, string>>
       forgetDeletedWorktree: WorktreePath -> Async<Result<unit, string>>
-      launchSession: LaunchRequest -> Async<Result<EmbeddedTerminalStartResult, string>>
+      launchSession: LaunchRequest -> Async<Result<EmbeddedTerminalStartResult, PromptedLaunchError>>
       focusSession: WorktreePath -> Async<Result<unit, string>>
       killSession: WorktreePath -> Async<Result<unit, string>>
       archiveWorktree: WorktreePath -> Async<Result<unit, string>>
       unarchiveWorktree: WorktreePath -> Async<Result<unit, string>>
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<CreateWorktreeWarnings, string>>
-      launchAction: ActionRequest -> Async<Result<EmbeddedTerminalStartResult, string>>
+      launchAction: ActionRequest -> Async<Result<EmbeddedTerminalStartResult, PromptedLaunchError>>
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
       saveTerminalPaneOpen: bool -> Async<unit>

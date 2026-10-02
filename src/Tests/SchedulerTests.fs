@@ -60,7 +60,7 @@ type RefreshGitTaskTests() =
 
             let services =
                 { SchedulerServices.StartPromptedAgent =
-                    fun _ _ _ -> async { return Error "Unexpected terminal launch" }
+                    fun _ _ _ -> async { return Error PromptedLaunchError.TerminalStartFailed }
                   ActivityStore = None
                   MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json"))
                   AutoSyncStore = Server.AutoSyncStore.create (Path.Combine(tempDir, "auto-sync.json")) }
@@ -102,7 +102,7 @@ type RefreshGitTaskTests() =
 
             let services =
                 { SchedulerServices.StartPromptedAgent =
-                    fun _ _ _ -> async { return Error "Unexpected terminal launch" }
+                    fun _ _ _ -> async { return Error PromptedLaunchError.TerminalStartFailed }
                   ActivityStore = None
                   MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json"))
                   AutoSyncStore = Server.AutoSyncStore.create (Path.Combine(tempDir, "auto-sync.json")) }

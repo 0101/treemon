@@ -220,7 +220,11 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 
 ### Message Queue
 
-- If no live bridge can take the message, the server queues it per worktree (cap 10, 5-min TTL) and returns `Queued`. Draining re-resolves the current target — see `docs/spec/canvas-interaction-routing.md`.
+- If no live bridge can take the message, the server queues it per worktree (cap 10 ordinary
+  messages, 5-min TTL) and returns `Queued`. A prompted startup reservation is exempt from those
+  limits and must be accepted before queued interactions drain. A failed automatic startup
+  returns the shared typed launch error and the client renders it in the existing failure banner.
+  Draining re-resolves the current target — see `docs/spec/canvas-interaction-routing.md`.
 - While queued, the client shows a `Waiting for session…` banner instead of an immediate error.
 - The banner clears to `Idle` only when the target worktree's session actually delivers (never flipped to `Failed` by a wall-clock timer). The user may dismiss it manually, and the server may silently expire the message after its TTL.
 

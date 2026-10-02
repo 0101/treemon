@@ -1799,6 +1799,17 @@ type TerminalFocusTests() =
                     ] }
 
         [ EmbeddedTerminalStarted(first, Error "resume rejected"), "resume rejected"
+          PromptedAgentStarted(
+              first,
+              Error(PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected)),
+          "Copilot's Treemon extension rejected the startup prompt."
+          PromptedAgentStarted(
+              first,
+              Error(
+                  PromptedLaunchError.StartupCleanupFailed(
+                      StartupPromptFailure.TimedOut,
+                      firstTwo))),
+          "Timed out waiting for Copilot's Treemon extension to accept the startup prompt. Could not confirm cleanup of the new terminal. Check the server log for details."
           EmbeddedTerminalRequestFailed(first, "request failed"), "request failed" ]
         |> List.iter (fun (message, expectedError) ->
             let updated, cmd =

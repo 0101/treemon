@@ -68,14 +68,14 @@ let readOnlyApi
       recordDeletedWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
       listDeletedWorktrees = fun () -> async { return Ok [] }
       forgetDeletedWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
-      launchSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      launchSession = fun _ -> async { return Error(PromptedLaunchError.Unavailable modeName) }
       focusSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       killSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       archiveWorktree = fun _ -> async { return Error $"Archive is not available in {modeName}" }
       unarchiveWorktree = fun _ -> async { return Error $"Archive is not available in {modeName}" }
       getBranches = fun _ -> async { return [] }
       createWorktree = fun _ -> async { return Error $"Create is not available in {modeName}" }
-      launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      launchAction = fun _ -> async { return Error(PromptedLaunchError.Unavailable modeName) }
       reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
       saveTerminalPaneOpen = fun _ -> async { return () }
@@ -794,30 +794,29 @@ let internal worktreeApiWithLaunch
             return knownPaths |> Set.exists (fun p -> pathEquals p path)
         }
 
-    let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<'a, string>>) =
+    let withValidatedPathValue
+        (wtPath: WorktreePath)
+        opName
+        (reject: WorktreePath -> 'a)
+        (action: unit -> Async<'a>)
+        =
         let path = WorktreePath.value wtPath
         async {
             let! isValid = validatePath path
 
             if not isValid then
-                Log.log "API" $"{opName}: rejected unknown path '{path}'"
-                return Error $"Unknown worktree path: {path}"
+                Log.log "API" $"{opName}: rejected unknown path {JsonConvert.SerializeObject path}"
+                return reject wtPath
             else
                 return! action ()
         }
 
-    /// Same guard for an endpoint whose result type is its own DU rather than `Result`.
-    let withValidatedPathValue (wtPath: WorktreePath) opName (reject: string -> 'a) (action: unit -> Async<'a>) =
-        let path = WorktreePath.value wtPath
-        async {
-            let! isValid = validatePath path
-
-            if not isValid then
-                Log.log "API" $"{opName}: rejected unknown path '{path}'"
-                return reject $"Unknown worktree path: {path}"
-            else
-                return! action ()
-        }
+    let withValidatedPath wtPath opName action =
+        withValidatedPathValue
+            wtPath
+            opName
+            (fun path -> Error $"Unknown worktree path: {WorktreePath.value path}")
+            action
 
     let serializedTerminalAction operation =
         match terminalHostRestartSessions with
@@ -1047,7 +1046,7 @@ let internal worktreeApiWithLaunch
                           (WorktreePath.value wtPath)
               }
           launchSession = fun req ->
-              withValidatedPath req.Path "launchSession" (fun () ->
+              withValidatedPathValue req.Path "launchSession" (PromptedLaunchError.UnknownWorktree >> Error) (fun () ->
                   async {
                       let path = WorktreePath.value req.Path
                       let provider = CodingToolStatus.readConfiguredProvider path
@@ -1137,6 +1136,9 @@ let internal worktreeApiWithLaunch
                               | Some skill -> CodingToolStatus.skillInvocation provider skill prompt
                               | None -> prompt
                           async {
+                              let context =
+                                  $"worktree={JsonConvert.SerializeObject newPath} repository={JsonConvert.SerializeObject root}"
+
                               try
                                   let! worktrees = GitWorktree.listWorktrees root
 
@@ -1146,11 +1148,15 @@ let internal worktreeApiWithLaunch
 
                                       match! terminalLaunch.StartPromptedAgent provider (WorktreePath newPath) wrapped with
                                       | Ok _ -> ()
-                                      | Error msg -> Log.log "API" $"Auto-launch failed for {newPath}: {msg}"
-                                  | None | Some _ ->
-                                      Log.log "API" "Auto-launch failed: could not discover the newly created worktree"
+                                      | Error error ->
+                                          let reason = JsonConvert.SerializeObject(PromptedLaunchError.message error)
+                                          Log.log "API" $"Auto-launch failed for {context}: {reason}"
+                                  | None ->
+                                      Log.log "API" $"Auto-launch failed for {context}: could not list repository worktrees"
+                                  | Some worktrees ->
+                                      Log.log "API" $"Auto-launch failed for {context}: newly created path absent from {worktrees.Length} discovered worktrees"
                               with ex ->
-                                  Log.log "API" $"Auto-launch crashed for {newPath}: {ex}"
+                                  Log.logException "API" $"Auto-launch crashed for {context}" ex
                           }
                           |> Async.Start
                       | _ -> ()
@@ -1187,7 +1193,7 @@ let internal worktreeApiWithLaunch
                   return fork.Warnings
               }
           launchAction = fun req ->
-              withValidatedPath req.Path "launchAction" (fun () ->
+              withValidatedPathValue req.Path "launchAction" (PromptedLaunchError.UnknownWorktree >> Error) (fun () ->
                   async {
                       let path = WorktreePath.value req.Path
                       let provider = CodingToolStatus.readConfiguredProvider path
@@ -1258,8 +1264,11 @@ let internal worktreeApiWithLaunch
                           | None -> return! start ()
                   })
           sendCanvasMessage = fun request ->
-              withValidatedPathValue request.WorktreePath "sendCanvasMessage" CanvasMessageResult.Error (fun () ->
-                  async {
+              withValidatedPathValue
+                  request.WorktreePath
+                  "sendCanvasMessage"
+                  (fun path -> CanvasMessageResult.Error $"Unknown worktree path: {WorktreePath.value path}")
+                  (fun () -> async {
                       let path = WorktreePath.value request.WorktreePath
                       let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
@@ -1297,14 +1306,16 @@ let internal worktreeApiWithLaunch
                                   do! CanvasBridge.cancelPendingLaunch path
 
                                   return
-                                      CanvasMessageResult.Error
-                                          $"Could not start an interaction session for {request.Filename}: {err}"
+                                      CanvasMessageResult.SessionStartFailed err
                               | Choice2Of2 ex ->
                                   do! CanvasBridge.cancelPendingLaunch path
+                                  Log.logException
+                                      "API"
+                                      $"Canvas session launch failed for worktree={JsonConvert.SerializeObject path}"
+                                      ex
 
                                   return
-                                      CanvasMessageResult.Error
-                                          $"Could not start an interaction session for {request.Filename}: {ex.Message}"
+                                      CanvasMessageResult.SessionStartFailed PromptedLaunchError.Unexpected
                   })
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->

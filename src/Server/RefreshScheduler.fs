@@ -14,7 +14,7 @@ type SchedulerServices =
         CodingToolProvider option ->
         WorktreePath ->
         string ->
-        Async<Result<EmbeddedTerminalStartResult, string>>
+        Async<Result<EmbeddedTerminalStartResult, PromptedLaunchError>>
       ActivityStore: SessionActivityStore.SessionActivityStore option
       MergedPrStore: MergedPrStore.Store
       AutoSyncStore: AutoSyncStore.Store }
@@ -72,7 +72,7 @@ let internal autoSyncDependencies
         CodingToolProvider option ->
         WorktreePath ->
         string ->
-        Async<Result<EmbeddedTerminalStartResult, string>>)
+        Async<Result<EmbeddedTerminalStartResult, PromptedLaunchError>>)
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (autoSyncStore: AutoSyncStore.Store option)
     : AutoSync.TriggerDependencies =

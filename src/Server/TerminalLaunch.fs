@@ -1,6 +1,7 @@
 module Server.TerminalLaunch
 
 open System
+open System.Text.Json
 open System.Threading
 open Shared
 open Server.SessionActivity
@@ -29,32 +30,52 @@ let internal startPromptedAgentWith dependencies sessionId provider worktreePath
 
         match attempt with
         | SessionBridge.StartupResult.Accepted started -> return Ok started
-        | SessionBridge.StartupResult.LaunchFailed error -> return Error error
+        | SessionBridge.StartupResult.LaunchFailed error ->
+            let path = JsonSerializer.Serialize(WorktreePath.value worktreePath)
+            Log.log "TerminalLaunch" $"Prompted terminal start failed for worktree={path}: {JsonSerializer.Serialize error}"
+            return Error PromptedLaunchError.TerminalStartFailed
         | SessionBridge.StartupResult.PromptFailed(started, failure) ->
-            let error =
-                match failure with
-                | SessionBridge.StartupPromptFailure.TimedOut ->
-                    "Timed out waiting for Copilot's Treemon extension to accept the startup prompt."
-                | SessionBridge.StartupPromptFailure.Rejected ->
-                    "Copilot's Treemon extension rejected the startup prompt."
-
             let! cleanup =
                 dependencies.CloseTerminal started.TerminalId
                 |> Async.Catch
 
             match cleanup with
-            | Choice1Of2(Ok _) -> return Error error
+            | Choice1Of2(Ok _) -> return Error(PromptedLaunchError.StartupFailed failure)
             | Choice1Of2(Error cleanupError) ->
-                return Error $"{error} Could not close the new terminal: {cleanupError}"
+                Log.log
+                    "TerminalLaunch"
+                    $"Prompted launch cleanup failed for terminal={EmbeddedTerminalId.value started.TerminalId}: {JsonSerializer.Serialize cleanupError}"
+                return
+                    Error(
+                        PromptedLaunchError.StartupCleanupFailed(
+                            failure,
+                            started.TerminalId))
             | Choice2Of2 ex ->
-                Log.logException "TerminalLaunch" "Failed to close a rejected prompted launch" ex
-                return Error $"{error} Could not close the new terminal."
+                Log.logException
+                    "TerminalLaunch"
+                    $"Failed to close prompted launch terminal={EmbeddedTerminalId.value started.TerminalId}"
+                    ex
+                return
+                    Error(
+                        PromptedLaunchError.StartupCleanupFailed(
+                            failure,
+                            started.TerminalId))
     }
+
+    let guarded =
+        async {
+            try
+                return! operation
+            with ex ->
+                let path = JsonSerializer.Serialize(WorktreePath.value worktreePath)
+                Log.logException "TerminalLaunch" $"Prompted launch failed for worktree={path}" ex
+                return Error PromptedLaunchError.Unexpected
+        }
 
     async {
         // A disconnected caller must not abandon startup acceptance or exact-terminal cleanup.
         return!
-            Async.StartAsTask(operation, cancellationToken = CancellationToken.None)
+            Async.StartAsTask(guarded, cancellationToken = CancellationToken.None)
             |> Async.AwaitTask
     }
 
@@ -69,7 +90,7 @@ type internal Operations =
         CodingToolProvider option ->
         WorktreePath ->
         string ->
-        Async<Result<EmbeddedTerminalStartResult, string>> }
+        Async<Result<EmbeddedTerminalStartResult, PromptedLaunchError>> }
 
 let internal create sessionAgent embeddedTerminal prepareSessionClose : Operations =
     let prompted =

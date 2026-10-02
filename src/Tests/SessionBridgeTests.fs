@@ -12,6 +12,7 @@ open Shared
 open Server
 open Server.SessionBridge
 open Server.SessionActivity
+open Tests.BridgeFixture
 open Tests.TestUtils
 
 let private clock = DateTime(2042, 7, 23, 12, 0, 0, DateTimeKind.Utc)
@@ -46,23 +47,6 @@ let private validRequest identity path sessionId =
 let private registerOrFail resolver request =
     registerSession resolver request
     |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
-
-/// Prompt and shutdown transport run against real loopback listeners so the trust boundary — the
-/// posted URL, body and opaque capability — stays observable rather than stubbed out.
-let private withBridges count (run: (HttpListener * string) list -> unit) =
-    let bridges =
-        getFreeTcpPorts count
-        |> List.map (fun port ->
-            let listener = new HttpListener()
-            let url = $"http://127.0.0.1:{port}/"
-            listener.Prefixes.Add url
-            listener.Start()
-            listener, url)
-
-    try
-        run bridges
-    finally
-        bridges |> List.iter (fun (listener, _) -> (listener :> IDisposable).Dispose())
 
 let private await (task: Task<'a>) = task.WaitAsync(listenerTimeout).GetAwaiter().GetResult()
 
@@ -165,6 +149,22 @@ type ClockTests() =
         let poll = registered, clock - TimeSpan.FromSeconds(float pollAge)
 
         Assert.That(computeLiveness clock session poll, Is.EqualTo scenario.Expected)
+
+    [<Test>]
+    member _.``startup reservation lifetime belongs to its launch deadline rather than queue TTL``() =
+        use deadline = new CancellationTokenSource()
+        let completion =
+            TaskCompletionSource<Result<unit, StartupPromptFailure>>(
+                TaskCreationOptions.RunContinuationsAsynchronously)
+        let reserved =
+            { EnqueuedAt = clock - queueTtl
+              Target = SendTarget.DurableSession(SessionId "startup-deadline")
+              Prompt = Prompt.startup "Initial task"
+              Delivery = PromptDelivery.Startup(completion, deadline.Token) }
+
+        Assert.That(cleanExpired clock [ reserved ], Is.EqualTo([ reserved ]))
+        deadline.Cancel()
+        Assert.That(cleanExpired clock [ reserved ], Is.Empty)
 
 /// A rejection scenario owns the whole registration sequence so that two-step rejections (a reused
 /// pid, a changed durable identity) share one runner with the single-step validation rejections.
@@ -451,6 +451,7 @@ let private queueDrainScenarios =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+[<Category("BridgeTransport")>]
 [<NonParallelizable>]
 type PromptTransportTests() =
 

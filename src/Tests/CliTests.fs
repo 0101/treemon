@@ -62,7 +62,7 @@ type LaunchCommandTests() =
             Assert.That(errors, Is.Empty))
 
     [<Test>]
-    member _.``failed embedded launch reports the server error``() =
+    member _.``failed embedded launch reports terminal startup failure``() =
         // Writer callbacks are the side-effect boundary under test, so their observations are local mutation.
         let mutable output = []
         let mutable errors = []
@@ -71,12 +71,50 @@ type LaunchCommandTests() =
             writeLaunchResult
                 (fun line -> output <- line :: output)
                 (fun line -> errors <- line :: errors)
-                (Error "command delivery failed")
+                (Error PromptedLaunchError.TerminalStartFailed)
 
         Assert.Multiple(fun () ->
             Assert.That(exitCode, Is.EqualTo(1))
             Assert.That(output, Is.Empty)
-            Assert.That(errors, Is.EqualTo([ "Error: command delivery failed" ])))
+            Assert.That(
+                errors,
+                Is.EqualTo([ "Error: Could not start the embedded terminal. Check the server log for details." ])))
+
+    [<Test>]
+    member _.``typed startup cleanup failure renders a complete CLI error``() =
+        let output = System.Collections.Concurrent.ConcurrentQueue<string>()
+        let errors = System.Collections.Concurrent.ConcurrentQueue<string>()
+        let exitCode =
+            writeLaunchResult
+                output.Enqueue
+                errors.Enqueue
+                (Error(
+                    PromptedLaunchError.StartupCleanupFailed(
+                        StartupPromptFailure.Rejected,
+                        EmbeddedTerminalId "00000000000000000000000000000001")))
+
+        Assert.Multiple(fun () ->
+            Assert.That(exitCode, Is.EqualTo(1))
+            Assert.That(output, Is.Empty)
+            Assert.That(
+                errors.ToArray(),
+                Is.EqualTo(
+                    [| "Error: Copilot's Treemon extension rejected the startup prompt. Could not confirm cleanup of the new terminal. Check the server log for details." |])))
+
+    [<Test>]
+    member _.``unknown-worktree launch errors sanitize path control characters``() =
+        let output = System.Collections.Concurrent.ConcurrentQueue<string>()
+        let errors = System.Collections.Concurrent.ConcurrentQueue<string>()
+        let exitCode =
+            writeLaunchResult
+                output.Enqueue
+                errors.Enqueue
+                (Error(PromptedLaunchError.UnknownWorktree(WorktreePath "repo\r\npath\u001b[31m")))
+
+        Assert.Multiple(fun () ->
+            Assert.That(exitCode, Is.EqualTo(1))
+            Assert.That(output, Is.Empty)
+            Assert.That(errors.ToArray(), Is.EqualTo([| "Error: Unknown worktree path: repopath[31m" |])))
 
 [<TestFixture>]
 [<Category("Unit")>]

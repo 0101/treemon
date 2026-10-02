@@ -221,7 +221,9 @@ A "+" button on each repo header opens a modal to create new worktrees without l
   terminal-registry polling, and does not steal focus.
 - Before that automatic session starts, the server publishes a fresh Git worktree discovery into
   scheduler state. The new path is therefore monitored when its extension first registers; a
-  failed discovery logs the launch failure rather than starting an unmonitored, unprompted session.
+  failed listing or a listing missing the newly created path skips launch rather than starting an
+  unmonitored, unprompted session. The diagnostic identifies the repository and new worktree as
+  escaped data, distinguishes those discovery failures, and includes the count for a missing path.
 - The offered skills are config-driven: the machine-level `~/.treemon/config.json` `worktreeSkills` (a string array, blank entries dropped, **empty by default**), surfaced to the client via `DashboardResponse.WorktreeSkills` (like `EditorName`).
 
 ### Native Session Management

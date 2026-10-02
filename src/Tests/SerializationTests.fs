@@ -154,6 +154,35 @@ type WrapperTypeSerializationTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type PromptedLaunchErrorSerializationTests() =
+
+    static member ErrorCases =
+        [ PromptedLaunchError.UnknownWorktree(WorktreePath @"Q:\owner's repo")
+          PromptedLaunchError.Unavailable "fixture mode"
+          PromptedLaunchError.TerminalStartFailed
+          PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut
+          PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected
+          PromptedLaunchError.StartupCleanupFailed(
+              StartupPromptFailure.TimedOut,
+              EmbeddedTerminalId "00000000000000000000000000000001")
+          PromptedLaunchError.StartupCleanupFailed(
+              StartupPromptFailure.Rejected,
+              EmbeddedTerminalId "00000000000000000000000000000002")
+          PromptedLaunchError.Unexpected ]
+        |> List.map (fun error -> TestCaseData(error))
+
+    [<TestCaseSource(nameof PromptedLaunchErrorSerializationTests.ErrorCases)>]
+    member _.``prompted launch failures retain typed data across both API responses``(error: PromptedLaunchError) =
+        let launch: Result<EmbeddedTerminalStartResult, PromptedLaunchError> = Error error
+        let canvas = CanvasMessageResult.SessionStartFailed error
+
+        Assert.Multiple(fun () ->
+            Assert.That(roundTrip launch, Is.EqualTo launch)
+            Assert.That(roundTrip canvas, Is.EqualTo canvas))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type CanvasDocKindSerializationTests() =
 
     let makeDoc kind : CanvasDoc =

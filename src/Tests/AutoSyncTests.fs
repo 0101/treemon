@@ -130,7 +130,8 @@ let private closedPr = prInfo PrState.ClosedUnmerged
 /// overlapping inside the durable-record layer, which the guard serializes in production, and
 /// `AutoSyncMechanicalTests` covers the guard itself.
 let private withAcceptedRecords agent store deliver =
-    let unexpectedLaunch _ _ _ = async { return Error "Unexpected terminal launch" }
+    let unexpectedLaunch _ _ _ =
+        async { return Error PromptedLaunchError.TerminalStartFailed }
 
     { autoSyncDependencies agent unexpectedLaunch None (Some store) with
         ReadPrStatus = fun _ -> async { return Some NoPr }
@@ -1755,7 +1756,7 @@ type AutoSyncDeliveryTests() =
                         if failureKind = "exception" then
                             return raise (InvalidOperationException "launch failed")
                         else
-                            return Error "launch failed"
+                            return Error PromptedLaunchError.TerminalStartFailed
                     })
                 { request with Target = NoOpenSession None }
             |> Async.RunSynchronously
@@ -1774,7 +1775,7 @@ type AutoSyncDeliveryTests() =
         let launch _ requestedPath prompt =
             async {
                 observedLaunch <- Some(requestedPath, prompt)
-                return Error "startup prompt rejected"
+                return Error(PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected)
             }
 
         let dependencies =

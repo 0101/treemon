@@ -101,6 +101,12 @@ let private createApi
           DeployBranch = None },
     agent
 
+let private promptedLaunchOnly startPromptedAgent : TerminalLaunch.Operations =
+    { OpenNativeTerminal = fun _ -> async.Return(Error "Unexpected native launch")
+      StartEmbeddedTerminal = fun _ -> async.Return(Error "Unexpected plain launch")
+      StartEmbeddedCommand = fun _ _ -> async.Return(Error "Unexpected command launch")
+      StartPromptedAgent = startPromptedAgent }
+
 let private assertStart expectedId result =
     match result with
     | Ok started ->
@@ -364,7 +370,7 @@ type WorktreeApiLaunchTests() =
                                             requestedPath
                                             (EmbeddedTerminalId.value canvasId)
                                     )
-                                | _ -> Error "Unexpected startup prompt"
+                                | _ -> Error PromptedLaunchError.TerminalStartFailed
                         } }
 
             let api, _ = createApi root path None terminalLaunch
@@ -412,6 +418,48 @@ type WorktreeApiLaunchTests() =
             assertTerminalCommandAccepted resumeCommand)
 
     [<Test>]
+    member _.``prompted API methods preserve structured startup cleanup failure``() =
+        withTempDir "treemon-typed-launch-failure" (fun root ->
+            let path = PathUtils.toWorktreePath root
+            let expected =
+                PromptedLaunchError.StartupCleanupFailed(
+                    StartupPromptFailure.TimedOut,
+                    EmbeddedTerminalId "00000000000000000000000000000001")
+            let terminalLaunch =
+                promptedLaunchOnly (fun _ _ _ -> async.Return(Error expected))
+            let api, _ = createApi root path None terminalLaunch
+
+            let session = api.launchSession { Path = path; Prompt = "Initial task" } |> runAsync
+            let action = api.launchAction { Path = path; Action = CreatePr } |> runAsync
+            let expectedResult: Result<EmbeddedTerminalStartResult, PromptedLaunchError> = Error expected
+
+            Assert.Multiple(fun () ->
+                Assert.That(session, Is.EqualTo expectedResult)
+                Assert.That(action, Is.EqualTo expectedResult)))
+
+    [<Test>]
+    member _.``prompted API methods reject unknown worktrees before launching``() =
+        withTempDir "treemon-unknown-launch-worktree" (fun root ->
+            let known = PathUtils.toWorktreePath root
+            let unknown = Path.Combine(root, "unknown") |> PathUtils.toWorktreePath
+            let calls = ConcurrentQueue<WorktreePath>()
+            let terminalLaunch =
+                promptedLaunchOnly
+                    (fun _ path _ ->
+                        calls.Enqueue path
+                        async.Return(Error PromptedLaunchError.Unexpected))
+            let api, _ = createApi root known None terminalLaunch
+            let session = api.launchSession { Path = unknown; Prompt = "Initial task" } |> runAsync
+            let action = api.launchAction { Path = unknown; Action = CreatePr } |> runAsync
+            let expectedResult: Result<EmbeddedTerminalStartResult, PromptedLaunchError> =
+                Error(PromptedLaunchError.UnknownWorktree unknown)
+
+            Assert.Multiple(fun () ->
+                Assert.That(session, Is.EqualTo expectedResult)
+                Assert.That(action, Is.EqualTo expectedResult)
+                Assert.That(calls, Is.Empty)))
+
+    [<Test>]
     member _.``Create refuses a tombstoned sibling before invoking Git``() =
         withTempDir "treemon-create-tombstone" (fun root ->
             let deletedBranch = "feature/x"
@@ -425,11 +473,8 @@ type WorktreeApiLaunchTests() =
                 (DeletedWorktreeStore.recordAtPath recordFile worktreePath)
                 "record deleted worktree"
 
-            let unavailable: TerminalLaunch.Operations =
-                { OpenNativeTerminal = fun _ -> async { return Error "Unexpected terminal launch" }
-                  StartEmbeddedTerminal = fun _ -> async { return Error "Unexpected terminal launch" }
-                  StartEmbeddedCommand = fun _ _ -> async { return Error "Unexpected terminal launch" }
-                  StartPromptedAgent = fun _ _ _ -> async { return Error "Unexpected agent launch" } }
+            let unavailable =
+                promptedLaunchOnly (fun _ _ _ -> async { return Error PromptedLaunchError.TerminalStartFailed })
             let api, _ =
                 createApi
                     root
@@ -474,15 +519,9 @@ type WorktreeApiLaunchTests() =
                 TaskCompletionSource<unit>(
                     TaskCreationOptions.RunContinuationsAsynchronously)
 
-            let terminalLaunch: TerminalLaunch.Operations =
-                { OpenNativeTerminal =
-                    fun _ -> async { return Error "Unexpected native terminal launch" }
-                  StartEmbeddedTerminal =
-                    fun _ -> async { return Error "Unexpected plain embedded launch" }
-                  StartEmbeddedCommand =
-                    fun _ _ -> async { return Error "Unexpected shell command launch" }
-                  StartPromptedAgent =
-                    fun _ requestedPath prompt ->
+            let terminalLaunch =
+                promptedLaunchOnly
+                    (fun _ requestedPath prompt ->
                         async {
                             let markerExists =
                                 File.Exists(
@@ -504,7 +543,7 @@ type WorktreeApiLaunchTests() =
                                         requestedPath
                                         "66666666666666666666666666666666"
                                 )
-                        } }
+                        })
 
             let api, agent = createApi repoRoot rootPath None terminalLaunch
             let prompt =
@@ -577,15 +616,9 @@ type WorktreeApiLaunchTests() =
                 |> WorktreePath
             let calls = ConcurrentQueue<WorktreePath * string>()
 
-            let terminalLaunch: TerminalLaunch.Operations =
-                { OpenNativeTerminal =
-                    fun _ -> async { return Error "Unexpected native terminal launch" }
-                  StartEmbeddedTerminal =
-                    fun _ -> async { return Error "Unexpected plain embedded launch" }
-                  StartEmbeddedCommand =
-                    fun _ _ -> async { return Error "Unexpected shell command launch" }
-                  StartPromptedAgent =
-                    fun _ requestedPath prompt ->
+            let terminalLaunch =
+                promptedLaunchOnly
+                    (fun _ requestedPath prompt ->
                         async {
                             calls.Enqueue((requestedPath, prompt))
 
@@ -595,7 +628,7 @@ type WorktreeApiLaunchTests() =
                                         requestedPath
                                         "77777777777777777777777777777777"
                                 )
-                        } }
+                        })
 
             let api, _ = createApi root path None terminalLaunch
             let filename = "diff.html"
@@ -616,3 +649,27 @@ type WorktreeApiLaunchTests() =
                     calls.ToArray(),
                     Is.EqualTo([| (path, expectedPrompt) |])
                 )))
+
+    [<Test>]
+    member _.``queued SystemView startup failure stays typed and releases launch suppression``() =
+        withTempDir "treemon-canvas-startup-failure" (fun root ->
+            let path = PathUtils.toWorktreePath root
+            let calls = ConcurrentQueue<WorktreePath>()
+            let expected = PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected
+            let terminalLaunch =
+                promptedLaunchOnly
+                    (fun _ path _ ->
+                        calls.Enqueue path
+                        async.Return(Error expected))
+            let api, _ = createApi root path None terminalLaunch
+            let request =
+                { WorktreePath = path
+                  Filename = "diff.html"
+                  Payload = """{"action":"canvas-selection","request":"Explain the change"}""" }
+            let first = api.sendCanvasMessage request |> runAsync
+            let retry = api.sendCanvasMessage request |> runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(first, Is.EqualTo(CanvasMessageResult.SessionStartFailed expected))
+                Assert.That(retry, Is.EqualTo(CanvasMessageResult.SessionStartFailed expected))
+                Assert.That(calls.ToArray(), Is.EqualTo([| path; path |]))))

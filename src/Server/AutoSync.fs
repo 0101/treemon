@@ -1,6 +1,7 @@
 module Server.AutoSync
 
 open System
+open System.Text.Json
 open FsToolkit.ErrorHandling
 open Shared
 open Server.SessionActivity
@@ -312,7 +313,7 @@ let eligiblePrStatus (dependencies: TriggerDependencies) (repoRoot: string) (git
 let deliver
     (tryDeliver: SessionBridge.SendRequest -> Async<SessionBridge.DeliveryResult>)
     (waitForRegistration: unit -> Async<unit>)
-    (launch: WorktreePath -> string -> Async<Result<unit, string>>)
+    (launch: WorktreePath -> string -> Async<Result<unit, PromptedLaunchError>>)
     (request: DeliveryRequest)
     =
     async {
@@ -332,10 +333,14 @@ let deliver
                     | Ok () ->
                         do! waitForRegistration ()
                         return true
-                    | Error _ ->
+                    | Error error ->
+                        let worktree = JsonSerializer.Serialize path
+                        let reason = JsonSerializer.Serialize(PromptedLaunchError.message error)
+                        Log.log "AutoSync" $"Fallback launch failed for worktree={worktree}: {reason}"
                         return false
                 with ex ->
-                    Log.log "AutoSync" $"Fallback launch failed for {path}: {ex.Message}"
+                    let worktree = JsonSerializer.Serialize path
+                    Log.logException "AutoSync" $"Fallback launch failed for worktree={worktree}" ex
                     return false
             }
 

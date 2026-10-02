@@ -52,30 +52,30 @@ let withPort portMaybe fn =
     else
         fn port
 
+let sanitizeForTerminal (s: string) =
+    Regex.Replace(s, @"[\x00-\x1F\x7F]", "")
+
 let writeLaunchResult
     (writeOutput: string -> unit)
     (writeError: string -> unit)
-    (result: Result<EmbeddedTerminalStartResult, string>)
+    (result: Result<EmbeddedTerminalStartResult, PromptedLaunchError>)
     =
     match result with
     | Ok _ ->
         writeOutput "✓ Agent launched in embedded terminal"
         0
     | Error error ->
-        writeError $"Error: {error}"
+        writeError $"Error: {PromptedLaunchError.message error |> sanitizeForTerminal}"
         1
 
 let runLaunchApi
     port
-    (fn: IWorktreeApi -> Async<Result<EmbeddedTerminalStartResult, string>>)
+    (fn: IWorktreeApi -> Async<Result<EmbeddedTerminalStartResult, PromptedLaunchError>>)
     =
     tryCallServer port (fun api ->
         fn api
         |> Async.RunSynchronously
         |> writeLaunchResult (printfn "%s") (eprintfn "%s"))
-
-let sanitizeForTerminal (s: string) =
-    Regex.Replace(s, @"[\x00-\x1F\x7F]", "")
 
 let formatCodingTool = function
     | Working -> "🔧 Working"

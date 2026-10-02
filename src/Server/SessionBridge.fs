@@ -105,11 +105,6 @@ type SendResult =
     | Queued
 
 [<RequireQualifiedAccess>]
-type internal StartupPromptFailure =
-    | TimedOut
-    | Rejected
-
-[<RequireQualifiedAccess>]
 type internal StartupResult<'started> =
     | Accepted of 'started
     | LaunchFailed of string
@@ -227,14 +222,25 @@ let internal serializePrompt (prompt: Prompt) =
 
 let internal cleanExpired (now: DateTime) (prompts: QueuedPrompt list) =
     let cutoff = now - queueTtl
-    prompts |> List.filter (fun prompt -> prompt.EnqueuedAt > cutoff)
+    prompts
+    |> List.filter (fun prompt ->
+        match prompt.Delivery with
+        | PromptDelivery.Ordinary -> prompt.EnqueuedAt > cutoff
+        | PromptDelivery.Startup(_, token) -> not token.IsCancellationRequested)
 
 let internal formatPostFailure statusCode (body: string) =
     $"bridge returned status={statusCode}, bodyLength={body.Length}"
 
 let private capQueue prompts =
-    let excess = List.length prompts - maxQueueSize
-    if excess > 0 then prompts |> List.skip excess else prompts
+    let startup, ordinary =
+        prompts
+        |> List.partition (fun prompt ->
+            match prompt.Delivery with
+            | PromptDelivery.Startup _ -> true
+            | PromptDelivery.Ordinary -> false)
+
+    let excess = ordinary.Length - maxQueueSize
+    startup @ (if excess > 0 then ordinary |> List.skip excess else ordinary)
 
 let private enqueue now worktreeKey target prompt delivery =
     let queued =
@@ -329,13 +335,6 @@ let private drainQueue now (worktreeKey: string) (entry: SessionEntry) =
         if not (List.isEmpty deliver) then
             Log.log "SessionBridge" $"Draining {List.length deliver} queued prompt(s) for {worktreeKey}"
 
-            let startup, ordinary =
-                deliver
-                |> List.partition (fun queued ->
-                    match queued.Delivery with
-                    | PromptDelivery.Startup _ -> true
-                    | PromptDelivery.Ordinary -> false)
-
             let rec deliverQueued remaining =
                 async {
                     match remaining with
@@ -370,7 +369,7 @@ let private drainQueue now (worktreeKey: string) (entry: SessionEntry) =
                             return! deliverQueued rest
                 }
 
-            deliverQueued (startup @ ordinary) |> Async.Start
+            deliverQueued deliver |> Async.Start
 
 let private removeStartupPrompt worktreeKey completion =
     let rec remove () =

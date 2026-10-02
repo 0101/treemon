@@ -321,13 +321,15 @@ let private reconnectableEmbeddedTerminal model =
     model.EmbeddedTerminals
     |> TerminalPane.tryReconnectableTab activeTerminal
 
-let private launchEmbeddedTerminalCmd model path start =
+let private launchEmbeddedTerminalCmd completed model path start =
     Cmd.batch [
         Cmd.OfAsync.either
             start
             ()
-            (fun result -> EmbeddedTerminalStarted(path, result))
-            (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
+            (fun result -> completed(path, result))
+            (fun ex ->
+                Fable.Core.JS.console.error ("Embedded terminal launch request failed:", ex)
+                EmbeddedTerminalRequestFailed(path, "Could not start the embedded terminal. Try again."))
         saveTerminalPaneOpenCmd true model
     ]
 
@@ -372,7 +374,7 @@ let private startFocusedEmbeddedTerminal path start model =
     if alreadyStarting then
         saveTerminalPaneOpenCmd true model
     else
-        launchEmbeddedTerminalCmd model path start
+        launchEmbeddedTerminalCmd EmbeddedTerminalStarted model path start
 
 /// Adopts an incoming registry snapshot, keeping terminals the user dismissed hidden while their
 /// teardown is unresolved and carrying each worktree's selection across the change.
@@ -1018,6 +1020,13 @@ let update msg model =
             path
             result
             model
+    | PromptedAgentStarted(path, result) ->
+        finishEmbeddedTerminalStart
+            (not (terminalHostUpdateLocksInteraction model))
+            false
+            path
+            (result |> Result.mapError PromptedLaunchError.message)
+            model
     | EmbeddedTerminalRequestFailed (path, _)
         when terminalHostUpdateLocksInteraction model ->
         { model with
@@ -1377,6 +1386,7 @@ let update msg model =
             saveTerminalPaneOpenCmd true model
         else
             launchEmbeddedTerminalCmd
+                EmbeddedTerminalStarted
                 model
                 path
                 (fun () -> worktreeApi.Value.resumeSession path)
@@ -1386,6 +1396,7 @@ let update msg model =
         | Some(path, action) ->
             targetEmbeddedTerminalLaunch path model,
             launchEmbeddedTerminalCmd
+                PromptedAgentStarted
                 model
                 path
                 (fun () ->
@@ -1408,6 +1419,7 @@ let update msg model =
                 ActionCooldowns = model.ActionCooldowns.Add path },
             Cmd.batch [
                 launchEmbeddedTerminalCmd
+                    PromptedAgentStarted
                     model
                     path
                     (fun () ->

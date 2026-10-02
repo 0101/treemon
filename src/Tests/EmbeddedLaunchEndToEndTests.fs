@@ -127,7 +127,7 @@ let private ensure (condition: bool) (message: string) =
     if not condition then
         raise (InvalidOperationException(message))
 
-let private requireOk (context: string) (result: Result<'a, string>) =
+let private requireOk (context: string) (result: Result<'a, 'error>) =
     match result with
     | Ok value -> value
     | Error error -> raise (InvalidOperationException($"{context}: {error}"))
@@ -542,7 +542,7 @@ let private windowsTerminalHandles () =
 
 let private startResultId
     (context: string)
-    (result: Result<EmbeddedTerminalStartResult, string>)
+    (result: Result<EmbeddedTerminalStartResult, 'error>)
     =
     result
     |> requireOk context
@@ -1266,7 +1266,7 @@ let private verifyForcedDeliveryFailure
 
                 let reduced = result |> Result.map ignore
                 launchResults.Enqueue(reduced)
-                return reduced
+                return reduced |> Result.mapError (fun _ -> PromptedLaunchError.TerminalStartFailed)
             }
 
         let deliver request =
