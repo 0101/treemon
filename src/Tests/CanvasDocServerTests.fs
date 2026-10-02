@@ -338,7 +338,7 @@ type BuildInjectionTests() =
         Assert.That(extension, Does.Contain("from \"./canvas-doc-kinds.mjs\""))
         Assert.That(extension, Does.Contain("isSystemViewFilename(filename)"))
         Assert.That(extension, Does.Contain("window.__canvasTopLevelTransportAvailable = true"))
-        Assert.That(extension, Does.Contain("injectScripts(content, port, canvasRoute.filename)"))
+        Assert.That(extension, Does.Contain("injectScripts(content, canvasRoute, canvasRoute.filename)"))
         Assert.That(extension, Does.Contain("\"Content-Security-Policy\": \"frame-ancestors 'none'\""))
 
     [<Test>]
@@ -807,6 +807,15 @@ type AttributeOwnershipTests() =
         Assert.That(status, Is.EqualTo 400)
 
     [<Test>]
+    member _.``Null registration body is a client error``() =
+        let status, _ =
+            handlerResponse
+                (canvasRegisterHandler (ProcessIdentityResolver.create (fun _ -> Ok None)) (agentKnowing (uniquePath "known")))
+                "null"
+
+        Assert.That(status, Is.EqualTo 400)
+
+    [<Test>]
     member _.``Unexpected registration failures are server errors``() =
         let worktree = uniquePath "registration-failure"
         let sessionId = uniqueSid "registered"
@@ -859,6 +868,15 @@ type AttributeOwnershipTests() =
             Assert.That(retry, Is.EqualTo 200)
             Assert.That(parsed.RootElement.GetProperty("attributed").GetBoolean(), Is.True)
             Assert.That(runAsync (CanvasDocOwnership.getOwner worktree "report.html"), Is.EqualTo(Some(SessionId desired))))
+
+    [<Test>]
+    member _.``Null attribution body is a client error``() =
+        let status, _ =
+            handlerResponse
+                (canvasAttributeHandler (agentKnowing (uniquePath "known")))
+                "null"
+
+        Assert.That(status, Is.EqualTo 400)
 
     [<Test>]
     member _.``a valid declaration for a known worktree records the posted owner``() =

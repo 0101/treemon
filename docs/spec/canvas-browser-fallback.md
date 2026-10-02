@@ -10,8 +10,10 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 2. **Browser fallback mode**: When Treemon is unreachable **or** reports that the current directory is not monitored, the extension:
    - Serves contract-valid `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
    - Does not post canvas-write notifications to the session, avoiding repeated or competing agent prompts while fallback mode is active.
-   - Receives interactions at `POST /_message/:filename` and forwards them via `session.send()`.
-     Source coordinates come from the startup worktree and validated endpoint filename, not authored fields.
+   - Gives each served document an unguessable capability URL and receives interactions at that
+     document's capability-bound message endpoint before forwarding them via `session.send()`.
+     Source coordinates come from the startup worktree and the filename bound to that capability,
+     not authored fields.
 3. **Same HTML, same API**: `canvasSend` is the primary authoring API and raw
    `window.parent.postMessage(...)` is its transport substrate. In a top-level fallback window, the
    transport shim intercepts self-posted messages and forwards them via HTTP. Zero agent-side
@@ -49,11 +51,17 @@ pane will display the docs.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /canvas/:filename` | Read `.agents/canvas/<filename>` from disk, inject transport shim + content-poll script before `</head>`, serve as HTML |
-| `GET /canvas/:filename/hash` | Return MD5/SHA256 hex of file content (for change detection) |
-| `POST /_message/:filename` | Validate the bare filename and payload, derive authoritative source from that filename and startup worktree, and use the same serialized canvas send path as `/inject` |
+| `GET /canvas/:capability/:filename` | Verify the document capability, read `.agents/canvas/<filename>` from disk, inject transport shim + content-poll script before `</head>`, serve as HTML |
+| `GET /canvas/:capability/:filename/hash` | Verify the same capability and return SHA256 hex of file content |
+| `POST /canvas/:capability/:filename/message` | Verify the same capability, validate the payload, derive authoritative source from the capability-bound filename and startup worktree, and use the same serialized canvas send path as `/inject` |
 
-Both `POST` sinks (`/_message/:filename` and the always-on `/inject`) are hardened against cross-origin browser
+Each filename receives one random 256-bit capability for the extension process lifetime. The
+capability is stable across writes so an open document keeps polling and sending, but it is bound
+to exactly one filename. A script in one same-origin canvas therefore cannot substitute another
+filename or fetch another canvas without knowing that document's capability. Missing, malformed,
+or mismatched capabilities return no route.
+
+Both `POST` sinks (the capability-bound message endpoint and the always-on `/inject`) are hardened against cross-origin browser
 abuse: they require `Content-Type: application/json` (so a cross-origin call becomes a preflighted
 request the server never answers — the browser blocks it, closing the `text/plain` simple-request
 CSRF vector) and reject any request carrying a non-loopback `Origin`. The legitimate callers already
@@ -66,7 +74,7 @@ request-body reader with a 1 MiB default and reject request-stream errors.
 Browser-mode AgentDocs receive four scripts injected before `</head>`:
 
 - **Transport shim** — in a top-level window it forwards self-posted flat messages to the served
-  filename's message endpoint. The receiving server supplies source independently of payload;
+  document's capability-bound message endpoint. The receiving server supplies source independently of payload;
   authors need no browser-specific code.
 - **`canvasSend`** — the same canonical `src/Extension/canvas-send.js` runtime embedded by the
   Treemon server, so authored interactions use one action check, serialization guard, payload
@@ -116,6 +124,7 @@ accepts only the bare filename rather than stripping a path down to its final se
 ## Key Files
 
 - `src/Extension/extension.mjs` — mode detection, session registration, HTTP serving, local ownership, runtime injection, and filename-scoped messages
+- `src/Extension/browser-canvas-routes.mjs` — per-document capabilities and authorized document/hash/message routes
 - `src/Extension/request-body.mjs` — shared capped request-body reader for injection, message, and shutdown endpoints
 - `src/Extension/shutdown-endpoint.mjs` — capability-guarded loopback routine-shutdown endpoint
 - `src/Extension/canvas-send.js` — canonical `window.canvasSend` runtime shared with the server

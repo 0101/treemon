@@ -82,16 +82,24 @@ let private isKnownWorktree agent path =
         return target |> Option.isSome
     }
 
+type private JsonBindingFailure =
+    | MalformedJson of exn
+    | NullBody
+
 let private bindJson<'request> (ctx: HttpContext) =
     task {
         try
             let! body = ctx.BindJsonAsync<'request>()
-            return Ok body
+
+            return
+                match box body with
+                | null -> Error NullBody
+                | _ -> Ok body
         with
         | :? System.Text.Json.JsonException as error ->
-            return Error(error :> exn)
+            return Error(MalformedJson(error :> exn))
         | :? Newtonsoft.Json.JsonException as error ->
-            return Error(error :> exn)
+            return Error(MalformedJson(error :> exn))
     }
 
 /// injectUrl is stored and later used as an HTTP POST target by SessionBridge (send /
@@ -121,8 +129,11 @@ let canvasRegisterHandler
     : HttpHandler =
     fun next ctx -> task {
         match! bindJson<CanvasRegisterRequest> ctx with
-        | Error error ->
+        | Error(MalformedJson error) ->
             Log.logException "Canvas" "Registration failed: malformed request" error
+            return! RequestErrors.BAD_REQUEST "Malformed registration request" next ctx
+        | Error NullBody ->
+            Log.log "Canvas" "Registration failed: null request body"
             return! RequestErrors.BAD_REQUEST "Malformed registration request" next ctx
         | Ok body ->
             try
@@ -200,8 +211,11 @@ let attributeOwnership
 let canvasAttributeHandler (agent: MailboxProcessor<SchedulerState.StateMsg>) : HttpHandler =
     fun next ctx -> task {
         match! bindJson<CanvasAttributeRequest> ctx with
-        | Error error ->
+        | Error(MalformedJson error) ->
             Log.logException "Canvas" "Attribution failed: malformed request" error
+            return! RequestErrors.BAD_REQUEST "Malformed attribution request" next ctx
+        | Error NullBody ->
+            Log.log "Canvas" "Attribution failed: null request body"
             return! RequestErrors.BAD_REQUEST "Malformed attribution request" next ctx
         | Ok body ->
             try

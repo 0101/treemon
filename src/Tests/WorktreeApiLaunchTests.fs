@@ -5,6 +5,7 @@ open System.Collections.Concurrent
 open System.IO
 open System.Net
 open System.Runtime.InteropServices
+open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open NUnit.Framework
@@ -19,6 +20,9 @@ open Tests.TestUtils
 
 let private terminalId value =
     EmbeddedTerminalId value
+
+let private canvasPayload text =
+    JsonSerializer.Serialize {| action = "test"; text = text |}
 
 [<RequireQualifiedAccess>]
 type private LaunchCall =
@@ -810,7 +814,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let message text =
                 { WorktreePath = path
                   Filename = "diff.html"
-                  Payload = text }
+                  Payload = canvasPayload text }
             [ "first"; "second" ]
             |> List.iter (fun text ->
                 Assert.That(runAsync (api.sendCanvasMessage (message text)), Is.EqualTo CanvasMessageResult.Queued))
@@ -828,7 +832,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             registerExactSession 'A' otherActivity.ProcessIdentity (WorktreePath.value path) url (Some unrelated) None |> ignore
             runAsync (SessionBridge.flushPending (WorktreePath.value path))
             let original = runAsync (SessionBridge.pendingPrompts (WorktreePath.value path))
-            Assert.That(original |> List.map _.Prompt.Text, Is.EqualTo [ "first"; "second" ])
+            Assert.That(original |> List.map _.Prompt.Text, Is.EqualTo([ "first"; "second" ] |> List.map canvasPayload))
             let actualActivity = liveSession now path terminalId owner
             agent.Post(UpdateSessionInstance(actualActivity, now))
             let received = listener.GetContextAsync()
@@ -847,7 +851,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             Assert.That(
                 bodies,
                 Is.EqualTo([ "first"; "second" ] |> List.map (fun text ->
-                    SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" text
+                    SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" (canvasPayload text)
                     |> SessionBridge.serializePrompt)))
             Assert.That(runAsync (CanvasDocOwnership.getOwner (WorktreePath.value path) "diff.html"), Is.EqualTo(None: SessionId option)))
 
@@ -914,7 +918,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             register ()
             runAsync (SessionBridge.flushPending (WorktreePath.value path))
             let message text =
-                { WorktreePath = path; Filename = "diff.html"; Payload = text }
+                { WorktreePath = path; Filename = "diff.html"; Payload = canvasPayload text }
             let held = listener.GetContextAsync()
             let first = api.sendCanvasMessage (message "held") |> Async.StartAsTask
             let context = held.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
@@ -955,7 +959,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             Assert.That(
                 bodies,
                 Is.EqualTo([ 31..40 ] |> List.map (fun index ->
-                    SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" $"queued-{index}"
+                    SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" (canvasPayload $"queued-{index}")
                     |> SessionBridge.serializePrompt))))
 
     [<Test>]
@@ -976,7 +980,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
                           return Error PromptedLaunchError.TerminalStartFailed
                       })
             let api = createApi root path None operations
-            let request = { WorktreePath = path; Filename = "diff.html"; Payload = "queued" }
+            let request = { WorktreePath = path; Filename = "diff.html"; Payload = canvasPayload "queued" }
             let first = api.sendCanvasMessage request |> Async.StartAsTask
             entered.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
             let followers =
@@ -1031,7 +1035,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
                       })
             let beginLaunch worktree = CanvasBridge.beginPendingLaunchAt now worktree
             let api, agent = createApiWithStateUsing Async.Sleep beginLaunch root path None operations
-            let message index = { WorktreePath = path; Filename = "diff.html"; Payload = $"message-{index}" }
+            let message index = { WorktreePath = path; Filename = "diff.html"; Payload = canvasPayload $"message-{index}" }
             let first = api.sendCanvasMessage (message 0) |> Async.StartAsTask
             entered.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
             now <- startedAt.AddSeconds(float elapsedSeconds)
@@ -1126,7 +1130,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
                       })
             let beginLaunch worktree = CanvasBridge.beginPendingLaunchAt now worktree
             let api, agent = createApiWithStateUsing Async.Sleep beginLaunch root path None operations
-            let message text = { WorktreePath = path; Filename = "diff.html"; Payload = text }
+            let message text = { WorktreePath = path; Filename = "diff.html"; Payload = canvasPayload text }
             let first = api.sendCanvasMessage (message "first") |> Async.StartAsTask
             entered.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
             now <- launchAt.AddSeconds(float elapsedSeconds)
@@ -1154,7 +1158,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
                 else None
             Assert.That(runAsync (api.sendCanvasMessage (message "follower")), Is.EqualTo CanvasMessageResult.Queued)
             let joined = runAsync (SessionBridge.pendingPrompts (WorktreePath.value path))
-            Assert.That(joined |> List.map _.Prompt.Text, Is.EqualTo [ "first"; "follower" ])
+            Assert.That(joined |> List.map _.Prompt.Text, Is.EqualTo([ "first"; "follower" ] |> List.map canvasPayload))
             Assert.That(joined |> List.forall (fun queued ->
                 match queued.Target with
                 | SessionBridge.QueuedTarget.ExactTerminal(actual, _) -> change = "completed" && actual = terminal
@@ -1220,7 +1224,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
                     yield body ]
             runAsync (SessionBridge.flushPending (WorktreePath.value path))
             Assert.That(bodies, Is.EqualTo(payloads |> List.map (fun payload ->
-                SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" payload
+                SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" (canvasPayload payload)
                 |> SessionBridge.serializePrompt)))
             if replacement then Assert.That(oldRequest.IsCompleted, Is.False)
             if superseded then runAsync (CanvasBridge.cancelPendingLaunchAt (WorktreePath.value path) replacementStart.Value)
@@ -1250,7 +1254,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
                       })
             let beginLaunch worktree = CanvasBridge.beginPendingLaunchAt now worktree
             let api, _ = createApiWithStateUsing Async.Sleep beginLaunch root path None operations
-            let message payload = { WorktreePath = path; Filename = "diff.html"; Payload = payload }
+            let message payload = { WorktreePath = path; Filename = "diff.html"; Payload = canvasPayload payload }
             Assert.That(runAsync (api.sendCanvasMessage (message "first")), Is.EqualTo CanvasMessageResult.Queued)
             now <- startedAt.AddSeconds(float elapsedSeconds)
             Assert.That(runAsync (api.sendCanvasMessage (message "next")), Is.EqualTo CanvasMessageResult.Queued)
@@ -1262,7 +1266,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
                     | _ -> failwith "Both completed launches must retain their own exact terminal")
             Assert.Multiple(fun () ->
                 Assert.That(launches.Count, Is.EqualTo 2, "The 30-second spawn window is unchanged")
-                Assert.That(pending |> List.map _.Prompt.Text, Is.EqualTo [ "first"; "next" ])
+                Assert.That(pending |> List.map _.Prompt.Text, Is.EqualTo([ "first"; "next" ] |> List.map canvasPayload))
                 Assert.That(targets, Is.EqualTo [ EmbeddedTerminalId.value firstTerminal; EmbeddedTerminalId.value nextTerminal ])))
 
     [<Test>]
@@ -1292,7 +1296,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let now = DateTimeOffset.UtcNow
             let owner = $"selected-{Guid.NewGuid():N}"
             agent.Post(UpdateSessionInstance(liveSession now path (EmbeddedTerminalId(Guid.NewGuid().ToString "N")) owner, now))
-            let message payload = { WorktreePath = path; Filename = "diff.html"; Payload = payload }
+            let message payload = { WorktreePath = path; Filename = "diff.html"; Payload = canvasPayload payload }
             use cancellation = new System.Threading.CancellationTokenSource()
             let first = api.sendCanvasMessage (message "first") |> fun workflow ->
                 Async.StartAsTask(workflow, cancellationToken = cancellation.Token)
@@ -1312,7 +1316,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             Assert.Multiple(fun () ->
                 Assert.That(delays.ToArray(), Is.EqualTo [| 3000; 3000 |])
                 Assert.That(launches.Count, Is.EqualTo 2)
-                Assert.That(retained |> List.map _.Prompt.Text, Is.EqualTo [ "follower" ])
+                Assert.That(retained |> List.map _.Prompt.Text, Is.EqualTo [ canvasPayload "follower" ])
                 Assert.That(retained |> List.map _.EnqueuedAt, Is.EqualTo(original |> List.tail |> List.map _.EnqueuedAt))))
 
     [<Test>]
@@ -1344,13 +1348,23 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let originActivity = liveSession now path (EmbeddedTerminalId(Guid.NewGuid().ToString "N")) originator
             let followerActivity = liveSession (now.AddSeconds 1.0) path (EmbeddedTerminalId(Guid.NewGuid().ToString "N")) follower
             agent.Post(UpdateSessionInstance(originActivity, now))
-            let first = api.sendCanvasMessage { WorktreePath = path; Filename = "diff.html"; Payload = "origin" } |> Async.StartAsTask
+            let first =
+                api.sendCanvasMessage
+                    { WorktreePath = path
+                      Filename = "diff.html"
+                      Payload = canvasPayload "origin" }
+                |> Async.StartAsTask
             entered.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
             agent.Post(UpdateSessionInstance(followerActivity, now))
-            let joining = api.sendCanvasMessage { WorktreePath = path; Filename = "diff.html"; Payload = "follower" } |> Async.StartAsTask
+            let joining =
+                api.sendCanvasMessage
+                    { WorktreePath = path
+                      Filename = "diff.html"
+                      Payload = canvasPayload "follower" }
+                |> Async.StartAsTask
             Assert.That(joining.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult(), Is.EqualTo CanvasMessageResult.Queued)
             let queued = runAsync (SessionBridge.pendingPrompts (WorktreePath.value path))
-            match (queued |> List.find (fun item -> item.Prompt.Text = "follower")).Target with
+            match (queued |> List.find (fun item -> item.Prompt.Text = canvasPayload "follower")).Target with
             | SessionBridge.QueuedTarget.Session(SessionBridge.SendTarget.DurableSession expected) ->
                 Assert.That(expected, Is.EqualTo(SessionId follower))
             | _ -> Assert.Fail "The follower lost its independently selected recipient"
@@ -1380,7 +1394,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             followerRelease.TrySetResult() |> ignore
             Assert.That(first.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult(), Is.EqualTo CanvasMessageResult.Queued)
             Assert.That([ originBody; followerBody ], Is.EqualTo([ "origin"; "follower" ] |> List.map (fun payload ->
-                SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" payload
+                SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" (canvasPayload payload)
                 |> SessionBridge.serializePrompt)))
             Assert.That(delays.ToArray(), Is.EqualTo [| 3000; 3000 |]))
 
@@ -1398,4 +1412,35 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let result =
                 runAsync (api.sendCanvasMessage { WorktreePath = requestedPath; Filename = filename; Payload = "{}" })
             Assert.That(result, Is.EqualTo(CanvasMessageResult.Error expected))
+            Assert.That(runAsync (SessionBridge.pendingPrompts (WorktreePath.value path)), Is.Empty))
+
+    [<Test>]
+    member _.``Canvas API rejects invalid payloads before queueing or launching``() =
+        withTempDir "treemon-canvas-invalid-payload" (fun root ->
+            let path = PathUtils.toWorktreePath root
+            let operations =
+                promptedLaunchOnly (fun _ _ _ -> failwith "Invalid payload must not launch a terminal")
+            let api = createApi root path None operations
+            let oversized =
+                "{\"action\":\"comment\",\"text\":\""
+                + String('x', CanvasBridge.maxCanvasMessageChars)
+                + "\"}"
+
+            [ null, "Canvas payload must be valid JSON"
+              "{", "Canvas payload must be valid JSON"
+              "[]", "Canvas payload requires a nonblank string action"
+              "{}", "Canvas payload requires a nonblank string action"
+              """{"action":"   "}""", "Canvas payload requires a nonblank string action"
+              oversized, "Canvas payload exceeds 64,000 characters" ]
+            |> List.iter (fun (payload, expected) ->
+                let result =
+                    runAsync (
+                        api.sendCanvasMessage
+                            { WorktreePath = path
+                              Filename = "diff.html"
+                              Payload = payload }
+                    )
+
+                Assert.That(result, Is.EqualTo(CanvasMessageResult.Error expected)))
+
             Assert.That(runAsync (SessionBridge.pendingPrompts (WorktreePath.value path)), Is.Empty))

@@ -65,6 +65,7 @@ let private sendMessage request =
 // Payloads are ASCII in tests, so comparing char length to byte Content-Length is exact.
 type private HttpSink(port: int) =
     let bodies = ConcurrentQueue<string>()
+    let received = new SemaphoreSlim(0)
     let listener = new TcpListener(IPAddress.Loopback, port)
     let cts = new CancellationTokenSource()
 
@@ -126,6 +127,7 @@ type private HttpSink(port: int) =
                 do! readToContentLength ()
 
                 bodies.Enqueue(body.ToString())
+                received.Release() |> ignore
 
                 let resp = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 do! stream.WriteAsync(resp, 0, resp.Length) |> Async.AwaitTask
@@ -138,6 +140,11 @@ type private HttpSink(port: int) =
     member _.Url = $"http://127.0.0.1:{port}/inject"
     /// Snapshot of request bodies received so far, in arrival order.
     member _.Bodies = bodies |> List.ofSeq
+
+    member _.WaitForCount expected =
+        while bodies.Count < expected do
+            if not (received.Wait(TimeSpan.FromSeconds 5.0)) then
+                failwith $"Timed out waiting for {expected} HTTP request bodies; received {bodies.Count}"
 
     member _.Start() =
         // Start() binds the listening socket synchronously, so connections are queued by
@@ -165,6 +172,7 @@ type private HttpSink(port: int) =
             cts.Cancel()
             try listener.Stop() with _ -> ()
             cts.Dispose()
+            received.Dispose()
 
 
 // ── isAlive (via getStatus) ──────────────────────────────────────────
@@ -1013,10 +1021,71 @@ type SystemViewInteractionRoutingTests() =
                     registerSession path sink.Url (Some sid)
                 }
             let fallback, _ = runAsync (awaitSystemViewFallbackUsing wait path (Some(SessionId sid)))
+            sink.WaitForCount 1
+            let expectedBody = canvasWire path "diff.html" request.Payload
             Assert.Multiple(fun () ->
                 Assert.That(waits.ToArray(), Is.EqualTo [| 3000 |])
                 Assert.That(fallback, Is.False)
-                Assert.That(sink.Bodies, Is.EqualTo [ canvasWire path "diff.html" request.Payload ])))
+                Assert.That(sink.Bodies.Length, Is.EqualTo 1)
+                Assert.That(sink.Bodies |> List.tryHead, Is.EqualTo(Some expectedBody))))
+
+    [<Test>]
+    member _.``A later follower launch failure replaces a retained queued result``() =
+        withTempCwd (fun () ->
+            use sink = new HttpSink(getFreeTcpPorts 1 |> List.exactlyOne)
+            sink.Start()
+            let path = uniquePath "system-follower-failure"
+            let recovered = uniqueSid "recovered"
+            let unavailable = uniqueSid "unavailable"
+            let first =
+                { WorktreePath = WorktreePath path
+                  Filename = "diff.html"
+                  Payload = """{"action":"comment","text":"first"}""" }
+            let follower =
+                { first with Payload = """{"action":"comment","text":"follower"}""" }
+
+            runAsync (
+                Server.CanvasBridge.sendMessage
+                    CancellationToken.None
+                    [ storedAt (freshProcessIdentity ()) recovered path "2026-09-01T12:00:00Z" ]
+                    first
+            )
+            |> ignore
+
+            runAsync (
+                Server.CanvasBridge.sendMessage
+                    CancellationToken.None
+                    [ storedAt (freshProcessIdentity ()) unavailable path "2026-09-01T12:01:00Z" ]
+                    follower
+            )
+            |> ignore
+
+            let delays = ConcurrentQueue<int>()
+            let delay milliseconds =
+                async {
+                    delays.Enqueue milliseconds
+                    if delays.Count = 1 then
+                        registerSession path sink.Url (Some recovered)
+                }
+            let failure =
+                CanvasMessageResult.SessionStartFailed PromptedLaunchError.TerminalStartFailed
+            let result =
+                runAsync (
+                    coordinateSystemViewFallbackUsing
+                        delay
+                        path
+                        (Some(SessionId recovered))
+                        (fun () -> async.Return failure)
+                )
+            sink.WaitForCount 1
+
+            Assert.Multiple(fun () ->
+                Assert.That(result, Is.EqualTo failure)
+                Assert.That(delays.ToArray(), Is.EqualTo [| 3000; 3000 |])
+                Assert.That(sink.Bodies, Is.EqualTo [ canvasWire path "diff.html" first.Payload ])
+                Assert.That(
+                    runAsync (pendingPrompts path) |> List.map _.Prompt.Text,
+                    Is.EqualTo [ follower.Payload ])))
 
     [<Test>]
     member _.``Closed or stale activity does not create a bridge-gap recipient``() =

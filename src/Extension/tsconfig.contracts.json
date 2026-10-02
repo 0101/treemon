@@ -4,6 +4,7 @@
     "noImplicitAny": true
   },
   "include": [
+    "browser-canvas-routes.mjs",
     "injection-request.mjs",
     "request-body.mjs",
     "reporting/reporting-core.mjs",

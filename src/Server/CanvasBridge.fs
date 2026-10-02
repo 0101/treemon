@@ -1,6 +1,7 @@
 module Server.CanvasBridge
 
 open System
+open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open Shared
@@ -273,6 +274,32 @@ type internal CanvasSendOutcome =
     | Routed of CanvasMessageResult
     | QueuedNeedingSession of recipient: SessionId option * CanvasMessageResult
 
+[<Literal>]
+let internal maxCanvasMessageChars = 64_000
+
+let internal validateCanvasPayload (payload: string) =
+    if isNull payload then
+        Error "Canvas payload must be valid JSON"
+    elif payload.Length > maxCanvasMessageChars then
+        Error "Canvas payload exceeds 64,000 characters"
+    else
+        try
+            use document = JsonDocument.Parse payload
+            let root = document.RootElement
+
+            if root.ValueKind <> JsonValueKind.Object then
+                Error "Canvas payload requires a nonblank string action"
+            else
+                match root.TryGetProperty "action" with
+                | true, action
+                    when action.ValueKind = JsonValueKind.String
+                         && not (String.IsNullOrWhiteSpace(action.GetString())) ->
+                    Ok()
+                | _ ->
+                    Error "Canvas payload requires a nonblank string action"
+        with :? JsonException ->
+            Error "Canvas payload must be valid JSON"
+
 /// Route one canvas interaction.
 let internal sendMessage
     (queueCancellationToken: CancellationToken)
@@ -323,10 +350,17 @@ let internal coordinateSystemViewFallbackUsing delay worktreePath recipient oper
                         if needsLaunch then operation ()
                         else async.Return CanvasMessageResult.Queued
                     let result =
-                        match firstResult, outcome with
-                        | None, _
-                        | _, CanvasMessageResult.Error _ -> outcome
-                        | Some previous, _ -> previous
+                        let isFailure =
+                            function
+                            | CanvasMessageResult.Error _
+                            | CanvasMessageResult.SessionStartFailed _ -> true
+                            | _ -> false
+
+                        match firstResult with
+                        | None -> outcome
+                        | Some previous when isFailure previous -> previous
+                        | Some _ when isFailure outcome -> outcome
+                        | Some previous -> previous
                     let! next =
                         launchAgent.PostAndAsyncReply(fun reply -> EndFallbackCoordination(key, handled, finished, reply))
                     match next with

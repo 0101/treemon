@@ -59,7 +59,10 @@ morph behavior continue to depend only on `CanvasDoc.Kind`.
 
 ### Delivery and Session Startup
 
-A resolved live target receives the payload immediately. Otherwise the interaction is queued.
+Before target resolution, the server validates that the payload is a JSON object with a nonblank
+string `action` and no more than 64,000 UTF-16 code units. Invalid input returns an error without
+entering a delivery lane or starting a fallback session. A resolved live target receives a valid
+payload immediately. Otherwise the interaction is queued.
 
 An open SystemView recipient without an eligible bridge gets three seconds of registration grace,
 using the same bounded seam as AutoSync. Registration during that gap drains the queue without
@@ -135,10 +138,12 @@ validates that inventory identity, and carries it through `CanvasMessageRequest`
 `filename`, or `source` payload fields cannot select another document; a later tab selection cannot
 replace the captured source.
 
-After monitored-path and safe-filename validation, HTTP transport carries
+After monitored-path, safe-filename, and payload validation, HTTP transport carries
 `{kind:"canvas",prompt:<authored JSON>,source:{worktreePath,filename}}`. The Node parser produces
 `[canvas] {source,payload,authoringReminder?}` for `session.send`, with escaped JSON data separate
-from authored payload. The authoritative filename controls edit reminders. Footer formatting reads
+from authored payload. Browser fallback additionally binds each served document to an unguessable
+capability route, so same-origin authored script cannot claim a different filename as its source.
+The authoritative filename controls edit reminders. Footer formatting reads
 the nested payload while retaining the `[canvas]` glyph and historical flat-message formatting.
 
 ### Selection Metadata

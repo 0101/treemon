@@ -173,8 +173,9 @@ The passive reporting package joins the current Copilot session and sends the pa
 live shutdown. It forwards `subagent.started`, `subagent.completed`, and `subagent.failed` as
 explicit background lifecycle, then drops all other sub-agent content. It also drops skill-context
 injections, blank messages, invalid usage gauges, and invalid or overlong background tool-call IDs
-before sending. The canvas bridge's shared `request-body.mjs` reader caps `/inject` and `/_message`
-at 1 MiB and `/shutdown` at 4 KiB, and rejects request-stream errors.
+before sending. The canvas bridge's shared `request-body.mjs` reader caps `/inject` and
+capability-bound canvas message routes at 1 MiB and `/shutdown` at 4 KiB, and rejects
+request-stream errors.
 
 Treemon installs the package as a user extension at
 `$COPILOT_HOME/extensions/treemon-reporting` when `COPILOT_HOME` is set, otherwise at

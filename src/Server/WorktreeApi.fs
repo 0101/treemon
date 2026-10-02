@@ -1288,63 +1288,66 @@ let internal worktreeApiWithLaunchUsing
                           if not (CanvasFilename.isValid request.Filename) then
                               return CanvasMessageResult.Error "Invalid canvas filename"
                           else
-                              let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
-                              let! outcome =
-                                  CanvasBridge.sendMessage
-                                      queueCancellation.Token
-                                      (state.SessionInstances |> Map.values)
-                                      request
-                              match outcome with
-                              | CanvasBridge.Routed result -> return result
-                              | CanvasBridge.QueuedNeedingSession(recipient, result) ->
-                                  let completeLaunch launchAt terminalId =
-                                      async {
-                                          match TerminalSessionId.create (EmbeddedTerminalId.value terminalId) with
-                                          | Error _ ->
-                                              do! CanvasBridge.cancelPendingLaunchAt path launchAt
-                                              return CanvasMessageResult.Error "Interaction launch returned an invalid terminal identity"
-                                          | Ok exactTerminal ->
-                                              let resolveSession () =
-                                                  async {
-                                                      let! current = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
-                                                      return
-                                                          TerminalSessionActivity.tryFindCurrentSessionForTerminal
-                                                              DateTimeOffset.UtcNow
-                                                              request.WorktreePath
-                                                              exactTerminal
-                                                              (current.SessionInstances |> Map.values)
-                                                  }
-                                              do! CanvasBridge.completePendingLaunch path launchAt exactTerminal resolveSession
-                                              return result
-                                      }
-                                  return!
-                                      CanvasBridge.coordinateSystemViewFallbackUsing registrationDelay path recipient (fun () ->
+                              match CanvasBridge.validateCanvasPayload request.Payload with
+                              | Error error -> return CanvasMessageResult.Error error
+                              | Ok() ->
+                                  let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+                                  let! outcome =
+                                      CanvasBridge.sendMessage
+                                          queueCancellation.Token
+                                          (state.SessionInstances |> Map.values)
+                                          request
+                                  match outcome with
+                                  | CanvasBridge.Routed result -> return result
+                                  | CanvasBridge.QueuedNeedingSession(recipient, result) ->
+                                      let completeLaunch launchAt terminalId =
                                           async {
-                                              match! beginInteractionLaunch path with
-                                              | CanvasBridge.PendingLaunchJoined(launchAt, _) ->
-                                                  let! _ = CanvasBridge.reservePendingLaunch path launchAt
+                                              match TerminalSessionId.create (EmbeddedTerminalId.value terminalId) with
+                                              | Error _ ->
+                                                  do! CanvasBridge.cancelPendingLaunchAt path launchAt
+                                                  return CanvasMessageResult.Error "Interaction launch returned an invalid terminal identity"
+                                              | Ok exactTerminal ->
+                                                  let resolveSession () =
+                                                      async {
+                                                          let! current = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+                                                          return
+                                                              TerminalSessionActivity.tryFindCurrentSessionForTerminal
+                                                                  DateTimeOffset.UtcNow
+                                                                  request.WorktreePath
+                                                                  exactTerminal
+                                                                  (current.SessionInstances |> Map.values)
+                                                      }
+                                                  do! CanvasBridge.completePendingLaunch path launchAt exactTerminal resolveSession
                                                   return result
-                                              | CanvasBridge.PendingLaunchStarted launchAt ->
-                                                  let! reserved = CanvasBridge.reservePendingLaunch path launchAt
-                                                  if not reserved then return result
-                                                  else
-                                                      let provider = CodingToolStatus.readConfiguredProvider path
-                                                      let prompt = CanvasPrompt.continueWorking path request.Filename
-                                                      Log.log "API" $"sendCanvasMessage: launching an interaction terminal for {request.Filename}"
-                                                      match! terminalLaunch.StartPromptedAgent provider request.WorktreePath prompt |> Async.Catch with
-                                                      | Choice1Of2(Ok started) ->
-                                                          return! completeLaunch launchAt started.TerminalId
-                                                      | Choice1Of2(Error error) ->
-                                                          queueCancellation.Cancel()
-                                                          do! CanvasBridge.cancelPendingLaunchAt path launchAt
-                                                          Log.log "API" "Interaction terminal launch rejected"
-                                                          return CanvasMessageResult.SessionStartFailed error
-                                                      | Choice2Of2 ex ->
-                                                          queueCancellation.Cancel()
-                                                          do! CanvasBridge.cancelPendingLaunchAt path launchAt
-                                                          Log.logException "API" "Interaction terminal launch failed" ex
-                                                          return CanvasMessageResult.SessionStartFailed PromptedLaunchError.Unexpected
-                                          })
+                                          }
+                                      return!
+                                          CanvasBridge.coordinateSystemViewFallbackUsing registrationDelay path recipient (fun () ->
+                                              async {
+                                                  match! beginInteractionLaunch path with
+                                                  | CanvasBridge.PendingLaunchJoined(launchAt, _) ->
+                                                      let! _ = CanvasBridge.reservePendingLaunch path launchAt
+                                                      return result
+                                                  | CanvasBridge.PendingLaunchStarted launchAt ->
+                                                      let! reserved = CanvasBridge.reservePendingLaunch path launchAt
+                                                      if not reserved then return result
+                                                      else
+                                                          let provider = CodingToolStatus.readConfiguredProvider path
+                                                          let prompt = CanvasPrompt.continueWorking path request.Filename
+                                                          Log.log "API" $"sendCanvasMessage: launching an interaction terminal for {request.Filename}"
+                                                          match! terminalLaunch.StartPromptedAgent provider request.WorktreePath prompt |> Async.Catch with
+                                                          | Choice1Of2(Ok started) ->
+                                                              return! completeLaunch launchAt started.TerminalId
+                                                          | Choice1Of2(Error error) ->
+                                                              queueCancellation.Cancel()
+                                                              do! CanvasBridge.cancelPendingLaunchAt path launchAt
+                                                              Log.log "API" "Interaction terminal launch rejected"
+                                                              return CanvasMessageResult.SessionStartFailed error
+                                                          | Choice2Of2 ex ->
+                                                              queueCancellation.Cancel()
+                                                              do! CanvasBridge.cancelPendingLaunchAt path launchAt
+                                                              Log.logException "API" "Interaction terminal launch failed" ex
+                                                              return CanvasMessageResult.SessionStartFailed PromptedLaunchError.Unexpected
+                                              })
                       }
 
                       Async.StartAsTask(send, cancellationToken = CancellationToken.None)
