@@ -257,11 +257,11 @@ type ExactRegistrationTests() =
                 validRequest identity path (Some sid)
                 |> registerOrFail (exactIdentityResolver identity)
             register first |> ignore
-            runAsync (CanvasDocOwnership.assign path "report.html" first) |> Result.defaultWith (fun _ -> failwith "owner save failed")
+            runAsync (CanvasDocOwnership.assign path "report.html" (SessionId first)) |> Result.defaultWith (fun _ -> failwith "owner save failed")
             register second |> ignore
             Assert.Multiple(fun () ->
                 Assert.That(sessionsForWorktree path |> List.map (_.SessionId >> SessionId.value), Is.EquivalentTo [ first; second ])
-                Assert.That(runAsync (CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some first))
+                Assert.That(runAsync (CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some(SessionId first)))
                 Assert.That(getSessionForWorktree path, Is.EqualTo(Some(SessionId second)))))
 
     [<Test>]
@@ -550,7 +550,7 @@ type PromptTransportTests() =
                 let path, away = uniquePath "dispatch-current", uniquePath "dispatch-away"
                 let owner, nextOwner = $"owner-{Guid.NewGuid():N}", $"claimed-{Guid.NewGuid():N}"
                 let identity = nextIdentity ()
-                runAsync (CanvasDocOwnership.assign path "report.html" owner)
+                runAsync (CanvasDocOwnership.assign path "report.html" (SessionId owner))
                 |> Result.defaultWith (fun _ -> failwith "owner save failed")
                 let message text =
                     { WorktreePath = path
@@ -565,7 +565,7 @@ type PromptTransportTests() =
                 let nextRequest = nextListener.GetContextAsync()
                 match change with
                 | "owner" ->
-                    runAsync (CanvasDocOwnership.assign path "report.html" nextOwner)
+                    runAsync (CanvasDocOwnership.assign path "report.html" (SessionId nextOwner))
                     |> Result.defaultWith (fun _ -> failwith "claim save failed")
                     registerExactSession 'A' (nextIdentity ()) path nextUrl (Some nextOwner) None |> ignore
                 | "endpoint" ->
@@ -596,7 +596,7 @@ type PromptTransportTests() =
                 let path = uniquePath "failed-replacement"
                 let owner = $"owner-{Guid.NewGuid():N}"
                 let identity = nextIdentity ()
-                runAsync (CanvasDocOwnership.assign path "report.html" owner)
+                runAsync (CanvasDocOwnership.assign path "report.html" (SessionId owner))
                 |> Result.defaultWith (fun _ -> failwith "owner save failed")
                 let message text =
                     { WorktreePath = path
@@ -627,7 +627,7 @@ type PromptTransportTests() =
                 let path = uniquePath "failed-queue-age"
                 let owner = $"owner-{Guid.NewGuid():N}"
                 let identity = nextIdentity ()
-                runAsync (CanvasDocOwnership.assign path "report.html" owner)
+                runAsync (CanvasDocOwnership.assign path "report.html" (SessionId owner))
                 |> Result.defaultWith (fun _ -> failwith "owner save failed")
                 let message text =
                     { WorktreePath = path
@@ -665,7 +665,7 @@ type PromptTransportTests() =
                 let listener, url = List.exactlyOne bridges
                 let path = uniquePath "busy-delivery-cap"
                 let owner = $"owner-{Guid.NewGuid():N}"
-                runAsync (CanvasDocOwnership.assign path "report.html" owner)
+                runAsync (CanvasDocOwnership.assign path "report.html" (SessionId owner))
                 |> Result.defaultWith (fun _ -> failwith "owner save failed")
                 registerExactSession 'A' (nextIdentity ()) path url (Some owner) None |> ignore
                 let message text =
@@ -900,7 +900,7 @@ type PromptTransportTests() =
                 let path = uniquePath "unverified-operations"
                 let identity = nextIdentity ()
                 let owner = $"owner-{Guid.NewGuid():N}"
-                runAsync (CanvasDocOwnership.assign path "report.html" owner)
+                runAsync (CanvasDocOwnership.assign path "report.html" (SessionId owner))
                 |> Result.defaultWith (fun _ -> failwith "owner save failed")
                 let entry =
                     { validRequest identity path (Some owner) with InjectUrl = url; ParentProcessId = None }

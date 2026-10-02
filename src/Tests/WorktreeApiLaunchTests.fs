@@ -786,6 +786,12 @@ type WorktreeApiLaunchTests() =
                         Assert.That(calls.ToArray(), Is.EqualTo([| path; path |])))
                 finally
                     releaseLaunch.TrySetResult() |> ignore))
+
+[<TestFixture>]
+[<Category("Integration")>]
+[<NonParallelizable>]
+type WorktreeApiCanvasRoutingIntegrationTests() =
+
     [<Test>]
     [<Category("CanvasRoutingFollowers")>]
     member _.``SystemView fallback delivers in order only to the returned terminal's activity session``() =
@@ -843,7 +849,7 @@ type WorktreeApiLaunchTests() =
                 Is.EqualTo([ "first"; "second" ] |> List.map (fun text ->
                     SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" text
                     |> SessionBridge.serializePrompt)))
-            Assert.That(runAsync (CanvasDocOwnership.getOwner (WorktreePath.value path) "diff.html"), Is.EqualTo(None: string option)))
+            Assert.That(runAsync (CanvasDocOwnership.getOwner (WorktreePath.value path) "diff.html"), Is.EqualTo(None: SessionId option)))
 
     [<Test>]
     member _.``Failed SystemView launch releases its guard and the identical interaction can retry``() =

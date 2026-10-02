@@ -247,7 +247,7 @@ let internal resolveTarget
     async {
         match CanvasDocKinds.classify filename with
         | AgentDoc ->
-            return! CanvasDocOwnership.getOwnerSessionId worktreePath filename
+            return! CanvasDocOwnership.getOwner worktreePath filename
         | SystemView ->
             let now = DateTime.UtcNow
             let worktreeKey = normalizePath worktreePath

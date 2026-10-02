@@ -10,7 +10,7 @@ let private normalizePath = Server.PathUtils.normalizePath
 
 let private defaultFilePath = Path.Combine("data", "canvas-owners.json")
 
-type internal Targets = Map<string, Map<string, string>>
+type internal Targets = Map<string, Map<string, SessionId>>
 
 [<RequireQualifiedAccess>]
 type PersistenceFailure =
@@ -21,9 +21,9 @@ type private Assignment =
     | FillUnowned
 
 type private Msg =
-    | Assign of Assignment * worktreeKey: string * filename: string * sessionId: string * AsyncReplyChannel<Result<unit, PersistenceFailure>>
-    | GetOwner of worktreeKey: string * filename: string * AsyncReplyChannel<string option>
-    | GetAll of worktreeKey: string * AsyncReplyChannel<Map<string, string>>
+    | Assign of Assignment * worktreeKey: string * filename: string * sessionId: SessionId * AsyncReplyChannel<Result<unit, PersistenceFailure>>
+    | GetOwner of worktreeKey: string * filename: string * AsyncReplyChannel<SessionId option>
+    | GetAll of worktreeKey: string * AsyncReplyChannel<Map<string, SessionId>>
     | RemoveView of worktreeKey: string * filename: string * AsyncReplyChannel<Result<unit, PersistenceFailure>>
     | RemoveWorktree of worktreeKey: string * AsyncReplyChannel<Result<unit, PersistenceFailure>>
     | Prune of knownWorktrees: Set<string> * AsyncReplyChannel<Result<unit, PersistenceFailure>>
@@ -58,7 +58,7 @@ let private persist (filePath: string) (targets: Targets) =
         |> Map.iter (fun worktreeKey views ->
             writer.WritePropertyName(worktreeKey)
             writer.WriteStartObject()
-            views |> Map.iter (fun filename sessionId -> writer.WriteString(filename, sessionId))
+            views |> Map.iter (fun filename sessionId -> writer.WriteString(filename, SessionId.value sessionId))
             writer.WriteEndObject())
         writer.WriteEndObject())
 
@@ -69,22 +69,40 @@ let private readTargets filePath =
         else
             use doc = JsonDocument.Parse(File.ReadAllText filePath)
 
-            doc.RootElement.EnumerateObject()
-            |> Seq.fold (fun targets worktreeProp ->
-                let views =
-                    worktreeProp.Value.EnumerateObject()
-                    |> Seq.choose (fun viewProp ->
-                        viewProp.Value.GetString()
-                        |> Option.ofObj
-                        |> Option.map (fun sessionId -> viewProp.Name, sessionId))
-                    |> Map.ofSeq
+            let targets, invalidOwnerCount =
+                doc.RootElement.EnumerateObject()
+                |> Seq.fold (fun (targets, invalidOwnerCount) worktreeProp ->
+                    let views, invalidInWorktree =
+                        worktreeProp.Value.EnumerateObject()
+                        |> Seq.fold (fun (views, invalidCount) viewProp ->
+                            let parsed =
+                                if viewProp.Value.ValueKind = JsonValueKind.String then
+                                    viewProp.Value.GetString()
+                                    |> Option.ofObj
+                                    |> Option.bind (fun value ->
+                                        match SessionId.create value with
+                                        | Ok sessionId -> Some sessionId
+                                        | Error _ -> None)
+                                else
+                                    None
 
-                targets |> Map.add (normalizePath worktreeProp.Name) views
-            ) Map.empty
+                            match parsed with
+                            | Some sessionId -> views |> Map.add viewProp.Name sessionId, invalidCount
+                            | None -> views, invalidCount + 1
+                        ) (Map.empty, 0)
+
+                    targets |> Map.add (normalizePath worktreeProp.Name) views,
+                    invalidOwnerCount + invalidInWorktree
+                ) (Map.empty, 0)
+
+            if invalidOwnerCount > 0 then
+                Log.log "CanvasDocOwnership" $"Ignored {invalidOwnerCount} invalid persisted canvas owner(s)"
+
+            targets
             |> Ok
-    with ex ->
-        Log.log "CanvasDocOwnership" $"Failed to load {filePath}: {ex.Message}"
-        Error ex.Message
+    with error ->
+        Log.logException "CanvasDocOwnership" $"Failed to load {filePath}" error
+        Error error.Message
 
 type internal OwnershipStore internal (filePath: string, initialTargets: Targets) =
     let commit targets proposed (reply: AsyncReplyChannel<Result<unit, PersistenceFailure>>) =
@@ -184,11 +202,11 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
 
             loop initialTargets)
 
-    member _.Assign(worktreePath: string, filename: string, sessionId: string) =
+    member _.Assign(worktreePath: string, filename: string, sessionId: SessionId) =
         agent.PostAndAsyncReply(fun reply ->
             Assign(Claim, normalizePath worktreePath, filename, sessionId, reply))
 
-    member _.Attribute(worktreePath: string, filename: string, sessionId: string) =
+    member _.Attribute(worktreePath: string, filename: string, sessionId: SessionId) =
         agent.PostAndAsyncReply(fun reply ->
             Assign(FillUnowned, normalizePath worktreePath, filename, sessionId, reply))
 
@@ -240,19 +258,6 @@ let attribute worktreePath filename sessionId =
 
 let getOwner worktreePath filename =
     defaultStore.GetOwner(worktreePath, filename)
-
-let internal getOwnerSessionId worktreePath filename =
-    async {
-        let! owner = getOwner worktreePath filename
-        return
-            owner
-            |> Option.bind (fun value ->
-                match SessionId.create value with
-                | Ok sessionId -> Some sessionId
-                | Error _ ->
-                    Log.log "CanvasDocOwnership" "Ignored invalid persisted canvas owner"
-                    None)
-    }
 
 let getAll worktreePath =
     defaultStore.GetAll(worktreePath)

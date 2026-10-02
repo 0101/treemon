@@ -4,6 +4,7 @@ open System
 open System.IO
 open System.Security.Cryptography
 open Shared
+open Server.SessionActivity
 
 let private canvasDir path = Path.Combine(path, ".agents", "canvas")
 
@@ -34,7 +35,7 @@ let scan (worktreePath: string) =
                       LastModified = DateTimeOffset(File.GetLastWriteTimeUtc(filePath), TimeSpan.Zero)
                       OwnerSessionId =
                         match kind with
-                        | AgentDoc -> owners |> Map.tryFind filename
+                        | AgentDoc -> owners |> Map.tryFind filename |> Option.map SessionId.value
                         | SystemView -> None
                       Kind = kind })
                 |> Array.toList
@@ -42,7 +43,7 @@ let scan (worktreePath: string) =
             return []
     }
 
-let tryCreateWatcher (post: CanvasDoc list -> unit) (worktreePath: string) : FileSystemWatcher option =
+let tryCreateWatcher (post: CanvasDoc list -> Async<unit>) (worktreePath: string) : FileSystemWatcher option =
     let dir = canvasDir worktreePath
     let branch = Path.GetFileName(worktreePath)
     if Directory.Exists(dir) then
@@ -52,8 +53,9 @@ let tryCreateWatcher (post: CanvasDoc list -> unit) (worktreePath: string) : Fil
             async {
                 try
                     let! docs = scan worktreePath
-                    post docs
-                with _ -> ()
+                    do! post docs
+                with error ->
+                    Log.logException "CanvasWatcher" "Canvas watcher refresh failed" error
             }
             |> Async.Start
         watcher.Changed.Add(handleEvent "Changed")

@@ -40,7 +40,7 @@ let private canvasWire path filename payload =
     serializePrompt (Prompt.canvasFor (PathUtils.normalizePath path) filename payload)
 
 let private assignOwner path filename sessionId =
-    runAsync (CanvasDocOwnership.assign path filename sessionId)
+    runAsync (CanvasDocOwnership.assign path filename (SessionId sessionId))
     |> Result.defaultWith (fun _ -> failwith "ownership persistence failed")
 
 let private startedAt =
@@ -228,7 +228,7 @@ type RegisterAndStatusTests() =
         let result = Server.SessionBridge.registerSession (exactIdentityResolver identity) request
         Assert.That(result, Is.EqualTo(Error RegistrationFailure.InvalidSessionId: Result<SessionEntry, RegistrationFailure>))
         Assert.That((getStatus path).Registered, Is.False)
-        Assert.That(fallbackOwner DateTime.UtcNow (sessionsForWorktree path), Is.EqualTo(None: string option))
+        Assert.That(fallbackOwner DateTime.UtcNow (sessionsForWorktree path), Is.EqualTo(None: SessionId option))
 
     [<Test>]
     member _.``getStatus for unregistered path returns not registered``() =
@@ -407,7 +407,7 @@ type DrainQueueTests() =
             Assert.That(runAsync (pendingPrompts path) |> List.map _.Prompt.Text, Is.EqualTo [ "queued-msg" ])
             Assert.That(
                 runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(None: string option),
+                Is.EqualTo(None: SessionId option),
                 "Draining a SystemView interaction must not record an owner for it"))
 
     [<Test>]
@@ -911,7 +911,7 @@ type OwnerRoutingTests() =
                 Assert.That(BridgeLiveness.hasLiveSession otherPath owner moved, Is.True)
                 Assert.That(ownerSink.Bodies, Is.Empty)
                 Assert.That(otherSink.Bodies, Is.Empty)
-                Assert.That(runAsync (CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some owner)))
+                Assert.That(runAsync (CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some(SessionId owner))))
             registerSession path ownerSink.Url (Some owner)
             runAsync (flushPending path)
             Assert.That(ownerSink.Bodies, Is.EqualTo [ canvasWire path "report.html" request.Payload ])
@@ -944,7 +944,7 @@ type OwnerRoutingTests() =
             runAsync (flushPending path)
             Assert.Multiple(fun () ->
                 Assert.That(failed, Is.EqualTo(CanvasDocServer.PersistenceFailed CanvasDocOwnership.PersistenceFailure.SaveFailed))
-                Assert.That(runAsync (CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some oldOwner))
+                Assert.That(runAsync (CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some(SessionId oldOwner)))
                 Assert.That(File.ReadAllText ownersFile, Is.EqualTo previousDisk)
                 Assert.That(runAsync (pendingPrompts path) |> List.exactlyOne |> _.EnqueuedAt, Is.EqualTo queuedAt)
                 Assert.That(sink.Bodies, Is.Empty))
@@ -1323,17 +1323,17 @@ type ScannerFallbackAttributionTests() =
         Assert.That(fallbackOwner now [], Is.EqualTo None, "Zero sessions -> no fallback owner")
         Assert.That(
             fallbackOwner now [ entry now "solo" ],
-            Is.EqualTo(Some "solo"),
+            Is.EqualTo(Some(SessionId "solo")),
             "Exactly one session -> it is the owner")
         Assert.That(
             fallbackOwner now [ entry now "same"; entry now "same" ],
-            Is.EqualTo(Some "same"),
+            Is.EqualTo(Some(SessionId "same")),
             "Duplicate physical registrations for one durable session remain one canvas owner")
         Assert.That(fallbackOwner now [ entry now "a"; entry now "b" ], Is.EqualTo None,
             "Two sessions are ambiguous -> leave unowned (the misattribution guard)")
         Assert.That(
             fallbackOwner now [ entry (now.AddMilliseconds -59_999.0) "inside" ],
-            Is.EqualTo(Some "inside"),
+            Is.EqualTo(Some(SessionId "inside")),
             "A registration just inside the 60-second liveness window remains eligible")
         Assert.That(
             fallbackOwner now [ entry (now.AddSeconds -60.0) "boundary" ],
@@ -1363,7 +1363,7 @@ type ScannerFallbackAttributionTests() =
 
             runAsync (attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc None "report.html" ]) |> ignore
 
-            Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some sid),
+            Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some(SessionId sid)),
                 "A single registered session is the unambiguous fallback owner"))
 
     [<Test>]
@@ -1376,7 +1376,7 @@ type ScannerFallbackAttributionTests() =
 
             Assert.That(
                 runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(None: string option),
+                Is.EqualTo(None: SessionId option),
                 "A file scan is not an explicit interaction claim"))
 
     [<Test>]
@@ -1403,7 +1403,7 @@ type ScannerFallbackAttributionTests() =
                 "SystemView interaction ownership must never leak through CanvasDoc.OwnerSessionId")
             Assert.That(
                 runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some systemTarget),
+                Is.EqualTo(Some(SessionId systemTarget)),
                 "The SystemView routing target must remain available internally")
             Assert.That(report.Kind, Is.EqualTo(AgentDoc))
             Assert.That(
@@ -1452,7 +1452,7 @@ type ScannerFallbackAttributionTests() =
             // scanner must skip it even though the doc looks new and a single session is registered.
             runAsync (attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc (Some declared) "owned.html" ]) |> ignore
 
-            Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "owned.html"), Is.EqualTo(Some declared),
+            Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "owned.html"), Is.EqualTo(Some(SessionId declared)),
                 "An explicit declaration is primary: the scanner must not overwrite it with the registered session"))
 
     [<Test>]
@@ -1465,7 +1465,7 @@ type ScannerFallbackAttributionTests() =
             let result =
                 runAsync (attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc None "report.html" ])
             Assert.That(result, Is.EqualTo(Ok(): Result<unit, CanvasDocOwnership.PersistenceFailure>))
-            Assert.That(runAsync (CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some declared)))
+            Assert.That(runAsync (CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some(SessionId declared))))
 
     [<Test>]
     member _.``An unchanged doc is not attributed even with a single session``() =

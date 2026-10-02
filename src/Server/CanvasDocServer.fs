@@ -82,6 +82,18 @@ let private isKnownWorktree agent path =
         return target |> Option.isSome
     }
 
+let private bindJson<'request> (ctx: HttpContext) =
+    task {
+        try
+            let! body = ctx.BindJsonAsync<'request>()
+            return Ok body
+        with
+        | :? System.Text.Json.JsonException as error ->
+            return Error(error :> exn)
+        | :? Newtonsoft.Json.JsonException as error ->
+            return Error(error :> exn)
+    }
+
 /// injectUrl is stored and later used as an HTTP POST target by SessionBridge (send /
 /// drainQueue), so a non-local value would let a registrant make the server POST to arbitrary
 /// hosts (SSRF). Accept only well-formed absolute http(s) URLs whose host is a loopback IP
@@ -108,39 +120,43 @@ let canvasRegisterHandler
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     : HttpHandler =
     fun next ctx -> task {
-        try
-            let! body = ctx.BindJsonAsync<CanvasRegisterRequest>()
-            let request: SessionBridge.RegistrationRequest =
-                { WorktreePath = body.worktreePath
-                  InjectUrl = body.injectUrl
-                  ShutdownUrl = body.shutdownUrl
-                  ShutdownCapability = body.shutdownCapability
-                  SessionId = Option.ofObj body.sessionId
-                  ParentProcessId = Option.ofNullable body.parentProcessId
-                  TerminalSessionId = Option.ofObj body.terminalSessionId }
-
-            match SessionBridge.validateRegistrationRequest request with
-            | Error failure ->
-                let reason = registrationFailureText failure
-                Log.log "Canvas" $"Registration rejected: {reason}"
-                return! RequestErrors.BAD_REQUEST reason next ctx
-            | Ok(worktreePath, _, _) ->
-                let! isKnown = isKnownWorktree agent worktreePath |> Async.StartAsTask
-
-                if not isKnown then
-                    Log.log "Canvas" "Registration skipped: unmonitored worktree; browser fallback is available"
-                    return! Successful.ok (json {| registered = false; monitored = false |}) next ctx
-                else
-                    match SessionBridge.registerSession processIdentityResolver request with
-                    | Ok _ ->
-                        return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
-                    | Error failure ->
-                        let reason = registrationFailureText failure
-                        Log.log "Canvas" $"Registration rejected: {reason}"
-                        return! RequestErrors.BAD_REQUEST reason next ctx
-        with ex ->
-            Log.log "Canvas" $"Registration failed: exceptionType={ex.GetType().Name}"
+        match! bindJson<CanvasRegisterRequest> ctx with
+        | Error error ->
+            Log.logException "Canvas" "Registration failed: malformed request" error
             return! RequestErrors.BAD_REQUEST "Malformed registration request" next ctx
+        | Ok body ->
+            try
+                let request: SessionBridge.RegistrationRequest =
+                    { WorktreePath = body.worktreePath
+                      InjectUrl = body.injectUrl
+                      ShutdownUrl = body.shutdownUrl
+                      ShutdownCapability = body.shutdownCapability
+                      SessionId = Option.ofObj body.sessionId
+                      ParentProcessId = Option.ofNullable body.parentProcessId
+                      TerminalSessionId = Option.ofObj body.terminalSessionId }
+
+                match SessionBridge.validateRegistrationRequest request with
+                | Error failure ->
+                    let reason = registrationFailureText failure
+                    Log.log "Canvas" $"Registration rejected: {reason}"
+                    return! RequestErrors.BAD_REQUEST reason next ctx
+                | Ok(worktreePath, _, _) ->
+                    let! isKnown = isKnownWorktree agent worktreePath |> Async.StartAsTask
+
+                    if not isKnown then
+                        Log.log "Canvas" "Registration skipped: unmonitored worktree; browser fallback is available"
+                        return! Successful.ok (json {| registered = false; monitored = false |}) next ctx
+                    else
+                        match SessionBridge.registerSession processIdentityResolver request with
+                        | Ok _ ->
+                            return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
+                        | Error failure ->
+                            let reason = registrationFailureText failure
+                            Log.log "Canvas" $"Registration rejected: {reason}"
+                            return! RequestErrors.BAD_REQUEST reason next ctx
+            with error ->
+                Log.logException "Canvas" "Registration failed" error
+                return! ServerErrors.INTERNAL_ERROR "Canvas registration failed" next ctx
     }
 
 /// Validate a declared author and, only for a known (monitored) worktree, record it. Ownership is an
@@ -171,7 +187,7 @@ let attributeOwnership
                 if not isKnown then
                     return UnknownWorktree
                 else
-                    match! CanvasDocOwnership.assign worktreePath filename (SessionId.value owner) with
+                    match! CanvasDocOwnership.assign worktreePath filename owner with
                     | Ok() ->
                         SessionBridge.retryPending worktreePath
                         return Attributed
@@ -183,28 +199,32 @@ let attributeOwnership
 /// Repeating an AgentDoc call explicitly reassigns the target.
 let canvasAttributeHandler (agent: MailboxProcessor<SchedulerState.StateMsg>) : HttpHandler =
     fun next ctx -> task {
-        try
-            let! body = ctx.BindJsonAsync<CanvasAttributeRequest>()
-            let! outcome = attributeOwnership agent body.worktreePath body.filename body.sessionId |> Async.StartAsTask
-
-            match outcome with
-            | Invalid reason ->
-                Log.log "Canvas" $"Attribution failed: {reason}"
-                return! RequestErrors.BAD_REQUEST reason next ctx
-            | UnknownWorktree ->
-                Log.log "Canvas" "Attribution skipped: unmonitored worktree"
-                return! Successful.ok (json {| attributed = false; monitored = false |}) next ctx
-            | NotAttributable ->
-                Log.log "Canvas" "Attribution skipped: generated SystemView"
-                return! Successful.ok (json {| attributed = false; monitored = true |}) next ctx
-            | Attributed ->
-                Log.log "Canvas" "Attribution recorded durably"
-                return! Successful.ok (json {| attributed = true; monitored = true |}) next ctx
-            | PersistenceFailed _ ->
-                return! ServerErrors.INTERNAL_ERROR "Could not persist canvas ownership; previous ownership is unchanged" next ctx
-        with ex ->
-            Log.log "Canvas" $"Attribution failed: exceptionType={ex.GetType().Name}"
+        match! bindJson<CanvasAttributeRequest> ctx with
+        | Error error ->
+            Log.logException "Canvas" "Attribution failed: malformed request" error
             return! RequestErrors.BAD_REQUEST "Malformed attribution request" next ctx
+        | Ok body ->
+            try
+                let! outcome = attributeOwnership agent body.worktreePath body.filename body.sessionId |> Async.StartAsTask
+
+                match outcome with
+                | Invalid reason ->
+                    Log.log "Canvas" $"Attribution failed: {reason}"
+                    return! RequestErrors.BAD_REQUEST reason next ctx
+                | UnknownWorktree ->
+                    Log.log "Canvas" "Attribution skipped: unmonitored worktree"
+                    return! Successful.ok (json {| attributed = false; monitored = false |}) next ctx
+                | NotAttributable ->
+                    Log.log "Canvas" "Attribution skipped: generated SystemView"
+                    return! Successful.ok (json {| attributed = false; monitored = true |}) next ctx
+                | Attributed ->
+                    Log.log "Canvas" "Attribution recorded durably"
+                    return! Successful.ok (json {| attributed = true; monitored = true |}) next ctx
+                | PersistenceFailed _ ->
+                    return! ServerErrors.INTERNAL_ERROR "Could not persist canvas ownership; previous ownership is unchanged" next ctx
+            with error ->
+                Log.logException "Canvas" "Attribution failed" error
+                return! ServerErrors.INTERNAL_ERROR "Canvas attribution failed" next ctx
     }
 
 let bridgeStatusHandler : HttpHandler =

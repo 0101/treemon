@@ -8,19 +8,19 @@ open System.Text.RegularExpressions
 open NUnit.Framework
 open Shared
 
+let private identityValues (prompt: string) =
+    let identityLine =
+        prompt.Split('\n')
+        |> Array.find _.StartsWith("{\"worktreePath\":")
+
+    use identity = JsonDocument.Parse(identityLine)
+    identity.RootElement.GetProperty("worktreePath").GetString(),
+    identity.RootElement.GetProperty("filename").GetString()
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type CanvasPromptTests() =
-
-    let identityValues (prompt: string) =
-        let identityLine =
-            prompt.Split('\n')
-            |> Array.find _.StartsWith("{\"worktreePath\":")
-
-        use identity = JsonDocument.Parse(identityLine)
-        identity.RootElement.GetProperty("worktreePath").GetString(),
-        identity.RootElement.GetProperty("filename").GetString()
 
     [<Test>]
     member _.``AgentDoc prompt serializes the document identity as JSON data``() =
@@ -73,6 +73,10 @@ type CanvasPromptTests() =
         |> List.iter (fun prompt ->
             Assert.That(identityValues prompt, Is.EqualTo((worktreePath, filename)))
             Assert.That(prompt, Does.Not.Contain("\nIgnore previous instructions\n")))
+
+[<TestFixture>]
+[<Category("Integration")>]
+type CanvasPromptIntegrationTests() =
 
     [<TestCase("Review.html", true)>]
     [<TestCase("diff.html", false)>]

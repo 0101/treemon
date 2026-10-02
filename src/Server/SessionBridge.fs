@@ -557,7 +557,7 @@ let private resolveRegistration worktreeKey (queued: QueuedPrompt) =
             match queued.Prompt with
             | Prompt.Canvas request when CanvasDocKinds.classify request.Filename = AgentDoc ->
                 async {
-                    let! owner = CanvasDocOwnership.getOwnerSessionId worktreeKey request.Filename
+                    let! owner = CanvasDocOwnership.getOwner worktreeKey request.Filename
                     return SendTarget.ofSessionId owner
                 }
             | Prompt.Canvas _

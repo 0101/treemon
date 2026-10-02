@@ -675,12 +675,12 @@ module CanvasWatchers =
     let fallbackOwner
         (now: DateTime)
         (sessions: SessionBridge.SessionEntry list)
-        : string option =
+        : SessionId option =
         match
             sessions
             |> SessionBridge.collapseLiveRegistrations now
         with
-        | [ single ] -> Some(SessionId.value single.SessionId)
+        | [ single ] -> Some single.SessionId
         | _ -> None
 
     /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. An AgentDoc is
@@ -780,10 +780,8 @@ module CanvasWatchers =
                             // attribution is idempotent (worst case over-attribution, never loss) and a stale
                             // baseline self-heals on the next watcher event / periodic RefreshGit.
                             let prev = previousDocs.Value
-                            // Fallback-only attribution: explicit /api/canvas/attribute declarations are the
-                            // primary path. The scanner only attributes a no-owner changed doc when exactly one
-                            // session is registered for the worktree — never the old last-registered guess that
-                            // misattributed every changed doc whenever two sessions shared a worktree.
+                            // Explicit declarations are authoritative. Scanner fallback only fills an unowned
+                            // changed doc when exactly one session is registered for the worktree.
                             async {
                                 match! attributeChangedDocs (SessionBridge.sessionsForWorktree path) path prev canvasDocs with
                                 | Ok() -> previousDocs.Value <- canvasDocs
@@ -791,7 +789,6 @@ module CanvasWatchers =
                                     Log.log "CanvasWatcher" "Ownership attribution failed; unchanged documents remain eligible for retry"
                                 agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
                             }
-                            |> Async.Start
                         return
                             CanvasScanner.tryCreateWatcher post path
                             |> Option.map (fun watcher ->
