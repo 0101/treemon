@@ -297,6 +297,17 @@ native Windows Terminal tab. See `docs/spec/native-session-management.md` and
 jobs install from that file before restore and build, so changing the compiler or SDK feature band
 requires an explicit repository policy change.
 
+### Server Runtime Selection
+
+The framework-dependent server targets .NET 10 and uses `LatestPatch` runtime roll-forward,
+selecting the highest installed .NET 10.0 servicing patch rather than a newer major runtime.
+Installing .NET 11 or enabling preview-runtime discovery alone does not change that selection;
+without a compatible .NET 10.0 runtime, normal startup fails instead of silently changing majors.
+The SDK pin controls compilation, not the runtime loaded by the published executable. Explicit
+host-command or `DOTNET_ROLL_FORWARD` overrides remain operator choices, not launcher defaults.
+Qualification for a deliberate .NET 11 move is retained in
+`docs/spec/future/dotnet-11-process-capture.md`.
+
 ### Refresh Intervals
 
 Intervals adapt to user activity level (Active / Idle / Deep Idle). See `docs/spec/user-idle-detection.md` for the full interval table and activity state definitions. The Idle column matches the original fixed values shown here historically.

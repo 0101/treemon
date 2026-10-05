@@ -1,6 +1,8 @@
 module Tests.ServerStartupResolutionTests
 
+open System
 open System.IO
+open System.Text.Json
 open System.Text.Json.Nodes
 open NUnit.Framework
 
@@ -41,6 +43,37 @@ let private terminalOrigins (config: ServerConfig) =
 // guards against a future assembly-parallel switch racing the env var across fixtures.
 [<NonParallelizable>]
 type ServerStartupResolutionTests() =
+
+    [<Test>]
+    member _.``built server stays on the declared NET 10 runtime family``() =
+        let runtimeConfigPath =
+            Path.Combine(AppContext.BaseDirectory, "Treemon.runtimeconfig.json")
+
+        use document = JsonDocument.Parse(File.ReadAllText(runtimeConfigPath))
+        let options = document.RootElement.GetProperty("runtimeOptions")
+        let frameworks =
+            options.GetProperty("frameworks").EnumerateArray()
+            |> Seq.map (fun framework ->
+                framework.GetProperty("name").GetString() |> Option.ofObj,
+                framework.GetProperty("version").GetString() |> Option.ofObj)
+            |> Seq.toList
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                options.GetProperty("tfm").GetString(),
+                Is.EqualTo("net10.0")
+            )
+            Assert.That(
+                options.GetProperty("rollForward").GetString(),
+                Is.EqualTo("LatestPatch")
+            )
+            Assert.That(
+                frameworks,
+                Is.EquivalentTo(
+                    [ Some "Microsoft.NETCore.App", Some "10.0.0"
+                      Some "Microsoft.AspNetCore.App", Some "10.0.0" ]
+                )
+            ))
 
     // ----- parseArgs: zero positional roots is valid in normal mode -----
 

@@ -555,7 +555,8 @@ let private managerConfig
       ShellCommand = "pwsh"
       AllowedOrigins = [ "http://localhost:5174" ]
       StartupTimeout = TimeSpan.FromSeconds 2.0
-      ControlRequestTimeout = TimeSpan.FromMilliseconds 500.0
+      // Normal lifecycle checks must not benchmark cold HTTP/JSON initialization speed.
+      ControlRequestTimeout = TimeSpan.FromSeconds 5.0
       ProbeInterval = TimeSpan.FromMilliseconds 20.0
       ProcessExitTimeout = TimeSpan.FromSeconds 30.0
       LaunchHost = launchHost
