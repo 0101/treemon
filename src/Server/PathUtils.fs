@@ -14,6 +14,14 @@ let normalizePath (path: string) =
     else
         p
 
+let tryNormalizePath path =
+    try
+        Some(normalizePath path)
+    with
+    | :? System.ArgumentException
+    | :? System.NotSupportedException
+    | :? PathTooLongException -> None
+
 /// Validates that a bare filename follows the shared canvas contract and resolves inside the
 /// .agents/canvas/ directory for the given worktree.
 /// Returns Ok(resolvedPath) or Error(reason).

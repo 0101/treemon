@@ -10,7 +10,10 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 2. **Browser fallback mode**: When Treemon is unreachable **or** reports that the current directory is not monitored, the extension:
    - Serves contract-valid `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
    - Does not post canvas-write notifications to the session, avoiding repeated or competing agent prompts while fallback mode is active.
-   - Receives `postMessage`-originated interactions at `POST /_message` and forwards them to the agent session via `session.send()`.
+   - Gives each served document an unguessable capability URL and receives interactions at that
+     document's capability-bound message endpoint before forwarding them via `session.send()`.
+     Source coordinates come from the startup worktree and the filename bound to that capability,
+     not authored fields.
 3. **Same HTML, same API**: `canvasSend` is the primary authoring API and raw
    `window.parent.postMessage(...)` is its transport substrate. In a top-level fallback window, the
    transport shim intercepts self-posted messages and forwards them via HTTP. Zero agent-side
@@ -23,12 +26,13 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 
 At startup the extension POSTs `worktreePath`, `injectUrl`, `sessionId`, its parent Copilot PID,
 optional inherited terminal ID, and its opaque loopback shutdown endpoint/capability to
-`/api/canvas/register`. Treemon validates exact process identity before recording a monitored
-registration. Its response reports whether the worktree is actually monitored:
+`/api/canvas/register`. Treemon requires a validated durable session ID and canonical monitored
+worktree. Parent PID/start and terminal origin are optional location hints; unverifiable process
+hints do not reject canvas routing. Its response reports whether the worktree is monitored:
 `{ registered: bool, monitored: bool }`. An accepted monitored registration returns HTTP 200 with
 `{ registered: true, monitored: true }`; an otherwise acceptable request for an unmonitored
 worktree returns HTTP 200 with `{ registered: false, monitored: false }`. Malformed requests,
-invalid loopback or shutdown metadata, and exact-identity rejection for a monitored worktree return
+invalid IDs, worktree paths, loopback endpoints, or shutdown capabilities return
 HTTP 400. The extension enters **browser fallback mode** when registration is unreachable, returns
 any non-2xx response, or reports `monitored === false`. For backward compatibility with older
 Treemon servers that return a non-JSON body, a successful (200) response with no `monitored` field
@@ -47,23 +51,31 @@ pane will display the docs.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /canvas/:filename` | Read `.agents/canvas/<filename>` from disk, inject transport shim + content-poll script before `</head>`, serve as HTML |
-| `GET /canvas/:filename/hash` | Return MD5/SHA256 hex of file content (for change detection) |
-| `POST /_message` | Parse a JSON object with a nonblank string `action`, reject canonical payloads above 64,000 UTF-16 code units, and enqueue the resulting canvas prompt through the same serialized send path as `/inject` |
+| `GET /canvas/:capability/:filename` | Verify the document capability, read `.agents/canvas/<filename>` from disk, inject transport shim + content-poll script before `</head>`, serve as HTML |
+| `GET /canvas/:capability/:filename/hash` | Verify the same capability and return SHA256 hex of file content |
+| `POST /canvas/:capability/:filename/message` | Verify the same capability, validate the payload, derive authoritative source from the capability-bound filename and startup worktree, and use the same serialized canvas send path as `/inject` |
 
-Both `POST` sinks (`/_message` and the always-on `/inject`) are hardened against cross-origin browser
+Each filename receives one random 256-bit capability for the extension process lifetime. The
+capability is stable across writes so an open document keeps polling and sending, but it is bound
+to exactly one filename. A script in one same-origin canvas therefore cannot substitute another
+filename or fetch another canvas without knowing that document's capability. Missing, malformed,
+or mismatched capabilities return no route.
+
+Both `POST` sinks (the capability-bound message endpoint and the always-on `/inject`) are hardened against cross-origin browser
 abuse: they require `Content-Type: application/json` (so a cross-origin call becomes a preflighted
 request the server never answers — the browser blocks it, closing the `text/plain` simple-request
 CSRF vector) and reject any request carrying a non-loopback `Origin`. The legitimate callers already
 comply — Treemon's server-side POST to `/inject` sends `application/json` and no `Origin`, and the
-same-origin transport shim posts `/_message` as `application/json`. Both use the shared capped
+same-origin transport shim posts the filename-scoped endpoint as `application/json`. Both use the shared capped
 request-body reader with a 1 MiB default and reject request-stream errors.
 
 ### Injected Scripts
 
 Browser-mode AgentDocs receive four scripts injected before `</head>`:
 
-- **Transport shim** — in a top-level window (no parent frame) `window.parent.postMessage()` posts to the window itself; the shim listens for those self-posted `{ action, ... }` messages and forwards them via `fetch POST` to `/_message`, so canvas docs need no browser-specific code.
+- **Transport shim** — in a top-level window it forwards self-posted flat messages to the served
+  document's capability-bound message endpoint. The receiving server supplies source independently of payload;
+  authors need no browser-specific code.
 - **`canvasSend`** — the same canonical `src/Extension/canvas-send.js` runtime embedded by the
   Treemon server, so authored interactions use one action check, serialization guard, payload
   merge, size cap, and return contract in both hosts.
@@ -84,6 +96,14 @@ Create/edit arguments contribute one destination; `apply_patch` contributes canv
 from Add/Update/Move headers. In browser mode the extension serves written docs without injecting a
 session notification. In Treemon mode it declares ownership instead.
 
+Observation and bare-filename claims are confined to the startup worktree's `.agents/canvas`
+folder. Successful durable declarations wake queues; save failure reports non-success and retains
+the previous owner. No cross-worktree attribution or owner-schema migration occurs.
+
+`/inject` receives `{kind:"canvas",prompt,source:{worktreePath,filename}}`; browser fallback derives
+that same identity locally. Both yield `[canvas] {source,payload,authoringReminder?}` as escaped
+JSON data. Reminder classification uses the authoritative filename, not authored `doc` or `source`.
+
 ### Path Security
 
 `GET /canvas/:filename` accepts only a bare name matching the shared
@@ -103,7 +123,8 @@ accepts only the bare filename rather than stripping a path down to its final se
 
 ## Key Files
 
-- `src/Extension/extension.mjs` — mode detection, exact registration, HTTP serving, ownership integration, runtime injection, message endpoint
+- `src/Extension/extension.mjs` — mode detection, session registration, HTTP serving, local ownership, runtime injection, and filename-scoped messages
+- `src/Extension/browser-canvas-routes.mjs` — per-document capabilities and authorized document/hash/message routes
 - `src/Extension/request-body.mjs` — shared capped request-body reader for injection, message, and shutdown endpoints
 - `src/Extension/shutdown-endpoint.mjs` — capability-guarded loopback routine-shutdown endpoint
 - `src/Extension/canvas-send.js` — canonical `window.canvasSend` runtime shared with the server

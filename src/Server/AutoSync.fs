@@ -27,8 +27,8 @@ module SyncTarget =
 
     let sendTarget =
         function
-        | IdleSession(processIdentity, _) ->
-            SessionBridge.SendTarget.ExactProcess processIdentity
+        | IdleSession(processIdentity, sessionId) ->
+            SessionBridge.SendTarget.ExactProcess(sessionId, processIdentity)
         | NoOpenSession retainedSessionId ->
             SessionBridge.SendTarget.ofSessionId retainedSessionId
 

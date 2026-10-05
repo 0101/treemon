@@ -137,7 +137,8 @@ Machine-level configuration persists in `~/.treemon/config.json` (or `$TREEMON_C
   busy, and so does one that went idle less than `settleWindow` (30 s) ago: status dips to idle for
   milliseconds between back-to-back turns, so an instantaneous reading would let a fetch and merge
   start under an agent about to resume. Otherwise the open session with the greatest activity
-  `UpdatedAt` is the settled-idle target, carrying its exact process identity into `SessionBridge`;
+  `UpdatedAt` is the settled-idle target, carrying its expected durable session ID and exact process
+  identity into `SessionBridge`. Current bridge metadata must match and its location must be verified;
   another physical process with the same durable `SessionId` cannot receive that fallback prompt.
   Retained identity is used only for agent fallback when no session is open (see
   `docs/spec/session-status-push.md`).
@@ -375,8 +376,8 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/AutoSync.fs` | Busy-worktree deferral, mechanical-sync orchestration for every free worktree, agent delivery of structured fallback reasons, and base-revision eligibility |
 | `src/Server/AutoSyncStore.fs` | Port-scoped accepted-base-revision persistence used for restart-safe prompt deduplication |
 | `src/Server/CardEventLog.fs` | Transient post-fork lifecycle events surfaced on worktree cards through `getSyncStatus` |
-| `src/Server/SessionBridge.fs` | Exact process registration, durable-session/worktree lookup, liveness, queued prompt delivery, exact shutdown, and forwarding |
-| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, `session-prompt.mjs`, `send-queue.mjs` | Exact bridge registration, guarded prompt/routine-shutdown HTTP receivers, serialized `session.send` queue, and typed prompt-transport decoding |
+| `src/Server/SessionBridge.fs` | Session-keyed latest bridges, worktree-scoped reachability and delivery lanes, bounded queues, and verified exact operations |
+| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, `session-prompt.mjs`, `send-queue.mjs` | Session-addressed registration, guarded prompt/shutdown receivers, authoritative source-coordinate transport, and serialized sends |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching and open-first per-branch selection |
 | `src/Server/MergedPrStore.fs` | Durable merged-PR fallback reconciliation, identity checks, and runtime-state persistence |

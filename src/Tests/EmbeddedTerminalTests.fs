@@ -3776,7 +3776,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                                         calls.Enqueue "close"
                                         return! operation ()
                                     }))
-                        (fun _ -> async { calls.Enqueue "state" })
+                        (fun _ -> async { calls.Enqueue "state"; return Ok() })
                         (fun _ -> Ok ())
                         scenario.Agent
                         scenario.RootPaths

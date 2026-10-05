@@ -24,10 +24,10 @@ let private listenerTimeout = TimeSpan.FromSeconds 5.0
 /// A synthetic registration observed `ageSeconds` before the fixed clock snapshot. Only the fields
 /// the bridge reasons about (identity, durable session, registration age) vary between scenarios.
 let private registrationAged processId ageSeconds sessionId =
-    { ProcessIdentity = syntheticProcessIdentityForProcessId processId
+    { ProcessIdentity = Some(syntheticProcessIdentityForProcessId processId)
       WorktreePath = "worktree"
       InjectUrl = injectUrl
-      SessionId = sessionId |> Option.map SessionId
+      SessionId = SessionId sessionId
       TerminalSessionId = None
       RegisteredAt = clock - TimeSpan.FromSeconds(float ageSeconds) }
 
@@ -65,6 +65,9 @@ let private sendPrompt path prompt =
     send CancellationToken.None { WorktreePath = path; Target = SendTarget.Unspecified; Prompt = prompt }
     |> Async.RunSynchronously
 
+let private queue request =
+    send CancellationToken.None request
+
 [<RequireQualifiedAccess>]
 type ClockProbe =
     | QueueTtl of enqueuedAt: DateTime
@@ -77,13 +80,15 @@ let private observeClock =
     function
     | ClockProbe.QueueTtl enqueuedAt ->
         let queued =
-            { EnqueuedAt = enqueuedAt
-              Target = SendTarget.Unspecified
+            { Id = Guid.Empty
+              EnqueuedAt = enqueuedAt
+              Target = QueuedTarget.Session SendTarget.Unspecified
               Prompt = Prompt.agentPrompt "q"
+              LastFailure = None
               Delivery = PromptDelivery.Ordinary CancellationToken.None }
         cleanExpired clock [ queued ] |> List.isEmpty |> not
     | ClockProbe.SessionLiveness registeredAt ->
-        isSessionAlive clock { registrationAged 90001 0 (Some "clock") with RegisteredAt = registeredAt }
+        isSessionAlive clock { registrationAged 90001 0 "clock" with RegisteredAt = registeredAt }
     | ClockProbe.PollLiveness heartbeat -> isPollAlive clock heartbeat
 
 let private clockScenarios =
@@ -100,7 +105,7 @@ let private clockScenarios =
 
 type LivenessScenario =
     { Name: string
-      SessionAge: (int * string option) option
+      SessionAge: (int * string) option
       Poll: bool * int
       Expected: (float * BridgeLiveness) option }
 
@@ -116,15 +121,13 @@ let private livenessScenarios =
 
     [ case "no session and no poll registration is unregistered" None (false, 0) None
       case "a poll heartbeat alone reports poll liveness with no session id" None (true, 10) (Some(10.0, liveness true None []))
-      case "a live session alone reports its durable session id as live" (Some(10, Some "durable")) (false, 0)
+      case "a live session alone reports its durable session id as live" (Some(10, "durable")) (false, 0)
           (Some(10.0, liveness true (Some "durable") [ "durable" ]))
-      case "an anonymous live session is alive but reports no session id" (Some(10, None)) (false, 0)
-          (Some(10.0, liveness true None []))
-      case "a stale session alone is not alive and lists no live session id" (Some(90, Some "durable")) (false, 0)
+      case "a stale session alone is not alive and lists no live session id" (Some(90, "durable")) (false, 0)
           (Some(90.0, liveness false (Some "durable") []))
-      case "a live poll keeps a stale session alive but not live, on one clock snapshot" (Some(90, Some "durable"))
+      case "a live poll keeps a stale session alive but not live, on one clock snapshot" (Some(90, "durable"))
           (true, 10) (Some(10.0, liveness true (Some "durable") []))
-      case "the reported age is the fresher of the session and the poll heartbeat" (Some(5, Some "durable")) (true, 30)
+      case "the reported age is the fresher of the session and the poll heartbeat" (Some(5, "durable")) (true, 30)
           (Some(5.0, liveness true (Some "durable") [ "durable" ])) ]
 
 [<TestFixture>]
@@ -157,9 +160,11 @@ type ClockTests() =
             TaskCompletionSource<Result<unit, StartupPromptFailure>>(
                 TaskCreationOptions.RunContinuationsAsynchronously)
         let reserved =
-            { EnqueuedAt = clock - queueTtl
-              Target = SendTarget.DurableSession(SessionId "startup-deadline")
+            { Id = Guid.NewGuid()
+              EnqueuedAt = clock - queueTtl
+              Target = QueuedTarget.Session(SendTarget.DurableSession(SessionId "startup-deadline"))
               Prompt = Prompt.startup "Initial task"
+              LastFailure = None
               Delivery = PromptDelivery.Startup(completion, deadline.Token) }
 
         Assert.That(cleanExpired clock [ reserved ], Is.EqualTo([ reserved ]))
@@ -171,33 +176,18 @@ type ClockTests() =
 type RegistrationRejection =
     { Name: string
       Reject: ProcessIdentity -> RegistrationRequest -> Result<SessionEntry, RegistrationFailure>
-      Expected: RegistrationFailure
-      RetainsOriginal: bool }
+      Expected: RegistrationFailure }
 
 let private rejectionScenarios =
     let invalid name mutate expected =
         { Name = name
           Reject = fun identity request -> registerSession (exactIdentityResolver identity) (mutate request)
-          Expected = expected
-          RetainsOriginal = false }
+          Expected = expected }
 
-    let unresolvable name resolve expected =
-        { Name = name
-          Reject = fun _ request -> registerSession (ProcessIdentityResolver.create resolve) request
-          Expected = expected
-          RetainsOriginal = false }
-
-    let afterRegistering name mutate =
-        { Name = name
-          Reject =
-            fun identity request ->
-                registerOrFail (exactIdentityResolver identity) request |> ignore
-                registerSession (exactIdentityResolver identity) (mutate request)
-          Expected = RegistrationFailure.ParentIdentityMismatch
-          RetainsOriginal = true }
-
-    [ invalid "a non-positive parent process id is rejected" (fun request -> { request with ParentProcessId = 0 })
-          RegistrationFailure.InvalidParentProcessId
+    [ invalid "a missing durable session id is rejected" (fun request -> { request with SessionId = None })
+          RegistrationFailure.InvalidSessionId
+      invalid "a blank durable session id is rejected" (fun request -> { request with SessionId = Some " " })
+          RegistrationFailure.InvalidSessionId
       invalid "a malformed durable session id is rejected"
           (fun request -> { request with SessionId = Some "session with spaces" })
           RegistrationFailure.InvalidSessionId
@@ -207,36 +197,17 @@ let private rejectionScenarios =
       invalid "a shutdown capability of the wrong shape is rejected"
           (fun request -> { request with ShutdownCapability = "too-short" })
           RegistrationFailure.InvalidShutdownCapability
-      unresolvable "a parent process that is no longer running is rejected" (fun _ -> Ok None)
-          RegistrationFailure.ParentProcessNotRunning
-      unresolvable "a parent process that cannot be probed is rejected" (fun _ -> Error "probe failed")
-          RegistrationFailure.ParentProcessResolutionFailed
-      { Name = "a reused pid heartbeat cannot re-key one bridge capability to another process"
-        Reject =
-          fun identity request ->
-              // Mutable: the injected resolver models the operating system handing one pid to a
-              // different process between the first and the second heartbeat.
-              let mutable current = identity
-
-              let resolver =
-                  ProcessIdentityResolver.create (fun processId ->
-                      if processId = ProcessIdentity.processId identity then Ok(Some current) else Ok None)
-
-              registerOrFail resolver request |> ignore
-              current <- reusedIdentity identity
-              registerSession resolver request
-        Expected = RegistrationFailure.ParentProcessReused
-        RetainsOriginal = false }
-      afterRegistering "a registered process cannot change its durable session id" (fun request ->
-          { request with SessionId = Some "session-other" })
-      afterRegistering "a registered process cannot change its worktree" (fun request ->
-          { request with WorktreePath = uniquePath "moved-worktree" })
-      afterRegistering "a registered process cannot change its terminal origin" (fun request ->
-          { request with TerminalSessionId = Some(Guid.NewGuid().ToString "N") }) ]
+      invalid "a relative worktree path is rejected" (fun request -> { request with WorktreePath = "relative" })
+          RegistrationFailure.InvalidWorktreePath
+      invalid "a non-loopback injection endpoint is rejected" (fun request -> { request with InjectUrl = "https://example.com/inject" })
+          RegistrationFailure.InvalidInjectUrl
+      invalid "a non-loopback shutdown endpoint is rejected" (fun request -> { request with ShutdownUrl = "https://example.com/shutdown" })
+          RegistrationFailure.InvalidShutdownUrl ]
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+[<NonParallelizable>]
 type ExactRegistrationTests() =
 
     static member RejectionCases: TestCaseData seq =
@@ -256,68 +227,125 @@ type ExactRegistrationTests() =
             Assert.That(
                 (entry.ProcessIdentity, entry.SessionId, entry.TerminalSessionId, entry.InjectUrl),
                 Is.EqualTo(
-                    (identity, Some(SessionId "session.exact:1"),
+                    (Some identity, SessionId "session.exact:1",
                      Some(TerminalSessionId(terminal.ToLowerInvariant())), injectUrl))
             )
-            Assert.That(sessionsForWorktree path |> List.map _.ProcessIdentity, Is.EqualTo [ identity ]))
+            Assert.That(sessionsForWorktree path |> List.map _.ProcessIdentity, Is.EqualTo [ Some identity ]))
 
     [<TestCaseSource("RejectionCases")>]
     member _.``Registration rejection leaves the worktree registry unchanged``(scenario: RegistrationRejection) =
         let identity = nextIdentity ()
         let path = uniquePath "rejected-registration"
         let sessionId = $"session-original-{Guid.NewGuid():N}"
-        let actual = scenario.Reject identity (validRequest identity path (Some sessionId))
-        let survivors = sessionsForWorktree path |> List.choose _.SessionId |> List.map SessionId.value
+        let request = validRequest identity path (Some sessionId)
+        registerOrFail (exactIdentityResolver identity) request |> ignore
+        let actual = scenario.Reject identity request
+        let survivors = sessionsForWorktree path |> List.map (_.SessionId >> SessionId.value)
         let expected: Result<SessionEntry, RegistrationFailure> = Error scenario.Expected
 
         Assert.Multiple(fun () ->
             Assert.That(actual, Is.EqualTo expected)
-            Assert.That(survivors, Is.EqualTo(if scenario.RetainsOriginal then [ sessionId ] else [])))
+            Assert.That(survivors, Is.EqualTo [ sessionId ]))
 
     [<Test>]
-    member _.``Worktree lookup prunes exited and reused exact registrations without re-probing``() =
-        let path = uniquePath "registration-pruning"
-        let exited, original = nextIdentity (), nextIdentity ()
-        let states = ConcurrentDictionary<int, ProcessIdentity option>()
-        let probes = ConcurrentDictionary<int, int>()
+    member _.``Sequential conversations in one process do not transfer document owners``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sequential-conversations"
+            let identity = nextIdentity ()
+            let first, second = $"first-{Guid.NewGuid():N}", $"second-{Guid.NewGuid():N}"
+            let register sid =
+                validRequest identity path (Some sid)
+                |> registerOrFail (exactIdentityResolver identity)
+            register first |> ignore
+            runAsync (CanvasDocOwnership.assign path "report.html" (SessionId first)) |> Result.defaultWith (fun _ -> failwith "owner save failed")
+            register second |> ignore
+            Assert.Multiple(fun () ->
+                Assert.That(sessionsForWorktree path |> List.map (_.SessionId >> SessionId.value), Is.EquivalentTo [ first; second ])
+                Assert.That(runAsync (CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some(SessionId first)))
+                Assert.That(getSessionForWorktree path, Is.EqualTo(Some(SessionId second)))))
 
-        let resolver =
-            ProcessIdentityResolver.create (fun processId ->
-                probes.AddOrUpdate(processId, 1, fun _ count -> count + 1) |> ignore
-
-                match states.TryGetValue processId with
-                | true, current -> Ok current
-                | false, _ -> Ok None)
-
-        let register identity =
-            states[ProcessIdentity.processId identity] <- Some identity
-
-            validRequest identity path None
-            |> registerSessionWithDiagnostics ignore resolver
-            |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
-            |> ignore
-
-        register exited
-        register original
-        states[ProcessIdentity.processId exited] <- None
-        states[ProcessIdentity.processId original] <- Some(reusedIdentity original)
-
-        let probeCounts () =
-            [ exited; original ] |> List.map (fun identity -> probes[ProcessIdentity.processId identity])
-
-        Assert.That(sessionsForWorktree path, Is.Empty)
-        let afterPrune = probeCounts ()
-
+    [<Test>]
+    member _.``Newest receipt wins including the older physical endpoint returning last``() =
+        let path = uniquePath "last-arrival"
+        let sid = Some $"resumed-{Guid.NewGuid():N}"
+        let first, second = nextIdentity (), nextIdentity ()
+        let register identity url terminal =
+            { validRequest identity path sid with InjectUrl = url; TerminalSessionId = terminal }
+            |> registerOrFail (exactIdentityResolver identity)
+        let old = register first "http://127.0.0.1:1/inject" None
+        let newer = register second "http://127.0.0.1:2/inject" (Some(Guid.NewGuid().ToString "N"))
+        let returned = register first old.InjectUrl None
         Assert.Multiple(fun () ->
-            Assert.That(sessionsForWorktree path, Is.Empty)
-            Assert.That(
-                probeCounts (),
-                Is.EqualTo afterPrune,
-                "A pruned terminal registration must not be retained or probed again"
-            ))
+            Assert.That(returned.RegisteredAt, Is.GreaterThan newer.RegisteredAt)
+            Assert.That(newer.RegisteredAt, Is.GreaterThan old.RegisteredAt)
+            Assert.That(sessionsForWorktree path, Is.EqualTo [ returned ]))
 
     [<Test>]
-    member _.``Bridge diagnostics distinguish refreshes normal sessions and duplicate physical registrations``() =
+    member _.``Receipt installation is atomic across a blocked optional location lookup``() =
+        let path = uniquePath "concurrent-arrivals"
+        let identity = nextIdentity ()
+        let request = validRequest identity path (Some $"concurrent-{Guid.NewGuid():N}")
+        use entered = new ManualResetEventSlim()
+        use release = new ManualResetEventSlim()
+        let resolver =
+            ProcessIdentityResolver.create (fun _ ->
+                entered.Set()
+                Assert.That(release.Wait listenerTimeout, Is.True)
+                Ok(Some identity))
+        let first = Task.Run(fun () -> registerOrFail resolver request)
+        Assert.That(entered.Wait listenerTimeout, Is.True)
+        let next = Task.Run(fun () ->
+            { request with InjectUrl = "http://127.0.0.1:2/inject" }
+            |> registerOrFail (exactIdentityResolver identity))
+        release.Set()
+        let old, latest = await first, await next
+        Assert.That(latest.RegisteredAt, Is.GreaterThan old.RegisteredAt)
+        Assert.That(sessionsForWorktree path, Is.EqualTo [ latest ])
+
+    [<Test>]
+    member _.``Missing and unverified hints remain valid scoped canvas bridges``() =
+        let path = uniquePath "optional-hints"
+        let identity = nextIdentity ()
+        let request = validRequest identity path (Some $"unverified-{Guid.NewGuid():N}")
+        let unavailable = ProcessIdentityResolver.create (fun _ -> Error "probe unavailable")
+        let entry = registerOrFail unavailable request
+        let missing = registerOrFail unavailable { request with ParentProcessId = None }
+        Assert.Multiple(fun () ->
+            Assert.That(entry.ProcessIdentity, Is.EqualTo(None: ProcessIdentity option))
+            Assert.That(missing.ProcessIdentity, Is.EqualTo(None: ProcessIdentity option))
+            Assert.That(canvasSessionsForWorktree path, Is.EqualTo [ missing ])
+            Assert.That((getStatus path).IsAlive, Is.True))
+
+    [<Test>]
+    member _.``Changed terminal and parent hints replace metadata without rejecting the conversation``() =
+        let path = uniquePath "changed-hints"
+        let identity = nextIdentity ()
+        let request = validRequest identity path (Some $"hints-{Guid.NewGuid():N}")
+        let firstTerminal, nextTerminal = Guid.NewGuid().ToString "N", Guid.NewGuid().ToString "N"
+        registerOrFail (exactIdentityResolver identity) { request with TerminalSessionId = Some firstTerminal } |> ignore
+        let changed =
+            registerOrFail (exactIdentityResolver identity)
+                { request with TerminalSessionId = Some nextTerminal; ParentProcessId = Some -1 }
+        Assert.Multiple(fun () ->
+            Assert.That(changed.ProcessIdentity, Is.EqualTo(None: ProcessIdentity option))
+            Assert.That(changed.TerminalSessionId, Is.EqualTo(Some(TerminalSessionId nextTerminal)))
+            Assert.That(canvasSessionsForWorktree path, Is.EqualTo [ changed ]))
+
+    [<Test>]
+    member _.``Old observed expiry cannot erase a replacement and expired sessions can return``() =
+        let path = uniquePath "expiry-recovery"
+        let identity = nextIdentity ()
+        let request = validRequest identity path (Some $"expiry-{Guid.NewGuid():N}")
+        let old = registerOrFail (exactIdentityResolver identity) request
+        let replacement = registerOrFail (exactIdentityResolver identity) { request with InjectUrl = "http://127.0.0.1:2/inject" }
+        expireObservedAt (old.RegisteredAt + livenessTtl) old
+        Assert.That(sessionsForWorktree path, Is.EqualTo [ replacement ])
+        Assert.That(canvasSessionsForWorktreeAt (replacement.RegisteredAt + livenessTtl) path, Is.Empty)
+        let recovered = registerOrFail (exactIdentityResolver identity) request
+        Assert.That(canvasSessionsForWorktree path, Is.EqualTo [ recovered ])
+
+    [<Test>]
+    member _.``Bridge diagnostics distinguish durable replacements and independent sessions``() =
         let path = uniquePath "registration-diagnostics"
         let sharedSession, independentSession = $"shared-{Guid.NewGuid():N}", $"independent-{Guid.NewGuid():N}"
         let firstIdentity, secondIdentity, thirdIdentity = nextIdentity (), nextIdentity (), nextIdentity ()
@@ -345,12 +373,6 @@ type ExactRegistrationTests() =
                 | LifecycleDiagnostics.Diagnostic.BridgeRegistration registration -> Some registration.Kind
                 | _ -> None)
 
-        let sameSession =
-            lastOf (function
-                | LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved observed when
-                    observed.Boundary = bridgeBoundary -> Some observed
-                | _ -> None)
-
         let multipleSessions =
             lastOf (function
                 | LifecycleDiagnostics.Diagnostic.MultipleSessionsObserved observed when
@@ -359,19 +381,16 @@ type ExactRegistrationTests() =
 
         Assert.That(
             (registrationKinds,
-             sameSession.ProcessIdentities |> List.sortBy ProcessIdentity.processId,
-             sameSession.TerminalSessionIds |> List.map TerminalSessionId.value |> List.sort,
              multipleSessions.SessionIds |> List.map SessionId.value |> List.sort),
             Is.EqualTo(
                 ([| LifecycleDiagnostics.BridgeRegistrationKind.Added
-                    LifecycleDiagnostics.BridgeRegistrationKind.Added
+                    LifecycleDiagnostics.BridgeRegistrationKind.Refreshed
                     LifecycleDiagnostics.BridgeRegistrationKind.Refreshed
                     LifecycleDiagnostics.BridgeRegistrationKind.Added |],
-                 [ firstIdentity; secondIdentity ] |> List.sortBy ProcessIdentity.processId,
-                 [ firstTerminal; secondTerminal ] |> List.sort,
                  [ sharedSession; independentSession ] |> List.sort)
             )
         )
+        Assert.That(events |> Array.exists (function LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved _ -> true | _ -> false), Is.False)
 
 type SelectionScenario =
     { Name: string
@@ -380,25 +399,24 @@ type SelectionScenario =
       Target: SendTarget
       Expected: SessionEntry option }
 
-let private freshFirst = registrationAged 7001 1 (Some "shared")
-let private freshSecond = registrationAged 7002 2 (Some "shared")
-let private otherSession = registrationAged 7003 3 (Some "other")
-let private staleSession = registrationAged 7004 60 (Some "stale")
-let private anonymous = registrationAged 7005 4 None
+let private freshFirst = registrationAged 7001 1 "shared"
+let private freshSecond = registrationAged 7002 2 "shared"
+let private otherSession = registrationAged 7003 3 "other"
+let private staleSession = registrationAged 7004 60 "stale"
 
 let private selectionScenarios =
     let selects name entries target expected =
         { Name = name; Entries = entries; Kind = PromptKind.AgentPrompt; Target = target; Expected = expected }
 
-    let exact (entry: SessionEntry) = SendTarget.ExactProcess entry.ProcessIdentity
+    let exact (entry: SessionEntry) = SendTarget.ExactProcess(entry.SessionId, entry.ProcessIdentity.Value)
     let durable sessionId = SendTarget.DurableSession(SessionId sessionId)
 
     [ selects "an exact target addresses that physical process" [ freshFirst; freshSecond ] (exact freshFirst)
           (Some freshFirst)
       selects "an exact target never addresses a same-SessionId sibling" [ freshSecond ] (exact freshFirst) None
       selects "an exact target ignores a stale registration" [ staleSession ] (exact staleSession) None
-      selects "an exact target addresses a registration without a durable session id" [ anonymous ] (exact anonymous)
-          (Some anonymous)
+      selects "an exact target cannot reuse the process for a different conversation"
+          [ { freshFirst with SessionId = SessionId "replacement" } ] (exact freshFirst) None
       selects "a durable session target picks the freshest duplicate physical registration"
           [ freshSecond; freshFirst ] (durable "shared") (Some freshFirst)
       selects "a durable session target ignores a stale registration" [ staleSession ] (durable "stale") None
@@ -428,25 +446,16 @@ type TargetSelectionTests() =
         Assert.That(selectLiveTarget clock scenario.Kind scenario.Target scenario.Entries, Is.EqualTo scenario.Expected)
 
 type PromptWireScenario = { Name: string; Prompt: Prompt; Json: string }
-type QueueDrainScenario = { Name: string; Prompt: Prompt; Drained: Prompt list }
 
 let private canvasPayload = """{"action":"refresh"}"""
 
 let private promptWireScenarios =
     [ { Name = "a canvas prompt has an explicit canvas kind"
-        Prompt = Prompt.canvas canvasPayload
-        Json = """{"kind":"canvas","prompt":"{\u0022action\u0022:\u0022refresh\u0022}"}""" }
+        Prompt = Prompt.canvasFor @"Q:\repo" "report.html" canvasPayload
+        Json = """{"kind":"canvas","prompt":"{\u0022action\u0022:\u0022refresh\u0022}","source":{"worktreePath":"Q:\\repo","filename":"report.html"}}""" }
       { Name = "a generic agent prompt has an explicit agent-prompt kind"
         Prompt = Prompt.agentPrompt "Sync with upstream/main when safe."
         Json = """{"kind":"agent-prompt","prompt":"Sync with upstream/main when safe."}""" } ]
-
-let private queueDrainScenarios =
-    [ { Name = "an anonymous canvas prompt queues for canvas polling"
-        Prompt = Prompt.canvas canvasPayload
-        Drained = [ Prompt.canvas canvasPayload ] }
-      { Name = "a canvas heartbeat drain does not consume generic agent prompts"
-        Prompt = Prompt.agentPrompt "sync"
-        Drained = [] } ]
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -458,20 +467,9 @@ type PromptTransportTests() =
     static member WireCases: TestCaseData seq =
         promptWireScenarios |> Seq.map (fun scenario -> TestCaseData(scenario).SetName scenario.Name)
 
-    static member DrainCases: TestCaseData seq =
-        queueDrainScenarios |> Seq.map (fun scenario -> TestCaseData(scenario).SetName scenario.Name)
-
     [<TestCaseSource("WireCases")>]
     member _.``prompt transport kinds stay explicit on the wire``(scenario: PromptWireScenario) =
         Assert.That(serializePrompt scenario.Prompt, Is.EqualTo scenario.Json)
-
-    [<TestCaseSource("DrainCases")>]
-    member _.``queued prompt draining by transport kind``(scenario: QueueDrainScenario) =
-        let path = uniquePath "queue-drain"
-
-        Assert.Multiple(fun () ->
-            Assert.That(sendPrompt path scenario.Prompt, Is.EqualTo SendResult.Queued)
-            Assert.That(drainPendingCanvas path, Is.EqualTo scenario.Drained))
 
     [<Test>]
     member _.``An untargeted agent prompt is posted to the only live bridge``() =
@@ -499,15 +497,14 @@ type PromptTransportTests() =
                 | other -> failwith $"expected three bridges, got {other.Length}"
 
             let path = uniquePath "exact-queue"
-            let sessionId = Some $"shared-{Guid.NewGuid():N}"
+            let sessionId = SessionId $"shared-{Guid.NewGuid():N}"
             let targetIdentity, siblingIdentity = nextIdentity (), nextIdentity ()
-            let register identity url = registerExactSession 'A' identity path url sessionId None |> ignore
+            let register identity url = registerExactSession 'A' identity path url (Some(SessionId.value sessionId)) None |> ignore
 
             register targetIdentity failedUrl
-            register siblingIdentity siblingUrl
 
             let failedRequest = failed.GetContextAsync()
-            let delivery = deliverAgentPrompt path (SendTarget.ExactProcess targetIdentity) "retry-exact"
+            let delivery = deliverAgentPrompt path (SendTarget.ExactProcess(sessionId, targetIdentity)) "retry-exact"
             await failedRequest |> respond 503
 
             Assert.That(delivery.GetAwaiter().GetResult(), Is.EqualTo DeliveryResult.DeliveryFailed)
@@ -527,23 +524,422 @@ type PromptTransportTests() =
 
     [<Test>]
     member _.``The prompt queue is capped at the most recent prompts``() =
-        let path = uniquePath "queue-cap"
-        let prompts = [ 1..12 ] |> List.map (fun index -> Prompt.canvas $"""{{"n":{index}}}""")
-        prompts |> List.iter (sendPrompt path >> ignore)
+        withBridges 1 (fun bridges ->
+            let listener, url = List.exactlyOne bridges
+            let path = uniquePath "queue-cap"
+            let prompts = [ 1..12 ] |> List.map (fun index -> Prompt.agentPrompt $"message-{index}")
+            prompts |> List.iter (sendPrompt path >> ignore)
+            registerExactSession 'A' (nextIdentity ()) path url (Some $"cap-{Guid.NewGuid():N}") None |> ignore
+            let bodies =
+                [ for _ in 1..10 do
+                    let context = await (listener.GetContextAsync())
+                    let body = readBody context
+                    respond 200 context
+                    yield body ]
+            runAsync (flushPending path)
+            Assert.That(bodies, Is.EqualTo(prompts |> List.skip 2 |> List.map serializePrompt)))
 
-        Assert.That(drainPendingCanvas path, Is.EqualTo(prompts |> List.skip 2))
+    [<TestCase("owner")>]
+    [<TestCase("endpoint")>]
+    [<TestCase("worktree")>]
+    member _.``Every unsent dispatch resolves authority after an in-flight request``(change: string) =
+        withTempCwd (fun () ->
+            withBridges 2 (fun bridges ->
+                let oldListener, oldUrl = bridges[0]
+                let nextListener, nextUrl = bridges[1]
+                let path, away = uniquePath "dispatch-current", uniquePath "dispatch-away"
+                let owner, nextOwner = $"owner-{Guid.NewGuid():N}", $"claimed-{Guid.NewGuid():N}"
+                let identity = nextIdentity ()
+                runAsync (CanvasDocOwnership.assign path "report.html" (SessionId owner))
+                |> Result.defaultWith (fun _ -> failwith "owner save failed")
+                let message text =
+                    { WorktreePath = path
+                      Target = SendTarget.DurableSession(SessionId owner)
+                      Prompt = Prompt.canvasFor (PathUtils.normalizePath path) "report.html" text }
+                [ "first"; "second" ] |> List.iter (fun text ->
+                    Assert.That(runAsync (queue (message text)), Is.EqualTo SendResult.Queued))
+                let firstRequest = oldListener.GetContextAsync()
+                registerExactSession 'A' identity path oldUrl (Some owner) None |> ignore
+                let first = await firstRequest
+                let firstBody = readBody first
+                let nextRequest = nextListener.GetContextAsync()
+                match change with
+                | "owner" ->
+                    runAsync (CanvasDocOwnership.assign path "report.html" (SessionId nextOwner))
+                    |> Result.defaultWith (fun _ -> failwith "claim save failed")
+                    registerExactSession 'A' (nextIdentity ()) path nextUrl (Some nextOwner) None |> ignore
+                | "endpoint" ->
+                    registerExactSession 'A' (nextIdentity ()) path nextUrl (Some owner) None |> ignore
+                | "worktree" ->
+                    registerExactSession 'A' identity away nextUrl (Some owner) None |> ignore
+                | _ -> failwith "unknown routing scenario"
+                respond 200 first
+                if change = "worktree" then
+                    runAsync (flushPending path)
+                    Assert.That(nextRequest.IsCompleted, Is.False, "A bridge in another worktree cannot receive the second message")
+                    registerExactSession 'A' identity path nextUrl (Some owner) None |> ignore
+                let second = await nextRequest
+                let secondBody = readBody second
+                respond 200 second
+                runAsync (flushPending path)
+                Assert.Multiple(fun () ->
+                    Assert.That(firstBody, Is.EqualTo(serializePrompt (message "first").Prompt))
+                    Assert.That(secondBody, Is.EqualTo(serializePrompt (message "second").Prompt))
+                    Assert.That(runAsync (pendingPrompts path), Is.Empty))))
+
+    [<Test>]
+    member _.``A failed old send cannot remove a replacement and recovery preserves queue order``() =
+        withTempCwd (fun () ->
+            withBridges 2 (fun bridges ->
+                let failedListener, failedUrl = bridges[0]
+                let recoveredListener, recoveredUrl = bridges[1]
+                let path = uniquePath "failed-replacement"
+                let owner = $"owner-{Guid.NewGuid():N}"
+                let identity = nextIdentity ()
+                runAsync (CanvasDocOwnership.assign path "report.html" (SessionId owner))
+                |> Result.defaultWith (fun _ -> failwith "owner save failed")
+                let message text =
+                    { WorktreePath = path
+                      Target = SendTarget.DurableSession(SessionId owner)
+                      Prompt = Prompt.canvasFor (PathUtils.normalizePath path) "report.html" text }
+                [ "first"; "second" ] |> List.iter (message >> queue >> runAsync >> ignore)
+                let failedRequest = failedListener.GetContextAsync()
+                registerExactSession 'A' identity path failedUrl (Some owner) None |> ignore
+                let first = await failedRequest
+                let replacement = registerExactSession 'A' (nextIdentity ()) path recoveredUrl (Some owner) None
+                respond 503 first
+                let recoveredBodies =
+                    [ for _ in 1..2 do
+                        let context = await (recoveredListener.GetContextAsync())
+                        let body = readBody context
+                        respond 200 context
+                        yield body ]
+                runAsync (flushPending path)
+                Assert.Multiple(fun () ->
+                    Assert.That(sessionsForWorktree path, Is.EqualTo [ replacement ])
+                    Assert.That(recoveredBodies, Is.EqualTo([ "first"; "second" ] |> List.map (message >> _.Prompt >> serializePrompt))))))
+
+    [<Test>]
+    member _.``Failed queued messages retain age and cannot loop on an unchanged failed endpoint``() =
+        withTempCwd (fun () ->
+            withBridges 1 (fun bridges ->
+                let listener, url = List.exactlyOne bridges
+                let path = uniquePath "failed-queue-age"
+                let owner = $"owner-{Guid.NewGuid():N}"
+                let identity = nextIdentity ()
+                runAsync (CanvasDocOwnership.assign path "report.html" (SessionId owner))
+                |> Result.defaultWith (fun _ -> failwith "owner save failed")
+                let message text =
+                    { WorktreePath = path
+                      Target = SendTarget.DurableSession(SessionId owner)
+                      Prompt = Prompt.canvasFor (PathUtils.normalizePath path) "report.html" text }
+                [ "first"; "second" ] |> List.iter (message >> queue >> runAsync >> ignore)
+                let original = runAsync (pendingPrompts path)
+                let failedRequest = listener.GetContextAsync()
+                registerExactSession 'A' identity path url (Some owner) None |> ignore
+                let first = await failedRequest
+                registerExactSession 'A' identity path url (Some owner) None |> ignore
+                let unexpectedRetry = listener.GetContextAsync()
+                respond 503 first
+                runAsync (flushPending path)
+                let failed = runAsync (pendingPrompts path)
+                Assert.Multiple(fun () ->
+                    Assert.That(unexpectedRetry.IsCompleted, Is.False)
+                    Assert.That(failed |> List.map _.EnqueuedAt, Is.EqualTo(original |> List.map _.EnqueuedAt))
+                    Assert.That(failed |> List.map _.Prompt.Text, Is.EqualTo [ "first"; "second" ])
+                    Assert.That(cleanExpired (original[1].EnqueuedAt + queueTtl) failed, Is.Empty))
+                registerExactSession 'A' identity path url (Some owner) None |> ignore
+                let recoveredFirst = await unexpectedRetry
+                let firstBody = readBody recoveredFirst
+                respond 200 recoveredFirst
+                let recoveredSecond = await (listener.GetContextAsync())
+                let secondBody = readBody recoveredSecond
+                respond 200 recoveredSecond
+                runAsync (flushPending path)
+                Assert.That([ firstBody; secondBody ], Is.EqualTo([ "first"; "second" ] |> List.map (message >> _.Prompt >> serializePrompt)))))
+
+    [<Test>]
+    member _.``Busy delivery accepts only a bounded ordered queue instead of waiting request bodies``() =
+        withTempCwd (fun () ->
+            withBridges 1 (fun bridges ->
+                let listener, url = List.exactlyOne bridges
+                let path = uniquePath "busy-delivery-cap"
+                let owner = $"owner-{Guid.NewGuid():N}"
+                runAsync (CanvasDocOwnership.assign path "report.html" (SessionId owner))
+                |> Result.defaultWith (fun _ -> failwith "owner save failed")
+                registerExactSession 'A' (nextIdentity ()) path url (Some owner) None |> ignore
+                let message text =
+                    { WorktreePath = path
+                      Target = SendTarget.DurableSession(SessionId owner)
+                      Prompt = Prompt.canvasFor (PathUtils.normalizePath path) "report.html" text }
+                let held = listener.GetContextAsync()
+                let first = message "held" |> queue |> Async.StartAsTask
+                let context = await held
+                [ 1..12 ] |> List.iter (fun index ->
+                    Assert.That(runAsync (queue (message $"queued-{index}")), Is.EqualTo SendResult.Queued))
+                respond 200 context
+                let delivered =
+                    [ for _ in 1..10 do
+                        let queued = await (listener.GetContextAsync())
+                        let body = readBody queued
+                        respond 200 queued
+                        yield body ]
+                Assert.That(await first, Is.EqualTo SendResult.Delivered)
+                Assert.That(delivered, Is.EqualTo([ 3..12 ] |> List.map (fun index -> serializePrompt (message $"queued-{index}").Prompt)))
+                Assert.That(runAsync (pendingPrompts path), Is.Empty)))
+
+    [<TestCase("expired")>]
+    [<TestCase("evicted")>]
+    [<Category("CanvasRoutingRaces")>]
+    member _.``Async target lookup cannot dispatch an expired or evicted item``(change: string) =
+        withBridges 1 (fun bridges ->
+            let listener, url = List.exactlyOne bridges
+            let path = uniquePath "take-after-lookup"
+            let owner = SessionId $"owner-{Guid.NewGuid():N}"
+            let terminal = TerminalSessionId(Guid.NewGuid().ToString "N")
+            // The injected lane clock and resolver expose expiry/eviction during the async lookup.
+            let mutable now = DateTime.UtcNow
+            let mutable lookupBlocked = false
+            let entered = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let release = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            initializeDeliveryClock path (fun () -> now)
+            registerExactSession 'A' (nextIdentity ()) path url (Some(SessionId.value owner)) None |> ignore
+            runAsync (flushPending path)
+            let message text target =
+                { WorktreePath = path
+                  Target = target
+                  Prompt = Prompt.canvasFor (PathUtils.normalizePath path) "diff.html" text }
+            Assert.That(runAsync (queue (message "stale" SendTarget.Unspecified)), Is.EqualTo SendResult.Queued)
+            let original = runAsync (pendingPrompts path) |> List.exactlyOne
+            let launchAt = DateTime.UtcNow
+            runAsync (reservePendingSystemViews path launchAt) |> ignore
+            let resolve () =
+                async {
+                    if lookupBlocked then
+                        entered.TrySetResult() |> ignore
+                        do! release.Task |> Async.AwaitTask
+                        return Some owner
+                    else return None
+                }
+            runAsync (targetPendingSystemViews path launchAt terminal resolve)
+            runAsync (flushPending path)
+            lookupBlocked <- true
+            let draining = flushPending path |> Async.StartAsTask
+            await entered.Task
+            let count = if change = "expired" then 2 else 12
+            let next = listener.GetContextAsync()
+            let firstIndex = if change = "expired" then 1 else 3
+            let bodies =
+                if change = "expired" then
+                    now <- original.EnqueuedAt + queueTtl
+                    Assert.That((deliveryStatus path).QueuedMessages, Is.EqualTo 1, "Expiry must be checked by TAKE, not a prior queue cleanup")
+                    release.TrySetResult() |> ignore
+                    await draining
+                    Assert.That(next.IsCompleted, Is.False, "An item expiring during target lookup must issue no HTTP")
+                    let first = queue (message "live-1" (SendTarget.DurableSession owner)) |> Async.StartAsTask
+                    let context = await next
+                    let firstBody = readBody context
+                    Assert.That(runAsync (queue (message "live-2" (SendTarget.DurableSession owner))), Is.EqualTo SendResult.Queued)
+                    respond 200 context
+                    let second = await (listener.GetContextAsync())
+                    let secondBody = readBody second
+                    respond 200 second
+                    Assert.That(await first, Is.EqualTo SendResult.Delivered)
+                    [ firstBody; secondBody ]
+                else
+                    [ 1..count ]
+                    |> List.iter (fun index ->
+                        Assert.That(
+                            runAsync (queue (message $"live-{index}" (SendTarget.DurableSession owner))),
+                            Is.EqualTo SendResult.Queued))
+                    release.TrySetResult() |> ignore
+                    let delivered =
+                        [ for index in firstIndex..count do
+                            let context = await (if index = firstIndex then next else listener.GetContextAsync())
+                            let body = readBody context
+                            respond 200 context
+                            yield body ]
+                    await draining
+                    delivered
+            Assert.That(
+                bodies,
+                Is.EqualTo([ firstIndex..count ] |> List.map (fun index ->
+                    serializePrompt (message $"live-{index}" (SendTarget.DurableSession owner)).Prompt)))
+            Assert.That(runAsync (pendingPrompts path), Is.Empty))
+
+    [<Test>]
+    [<Category("CanvasRoutingFollowers")>]
+    member _.``Exact terminal successors cannot overtake an earlier stale activity lookup``() =
+        withBridges 1 (fun bridges ->
+            let listener, url = List.exactlyOne bridges
+            let path = uniquePath "coalesced-pass-order"
+            let owner = SessionId $"launched-{Guid.NewGuid():N}"
+            let terminal = TerminalSessionId(Guid.NewGuid().ToString "N")
+            let entered = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let release = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            // The first resolver captures absent activity before the exact terminal becomes active.
+            let mutable blockNext = false
+            let mutable reachable = false
+            let message payload =
+                { WorktreePath = path
+                  Target = SendTarget.Unspecified
+                  Prompt = Prompt.canvasFor (PathUtils.normalizePath path) "diff.html" payload }
+            [ "first"; "second" ] |> List.iter (fun payload ->
+                Assert.That(runAsync (queue (message payload)), Is.EqualTo SendResult.Queued))
+            let launchAt = DateTime.UtcNow
+            runAsync (reservePendingSystemViews path launchAt) |> ignore
+            let resolve () =
+                async {
+                    let observed = if reachable then Some owner else None
+                    if blockNext then
+                        blockNext <- false
+                        entered.TrySetResult() |> ignore
+                        do! release.Task |> Async.AwaitTask
+                    return observed
+                }
+            runAsync (targetPendingSystemViews path launchAt terminal resolve)
+            runAsync (flushPending path)
+            blockNext <- true
+            registerExactSession 'A' (nextIdentity ()) path url (Some(SessionId.value owner)) None |> ignore
+            await entered.Task
+            reachable <- true
+            release.TrySetResult() |> ignore
+            let bodies =
+                [ for _ in 1..2 do
+                    let context = await (listener.GetContextAsync())
+                    let body = readBody context
+                    respond 200 context
+                    yield body ]
+            runAsync (flushPending path)
+            Assert.That(bodies, Is.EqualTo(
+                [ message "first"; message "second" ]
+                |> List.map (_.Prompt >> serializePrompt))))
+
+    [<Test>]
+    [<Category("CanvasRoutingFollowers")>]
+    member _.``An unchanged failed predecessor does not spin or block fresh exact terminal work``() =
+        withBridges 1 (fun bridges ->
+            let listener, url = List.exactlyOne bridges
+            let path = uniquePath "failed-terminal-predecessor"
+            let owner = SessionId $"launched-{Guid.NewGuid():N}"
+            let identity = nextIdentity ()
+            let terminal = TerminalSessionId(Guid.NewGuid().ToString "N")
+            let message payload =
+                { WorktreePath = path
+                  Target = SendTarget.Unspecified
+                  Prompt = Prompt.canvasFor (PathUtils.normalizePath path) "diff.html" payload }
+            [ "first"; "second" ] |> List.iter (message >> queue >> runAsync >> ignore)
+            let original = runAsync (pendingPrompts path)
+            let launchAt = DateTime.UtcNow
+            let bind at =
+                runAsync (reservePendingSystemViews path at) |> ignore
+                runAsync (targetPendingSystemViews path at terminal (fun () -> async.Return(Some owner)))
+            bind launchAt
+            let failedRequest = listener.GetContextAsync()
+            registerExactSession 'A' identity path url (Some(SessionId.value owner)) None |> ignore
+            let failed = await failedRequest
+            registerExactSession 'A' identity path url (Some(SessionId.value owner)) None |> ignore
+            respond 503 failed
+            runAsync (flushPending path)
+            Assert.That(runAsync (queue (message "fresh")), Is.EqualTo SendResult.Queued)
+            let received = listener.GetContextAsync()
+            bind (launchAt.AddTicks 1L)
+            let fresh = await received
+            let body = readBody fresh
+            respond 200 fresh
+            runAsync (flushPending path)
+            let retained = runAsync (pendingPrompts path)
+            Assert.Multiple(fun () ->
+                Assert.That(body, Is.EqualTo(serializePrompt (message "fresh").Prompt))
+                Assert.That(retained |> List.map _.Prompt.Text, Is.EqualTo [ "first"; "second" ])
+                Assert.That(retained |> List.map _.EnqueuedAt, Is.EqualTo(original |> List.map _.EnqueuedAt))
+                Assert.That(retained |> List.forall _.LastFailure.IsSome, Is.True)))
+
+    [<Test>]
+    [<Category("CanvasRoutingRaces")>]
+    member _.``Registration wakeups coalesce while one HTTP dispatch is held``() =
+        withBridges 1 (fun bridges ->
+            let listener, url = List.exactlyOne bridges
+            let path = uniquePath "coalesced-registration-wakes"
+            let owner = $"owner-{Guid.NewGuid():N}"
+            let identity = nextIdentity ()
+            registerExactSession 'A' identity path url (Some owner) None |> ignore
+            runAsync (flushPending path)
+            let held = listener.GetContextAsync()
+            let message text =
+                { WorktreePath = path
+                  Target = SendTarget.DurableSession(SessionId owner)
+                  Prompt = Prompt.agentPrompt text }
+            let first = queue (message "held") |> Async.StartAsTask
+            let context = await held
+            [ 1..40 ] |> List.iter (fun index ->
+                registerExactSession 'A' identity path url (Some owner) None |> ignore
+                Assert.That(runAsync (queue (message $"queued-{index}")), Is.EqualTo SendResult.Queued))
+            Assert.That(
+                deliveryStatus path,
+                Is.EqualTo { QueuedMessages = 10; ActiveDrains = 1; PendingNotifications = 1 })
+            respond 200 context
+            let bodies =
+                [ for _ in 1..10 do
+                    let queued = await (listener.GetContextAsync())
+                    let body = readBody queued
+                    respond 200 queued
+                    yield body ]
+            Assert.That(await first, Is.EqualTo SendResult.Delivered)
+            runAsync (flushPending path)
+            Assert.That(
+                bodies,
+                Is.EqualTo([ 31..40 ] |> List.map (fun index -> serializePrompt (message $"queued-{index}").Prompt)))
+            Assert.That((deliveryStatus path).ActiveDrains, Is.Zero))
+
+    [<Test>]
+    member _.``Unverified location allows canvas but makes generic prompt and exact shutdown unavailable``() =
+        withTempCwd (fun () ->
+            withBridges 1 (fun bridges ->
+                let listener, url = List.exactlyOne bridges
+                let path = uniquePath "unverified-operations"
+                let identity = nextIdentity ()
+                let owner = $"owner-{Guid.NewGuid():N}"
+                runAsync (CanvasDocOwnership.assign path "report.html" (SessionId owner))
+                |> Result.defaultWith (fun _ -> failwith "owner save failed")
+                let entry =
+                    { validRequest identity path (Some owner) with InjectUrl = url; ParentProcessId = None }
+                    |> registerOrFail (ProcessIdentityResolver.create (fun _ -> Error "unavailable"))
+                let received = listener.GetContextAsync()
+                let canvas =
+                    queue
+                        { WorktreePath = path
+                          Target = SendTarget.DurableSession entry.SessionId
+                          Prompt = Prompt.canvasFor (PathUtils.normalizePath path) "report.html" canvasPayload }
+                    |> Async.StartAsTask
+                await received |> respond 200
+                Assert.That(await canvas, Is.EqualTo SendResult.Delivered)
+                Assert.That(
+                    await (deliverAgentPrompt path (SendTarget.DurableSession entry.SessionId) "generic"),
+                    Is.EqualTo DeliveryResult.NoLiveSession)
+                let shutdown =
+                    shutdownExactBatch
+                        (fun () -> async.Return(Ok Set.empty))
+                        [ { WorktreePath = path; SessionId = entry.SessionId; ProcessIdentity = identity } ]
+                    |> runAsync
+                Assert.That(
+                    shutdown |> List.map _.Outcome,
+                    Is.EqualTo([ Error ShutdownFailure.LocationUnavailable ]: Result<ShutdownCompletion, ShutdownFailure> list))
+                Assert.That(canvasSessionsForWorktree path, Is.EqualTo [ entry ])))
 
     [<Test>]
     member _.``cancelling one queued request preserves another with identical content``() =
         let path = uniquePath "cancel-exact-queued-prompt"
-        let prompt = Prompt.canvas canvasPayload
+        let prompt = Prompt.canvasFor (PathUtils.normalizePath path) "report.html" canvasPayload
         let request = { WorktreePath = path; Target = SendTarget.Unspecified; Prompt = prompt }
         use cancellation = new CancellationTokenSource()
         send cancellation.Token request |> Async.RunSynchronously |> ignore
         send CancellationToken.None request |> Async.RunSynchronously |> ignore
         cancellation.Cancel()
 
-        Assert.That(drainPendingCanvas path, Is.EqualTo([ prompt ]))
+        Assert.That(
+            runAsync (pendingPrompts path) |> List.map _.Prompt,
+            Is.EqualTo([ prompt ]))
 
     [<Test>]
     member _.``Bridge failure formatting excludes the response body``() =
@@ -581,6 +977,7 @@ let private stageName =
     let rejectionName =
         function
         | LifecycleDiagnostics.ShutdownRejection.MissingRegistration -> "missing-registration"
+        | LifecycleDiagnostics.ShutdownRejection.LocationUnavailable -> "location-unavailable"
         | LifecycleDiagnostics.ShutdownRejection.StaleRegistration -> "stale-registration"
         | LifecycleDiagnostics.ShutdownRejection.InvalidCapability -> "invalid-capability"
         | LifecycleDiagnostics.ShutdownRejection.NonLoopbackRequest -> "non-loopback"
@@ -599,10 +996,11 @@ let private stageName =
 let private runShutdownScenario (scenario: ShutdownScenario) =
     let identity = nextIdentity ()
     let path = uniquePath "exact-shutdown"
+    let sessionId = SessionId $"shutdown-{Guid.NewGuid():N}"
 
     let registeredAt =
         if scenario.Registered then
-            (registerExactSession 'A' identity path injectUrl None None).RegisteredAt
+            (registerExactSession 'A' identity path injectUrl (Some(SessionId.value sessionId)) None).RegisteredAt
         else
             DateTime.UtcNow
 
@@ -647,7 +1045,7 @@ let private runShutdownScenario (scenario: ShutdownScenario) =
             diagnostics.Enqueue
             dependencies
             waitOptions
-            [ { WorktreePath = path; ProcessIdentity = identity } ]
+            [ { WorktreePath = path; SessionId = sessionId; ProcessIdentity = identity } ]
         |> Async.RunSynchronously
 
     { Outcome = attempts |> List.exactlyOne |> _.Outcome
@@ -744,7 +1142,7 @@ type ExactShutdownTests() =
             let shutdown =
                 shutdownExactBatch
                     (fun () -> async { return Ok(Set.singleton identity) })
-                    [ { WorktreePath = entry.WorktreePath; ProcessIdentity = entry.ProcessIdentity } ]
+                    [ { WorktreePath = entry.WorktreePath; SessionId = entry.SessionId; ProcessIdentity = identity } ]
                 |> Async.StartAsTask
 
             let context = await received
@@ -773,14 +1171,17 @@ type ExactShutdownTests() =
 
         let targets =
             entries
-            |> List.map (fun entry -> { WorktreePath = entry.WorktreePath; ProcessIdentity = entry.ProcessIdentity })
+            |> List.map (fun entry ->
+                { WorktreePath = entry.WorktreePath
+                  SessionId = entry.SessionId
+                  ProcessIdentity = entry.ProcessIdentity.Value })
 
         let indexed projection =
             entries |> List.indexed |> List.map (fun (index, entry) -> projection entry, index) |> Map.ofList
 
-        let indexByIdentity = indexed _.ProcessIdentity
-        let indexByCapability = indexed (fun entry -> fakeShutdownCapability 'A' entry.ProcessIdentity)
-        let closedProcesses = entries |> List.take 30 |> List.map _.ProcessIdentity |> Set.ofList
+        let indexByIdentity = indexed _.ProcessIdentity.Value
+        let indexByCapability = indexed (fun entry -> fakeShutdownCapability 'A' entry.ProcessIdentity.Value)
+        let closedProcesses = entries |> List.take 30 |> List.map _.ProcessIdentity.Value |> Set.ofList
         let probeCounts = ConcurrentDictionary<ProcessIdentity, int>()
         let release () = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
         let probeRelease, requestRelease = release (), release ()

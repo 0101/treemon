@@ -4,6 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
+import { createBrowserCanvasRoutes } from "./browser-canvas-routes.mjs";
 import { isValidCanvasFilename } from "./canvas-filename.mjs";
 import { isSystemViewFilename } from "./canvas-doc-kinds.mjs";
 import {
@@ -39,7 +40,7 @@ if (window.parent === window) {
   window.__canvasTopLevelTransportAvailable = true;
   window.addEventListener('message', function(e) {
     if (e.source === window && e.data && typeof e.data.action === 'string') {
-      fetch('http://127.0.0.1:__PORT__/_message', {
+      fetch(__MESSAGE_URL__, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(e.data)
@@ -53,7 +54,7 @@ const CONTENT_POLL_SCRIPT = `<script>
 (function() {
   var lastHash = null;
   setInterval(function() {
-    fetch(location.href + '/hash').then(r => r.text()).then(function(hash) {
+    fetch(__HASH_URL__).then(r => r.text()).then(function(hash) {
       if (lastHash && hash !== lastHash) location.reload();
       lastHash = hash;
     }).catch(function() {});
@@ -61,7 +62,8 @@ const CONTENT_POLL_SCRIPT = `<script>
 })();
 </script>`;
 
-const CANVAS_DIR = resolve(process.cwd(), ".agents", "canvas");
+const worktreePath = process.cwd();
+const CANVAS_DIR = resolve(worktreePath, ".agents", "canvas");
 
 const { enqueue: enqueueSend, enqueueAndWait: sendStartupPrompt } = createSendQueue({ log });
 
@@ -77,23 +79,20 @@ function hashContent(content) {
   return createHash("sha256").update(content, "utf-8").digest("hex");
 }
 
-function injectScripts(html, port, filename) {
-  const shim = TRANSPORT_SHIM.replaceAll("__PORT__", String(port));
+function injectScripts(html, route, filename) {
+  const shim = TRANSPORT_SHIM
+    .replace("__MESSAGE_URL__", JSON.stringify(route.messagePath));
+  const contentPoll =
+    CONTENT_POLL_SCRIPT.replace("__HASH_URL__", JSON.stringify(route.hashPath));
   const agentDocScripts =
     isSystemViewFilename(filename)
       ? ""
       : "\n" + CANVAS_SEND_SCRIPT + "\n" + CANVAS_SELECTION_CONTEXT_SCRIPT;
-  const scripts = shim + agentDocScripts + "\n" + CONTENT_POLL_SCRIPT;
+  const scripts = shim + agentDocScripts + "\n" + contentPoll;
   if (html.includes("</head>")) {
     return html.replace("</head>", scripts + "\n</head>");
   }
   return scripts + "\n" + html;
-}
-
-function parseCanvasRoute(url) {
-  const match = url.match(/^\/canvas\/([^/]+)(\/hash)?$/);
-  if (!match) return null;
-  return { filename: decodeURIComponent(match[1]), isHash: !!match[2] };
 }
 
 function serverPort(server) {
@@ -104,13 +103,13 @@ function serverPort(server) {
   return address.port;
 }
 
-// Guard the local injection endpoints (/inject, /_message) against cross-origin abuse. Requiring
+// Guard the local injection endpoints (/inject and capability-bound canvas messages) against cross-origin abuse. Requiring
 // application/json turns any cross-origin browser POST into a preflighted (non-simple) request that
 // this server never answers, so the browser blocks it and the text/plain simple-request bypass is
 // closed; rejecting a present, non-loopback Origin is defense-in-depth. Legitimate callers comply:
-// Treemon POSTs /inject as application/json with no Origin, and the served-doc shim POSTs /_message
-// same-origin as application/json.
-function startHttpServer(session, state, shutdownCapability) {
+// Treemon POSTs /inject as application/json with no Origin, and the served-doc shim posts its
+// capability-bound message route same-origin as application/json.
+function startHttpServer(session, state, shutdownCapability, browserCanvasRoutes) {
   return new Promise((resolvePromise, reject) => {
     const routineShutdown =
       typeof session.rpc?.shutdown === "function"
@@ -165,9 +164,10 @@ function startHttpServer(session, state, shutdownCapability) {
       }
 
       if (state.browserMode) {
-        if (req.method === "POST" && req.url === "/_message") {
+        const canvasRoute = browserCanvasRoutes.parse(req.url);
+        if (req.method === "POST" && canvasRoute?.kind === "message") {
           if (!isTrustedInjectionHeaders(req.headers)) {
-            log(`/_message rejected: untrusted request (content-type=${req.headers["content-type"] ?? ""}, origin=${req.headers["origin"] ?? ""})`);
+            log(`/canvas message rejected: untrusted request (content-type=${req.headers["content-type"] ?? ""}, origin=${req.headers["origin"] ?? ""})`);
             res.writeHead(403, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: "forbidden" }));
             return;
@@ -178,10 +178,13 @@ function startHttpServer(session, state, shutdownCapability) {
             res.end(JSON.stringify({ ok: false, error: "payload too large" }));
             return;
           }
-          log(`/_message received: payload length=${body.length}`);
+          log(`/canvas message received: payload length=${body.length}`);
           let transport;
           try {
-            transport = promptForCanvasMessage(body);
+            transport = promptForCanvasMessage(body, {
+              worktreePath,
+              filename: canvasRoute.filename,
+            });
           } catch (err) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: err.message }));
@@ -193,25 +196,18 @@ function startHttpServer(session, state, shutdownCapability) {
           return;
         }
 
-        const canvasRoute = parseCanvasRoute(req.url);
-        if (req.method === "GET" && canvasRoute) {
-          if (!isValidCanvasFilename(canvasRoute.filename)) {
-            res.writeHead(400, { "Content-Type": "text/plain" });
-            res.end("Bad Request: invalid filename");
-            return;
-          }
+        if (req.method === "GET" && canvasRoute?.kind !== "message" && canvasRoute) {
           try {
             const content = await readCanvasFile(canvasRoute.filename);
-            if (canvasRoute.isHash) {
+            if (canvasRoute.kind === "hash") {
               res.writeHead(200, { "Content-Type": "text/plain" });
               res.end(hashContent(content));
             } else {
-              const port = serverPort(server);
               res.writeHead(200, {
                 "Content-Type": "text/html; charset=utf-8",
                 "Content-Security-Policy": "frame-ancestors 'none'",
               });
-              res.end(injectScripts(content, port, canvasRoute.filename));
+              res.end(injectScripts(content, canvasRoute, canvasRoute.filename));
             }
           } catch (err) {
             if (err.code === "ENOENT") {
@@ -343,7 +339,7 @@ function startHeartbeat(registration) {
 // attribution path; the server's file-watcher is fallback-only) — the extension stamps in its own
 // sessionId, the agent only supplied the filename. Browser mode serves the doc locally without
 // injecting write notifications into the agent session.
-async function handleCanvasWrite(state, filename) {
+async function handleCanvasWrite(state, browserCanvasRoutes, filename) {
   if (!isValidCanvasFilename(filename)) {
     log(`canvas write: ignoring unsafe filename ${JSON.stringify(filename)}`);
     return;
@@ -357,11 +353,10 @@ async function handleCanvasWrite(state, filename) {
     return;
   }
 
-  const url = `http://127.0.0.1:${state.port}/canvas/${encodeURIComponent(filename)}`;
+  const url = browserCanvasRoutes.documentUrl(state.port, filename);
   log(`canvas write: serving ${filename} in browser mode → ${url}`);
 }
 
-const worktreePath = process.cwd();
 /**
  * @type {{
  *   browserMode: boolean,
@@ -443,8 +438,9 @@ const parentProcessId = process.ppid;
 const terminalSessionId =
   process.env.TREEMON_TERMINAL_SESSION_ID?.trim() || undefined;
 const shutdownCapability = randomBytes(32).toString("base64url");
+const browserCanvasRoutes = createBrowserCanvasRoutes();
 const { server, port } =
-  await startHttpServer(session, extensionState, shutdownCapability);
+  await startHttpServer(session, extensionState, shutdownCapability, browserCanvasRoutes);
 extensionState.port = port;
 const injectUrl = `http://127.0.0.1:${port}/inject`;
 const shutdownUrl = `http://127.0.0.1:${port}/shutdown`;
@@ -463,7 +459,7 @@ extensionState.browserMode = browserMode;
 Object.freeze(extensionState);
 
 // State is frozen and valid; start handling canvas writes (flushing any buffered during startup).
-canvasWrites.activate((write) => handleCanvasWrite(extensionState, write));
+canvasWrites.activate((write) => handleCanvasWrite(extensionState, browserCanvasRoutes, write));
 
 if (browserMode) {
   const reason = !registered.reachable ? "Treemon unreachable" : "directory not monitored by Treemon";

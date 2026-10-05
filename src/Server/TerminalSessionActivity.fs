@@ -77,6 +77,15 @@ let internal queryOwnedSessions
             terminalSessionIds
     )
 
+let internal tryFindCurrentSessionForTerminal now worktreePath terminalId instances =
+    instances
+    |> Seq.filter (fun instance ->
+        instance.WorktreePath = worktreePath && StoredInstance.isOpenAt now instance)
+    |> joinOwnedInstances (Set.singleton terminalId)
+    |> List.map snd
+    |> StoredInstance.tryMostRecentActivity
+    |> Option.map _.SessionId
+
 let private terminalOrigin (tab: EmbeddedTerminalTab) =
     tab.Id
     |> EmbeddedTerminalId.value
