@@ -4,6 +4,9 @@ open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
 open System
 open System.Threading
+open System.Threading.Tasks
+open Microsoft.AspNetCore.Http
+open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Hosting
 open Microsoft.Extensions.Logging
 open Shared
@@ -44,6 +47,28 @@ let readAppVersion () =
 
 let internal configureLogging (builder: ILoggingBuilder) =
     builder.AddFilter("Microsoft.AspNetCore", LogLevel.Warning) |> ignore
+
+let internal shutdownHandler (processId: int) (stopApplication: unit -> unit) : HttpHandler =
+    fun next ctx ->
+        let localCaller =
+            ctx.Connection.RemoteIpAddress
+            |> Option.ofObj
+            |> Option.exists Net.IPAddress.IsLoopback
+
+        if not localCaller
+           || not (HttpSecurity.isLoopbackHost ctx.Request.Host.Host)
+           || ctx.Request.Headers.ContainsKey "Origin"
+           || ctx.Request.Headers.ContainsKey "Referer" then
+            RequestErrors.FORBIDDEN "Shutdown requires a local non-browser request" next ctx
+        elif ctx.Request.Headers["X-Treemon-Process-Id"].ToString() <> string processId then
+            RequestErrors.CONFLICT "Server process identity does not match" next ctx
+        else
+            ctx.Response.OnCompleted(
+                Func<Task>(fun () ->
+                    stopApplication ()
+                    Task.CompletedTask)
+            )
+            (setStatusCode StatusCodes.Status202Accepted >=> text "Shutdown accepted") next ctx
 
 [<RequireQualifiedAccess>]
 type ServerMode =
@@ -735,7 +760,11 @@ let main args =
         choose (
             canvasAgentRoutes
             @ sessionActivityRoutes
-            @ [ route "/api/canvas/bridge-status" >=> GET >=> CanvasDocServer.bridgeStatusHandler
+            @ [ route "/api/server/shutdown" >=> POST
+                >=> fun next ctx ->
+                    let lifetime = ctx.RequestServices.GetRequiredService<IHostApplicationLifetime>()
+                    shutdownHandler Environment.ProcessId lifetime.StopApplication next ctx
+                route "/api/canvas/bridge-status" >=> GET >=> CanvasDocServer.bridgeStatusHandler
                 // CSRF hardening: the Fable.Remoting surface has no auth/CSRF token and does not
                 // enforce a content type, so a cross-origin page could POST to state-changing
                 // methods (e.g. createWorktree, which auto-launches a coding agent). The guard

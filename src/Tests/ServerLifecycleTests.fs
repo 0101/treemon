@@ -5,9 +5,11 @@ open System.Collections.Concurrent
 open System.IO
 open System.Threading
 open System.Threading.Tasks
+open Giraffe
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Logging
 open Microsoft.Extensions.Options
+open Microsoft.AspNetCore.Http
 open NUnit.Framework
 open Program
 open Shared
@@ -34,6 +36,36 @@ let private serverConfig arguments =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type ServerLifecycleTests() =
+
+    [<TestCase("127.0.0.1", "localhost", "", "", 0, 409)>]
+    [<TestCase("127.0.0.1", "localhost", "http://localhost", "", 123, 403)>]
+    [<TestCase("127.0.0.1", "localhost", "", "http://localhost/", 123, 403)>]
+    [<TestCase("192.0.2.1", "localhost", "", "", 123, 403)>]
+    [<TestCase("127.0.0.1", "attacker.example", "", "", 123, 403)>]
+    member _.``shutdown rejects browser remote and wrong-process requests``
+        (remote: string, host: string, origin: string, referer: string, expectedProcess: int, expectedStatus: int) =
+        let services = ServiceCollection()
+        services.AddGiraffe() |> ignore
+        use provider = services.BuildServiceProvider()
+        use response = new MemoryStream()
+        let context = DefaultHttpContext()
+        context.RequestServices <- provider
+        context.Connection.RemoteIpAddress <- Net.IPAddress.Parse remote
+        context.Request.Host <- HostString host
+        context.Response.Body <- response
+        context.Request.Headers["X-Treemon-Process-Id"] <- string expectedProcess
+        if origin <> "" then context.Request.Headers["Origin"] <- origin
+        if referer <> "" then context.Request.Headers["Referer"] <- referer
+        let stopped = TaskCompletionSource<unit>()
+
+        shutdownHandler 123 (fun () -> stopped.SetResult())
+            (fun _ -> Task.FromResult None)
+            context
+        |> _.GetAwaiter().GetResult()
+        |> ignore
+
+        Assert.That(context.Response.StatusCode, Is.EqualTo expectedStatus)
+        Assert.That(stopped.Task.IsCompleted, Is.False)
 
     [<Test>]
     member _.``ASP.NET request diagnostics require warning level``() =
