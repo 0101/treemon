@@ -410,6 +410,94 @@ try {
     Write-Host "PASS: exact-process shutdown waits for graceful exit and refuses unrelated processes"
 
     & {
+        $PublishDir = Join-Path $root "shutdown-response"
+        $process = [pscustomobject]@{
+            Id = 123
+            Handle = 0
+            Path = Join-Path $PublishDir "Treemon.exe"
+            HasExited = $false
+        }
+        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+            param($timeout)
+            $script:shutdownResponseEvents += "wait-$timeout"
+            return $true
+        }
+        function Stop-Process {
+            [CmdletBinding()]
+            param([int]$Id, [switch]$Force)
+            $script:shutdownResponseEvents += "force-$Id"
+        }
+
+        $scenarios = @(
+            @{
+                Name = "incomplete shutdown acceptance"
+                Response = "HTTP/1.1 202 Accepted`r`nContent-Length: 17`r`nConnection: close`r`n`r`nShutdown"
+                ExpectedError = "Production shutdown response could not be confirmed; the server was not force-stopped"
+                ExpectedEvents = ""
+            },
+            @{
+                Name = "explicit legacy endpoint absence"
+                Response = "HTTP/1.1 404 Not Found`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
+                ExpectedError = $null
+                ExpectedEvents = "force-123|wait-10000"
+            }
+        )
+        foreach ($scenario in $scenarios) {
+            $DefaultPort = Get-TestPort
+            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $DefaultPort)
+            $listener.Start()
+            $responder = [PowerShell]::Create()
+            try {
+                $null = $responder.AddScript({
+                    param($listener, $response)
+                    $ErrorActionPreference = "Stop"
+                    $client = $listener.AcceptTcpClientAsync().
+                        WaitAsync([TimeSpan]::FromSeconds(10)).GetAwaiter().GetResult()
+                    try {
+                        $client.ReceiveTimeout = 5000
+                        $client.SendTimeout = 5000
+                        $stream = $client.GetStream()
+                        $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII)
+                        try {
+                            $headers = @()
+                            do {
+                                $line = $reader.ReadLine()
+                                if ($null -eq $line) { throw "Shutdown fixture did not receive complete request headers" }
+                                $headers += $line
+                            } while ($line.Length -gt 0)
+                            $bytes = [Text.Encoding]::ASCII.GetBytes($response)
+                            $stream.Write($bytes, 0, $bytes.Length)
+                            return $headers
+                        } finally {
+                            $reader.Dispose()
+                        }
+                    } finally {
+                        $client.Dispose()
+                    }
+                }).AddArgument($listener).AddArgument($scenario.Response)
+                $pending = $responder.BeginInvoke()
+                $script:shutdownResponseEvents = @()
+                $shutdownError = $null
+                try { Stop-ProductionProcess $process } catch { $shutdownError = $_.Exception.Message }
+                $headers = @($responder.EndInvoke($pending))
+                Assert-True (
+                    -not $responder.HadErrors -and
+                    $headers[0] -ceq "POST /api/server/shutdown HTTP/1.1" -and
+                    $headers -contains "X-Treemon-Process-Id: 123"
+                ) "The $($scenario.Name) fixture did not receive the exact-process shutdown request"
+                Assert-True (
+                    $shutdownError -ceq $scenario.ExpectedError -and
+                    ($script:shutdownResponseEvents -join "|") -ceq $scenario.ExpectedEvents
+                ) "Unexpected process-stop behavior for $($scenario.Name): error='$shutdownError', events='$($script:shutdownResponseEvents -join "|")'"
+            } finally {
+                $listener.Stop()
+                $responder.Dispose()
+            }
+        }
+    }
+    Write-Host "PASS: incomplete shutdown acceptance aborts without force, while explicit 404 retains the legacy stop"
+
+    & {
         $ScriptDir = Join-Path $root "sqlite-recovery"
         $DefaultPort = Get-TestPort
         $dataDirectory = Join-Path $ScriptDir "data"

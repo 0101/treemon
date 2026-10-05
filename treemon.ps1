@@ -931,7 +931,9 @@ function Request-ProductionShutdown([int]$ProcessId) {
                 $response.Dispose()
             }
         } catch [Net.Http.HttpRequestException] {
-            Write-Host "The production shutdown endpoint is unreachable; using an exact-process stop." -ForegroundColor Yellow
+            throw [InvalidOperationException]::new(
+                "Production shutdown response could not be confirmed; the server was not force-stopped",
+                $_.Exception)
         } catch [Threading.Tasks.TaskCanceledException] {
             throw "Production shutdown request timed out; the server was not force-stopped"
         }
