@@ -118,8 +118,13 @@ function Get-RunningPid {
     $savedPid = (Get-Content $PidFile -Raw).Trim()
     if (-not $savedPid) { return $null }
     $process = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
-    if ($process -and -not $process.HasExited) { return [int]$savedPid }
-    return $null
+    if (-not $process) { return $null }
+    try {
+        if (-not $process.HasExited) { return [int]$savedPid }
+        return $null
+    } finally {
+        $process.Dispose()
+    }
 }
 
 function Build-Frontend([string]$Destination = $WwwRoot) {
@@ -498,21 +503,16 @@ function Stage-TerminalHost(
     }
 }
 
-# True when a TCP port can be bound on loopback (i.e. nothing is listening). Mirrors how the
-# canvas doc server binds (IPAddress.Loopback), and avoids the slow first-call cost of
-# Get-NetTCPConnection so it's cheap to poll on the start hot-path.
+# Observe IPv4 and IPv6 listeners without binding a probe socket during shutdown.
+# Lingering connections are not listeners; startup separately verifies the new server's bind.
 function Test-PortFree([int]$Port) {
-    try {
-        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
-        $listener.Start()
-        $listener.Stop()
-        return $true
-    } catch {
-        return $false
+    foreach ($endpoint in [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()) {
+        if ($endpoint.Port -eq $Port) { return $false }
     }
+    return $true
 }
 
-# Poll until a TCP port is bindable, up to $TimeoutSec. Returns $true when free, $false on timeout.
+# Poll until no TCP listener remains, up to $TimeoutSec.
 function Wait-PortFree([int]$Port, [int]$TimeoutSec = 10) {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ($true) {
@@ -632,26 +632,36 @@ function Test-PathWithin([string]$Path, [string]$Directory) {
     return $fullPath.StartsWith($prefix, $comparison)
 }
 
+function Move-DeploymentDirectory([string]$Source, [string]$Destination, [int]$TimeoutSec = 10) {
+    $sourcePath = [IO.Path]::GetFullPath($Source)
+    $destinationPath = [IO.Path]::GetFullPath($Destination)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+    while ($true) {
+        try {
+            [IO.Directory]::Move($sourcePath, $destinationPath)
+            return
+        } catch [IO.IOException], [UnauthorizedAccessException] {
+            $code = $_.Exception.GetBaseException().HResult -band 0xffff
+            if ($code -notin @(5, 32, 33) -or [DateTime]::UtcNow -ge $deadline) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 function Install-PreparedDirectory([string]$Candidate, [string]$Destination) {
     $backup = "$Destination.backup-$([Guid]::NewGuid().ToString('N'))"
     $hadDestination = Test-Path -LiteralPath $Destination
     if ($hadDestination) {
-        [IO.Directory]::Move(
-            [IO.Path]::GetFullPath($Destination),
-            [IO.Path]::GetFullPath($backup))
+        Move-DeploymentDirectory $Destination $backup
     }
 
     try {
-        [IO.Directory]::Move(
-            [IO.Path]::GetFullPath($Candidate),
-            [IO.Path]::GetFullPath($Destination))
+        Move-DeploymentDirectory $Candidate $Destination
     } catch {
         if ($hadDestination -and
             -not (Test-Path -LiteralPath $Destination) -and
             (Test-Path -LiteralPath $backup)) {
-            [IO.Directory]::Move(
-                [IO.Path]::GetFullPath($backup),
-                [IO.Path]::GetFullPath($Destination))
+            Move-DeploymentDirectory $backup $Destination
         }
         throw
     }
@@ -767,7 +777,7 @@ function Start-ProductionProcess(
     # The server binds two Kestrel hosts: the dashboard on $DefaultPort and the canvas doc server on
     # $CanvasPort. If a port is still held when we launch — e.g. the previous server hasn't released
     # it yet after a restart — the dashboard surfaces the failure (it exits), but the canvas doc host
-    # fails SILENTLY, leaving every canvas doc unable to load. Wait for both to clear, warn if not.
+    # fails SILENTLY, leaving every canvas doc unable to load. Wait for both listeners to exit.
     foreach ($p in @($DefaultPort, $CanvasPort)) {
         if (-not (Wait-PortFree $p 10)) {
             $holder = (Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
@@ -779,6 +789,7 @@ function Start-ProductionProcess(
         }
     }
 
+    Repair-ProductionSqliteSharedMemory
     $serverExe = Join-Path $PublishDir "Treemon.exe"
     $rootArgs = ($effectiveRoots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
     $serverArgs = if ($rootArgs) { "$rootArgs --port $DefaultPort --production-log" } else { "--port $DefaultPort --production-log" }
@@ -883,8 +894,7 @@ function Stop-ProductionServer {
     }
 
     Write-Host "Stopping production server (PID: $runningPid)..." -ForegroundColor Yellow
-    Stop-Process -Id $runningPid -Force -ErrorAction SilentlyContinue
-    Remove-Item $PidFile -ErrorAction SilentlyContinue
+    Stop-ProductionPortListeners
     Write-Host "Production server stopped" -ForegroundColor Green
 }
 
@@ -892,27 +902,126 @@ function Restart-ProductionServer([string[]]$Roots) {
     Assert-ExternalProductionLifecycle "restart Treemon production"
     Write-Host "Restarting server..." -ForegroundColor Cyan
     Stop-ProductionServer
-    Start-Sleep -Seconds 1
     Start-ProductionServer $Roots
 }
 
+function Request-ProductionShutdown([int]$ProcessId) {
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.UseProxy = $false
+    $handler.AllowAutoRedirect = $false
+    $client = [Net.Http.HttpClient]::new($handler, $true)
+    $client.Timeout = [TimeSpan]::FromSeconds(5)
+    $request = [Net.Http.HttpRequestMessage]::new(
+        [Net.Http.HttpMethod]::Post,
+        "http://127.0.0.1:$DefaultPort/api/server/shutdown")
+    $request.Headers.Add("X-Treemon-Process-Id", [string]$ProcessId)
+    $accepted = $false
+    try {
+        try {
+            $response = $client.SendAsync($request).GetAwaiter().GetResult()
+            try {
+                if ($response.StatusCode -eq [Net.HttpStatusCode]::Accepted) {
+                    $accepted = $true
+                } elseif ($response.StatusCode -eq [Net.HttpStatusCode]::NotFound) {
+                    Write-Host "The running server does not support graceful shutdown; using an exact-process stop." -ForegroundColor Yellow
+                } else {
+                    throw "Production shutdown was rejected (HTTP $([int]$response.StatusCode)); the server was not force-stopped"
+                }
+            } finally {
+                $response.Dispose()
+            }
+        } catch [Net.Http.HttpRequestException] {
+            Write-Host "The production shutdown endpoint is unreachable; using an exact-process stop." -ForegroundColor Yellow
+        } catch [Threading.Tasks.TaskCanceledException] {
+            throw "Production shutdown request timed out; the server was not force-stopped"
+        }
+    } finally {
+        $request.Dispose()
+        $client.Dispose()
+    }
+    return $accepted
+}
+
+function Stop-ProductionProcess($Process) {
+    if ($Process.HasExited) { return }
+    # Keep the captured process handle so PID reuse cannot redirect the exit check or forced stop.
+    $null = $Process.Handle
+    $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $PublishDir "Treemon.exe"))
+    if (-not [string]::Equals($Process.Path, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to stop non-production process PID $($Process.Id) on port $DefaultPort"
+    }
+
+    if (Request-ProductionShutdown $Process.Id) {
+        Write-Host "Waiting for production PID $($Process.Id) to finish graceful shutdown..." -ForegroundColor Gray
+        if (-not $Process.WaitForExit(30000)) {
+            throw "Production PID $($Process.Id) did not exit within 30s after accepting shutdown; deployment was stopped"
+        }
+    } elseif (-not $Process.HasExited) {
+        Write-Host "Stopping production process PID $($Process.Id)..." -ForegroundColor Yellow
+        Stop-Process -Id $Process.Id -Force -ErrorAction Stop
+        if (-not $Process.WaitForExit(10000)) {
+            throw "Production PID $($Process.Id) did not exit within 10s after a forced stop"
+        }
+    }
+}
+
+function Repair-ProductionSqliteSharedMemory {
+    $database = Join-Path $ScriptDir "data\session-activity-$DefaultPort.db"
+    $sharedMemory = "$database-shm"
+    if (-not (Test-Path -LiteralPath $sharedMemory)) { return }
+    if (-not (Test-Path -LiteralPath $database -PathType Leaf)) {
+        throw "Cannot preserve orphaned SQLite shared memory: its database is missing"
+    }
+
+    # Exclusive database/WAL handles exclude live SQLite connections while the stale index is moved.
+    # The index can stay mapped by an exited process; never truncate it or remove the durable WAL.
+    $guards = @()
+    try {
+        $guards += [IO.FileStream]::new(
+            $database, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        if (Test-Path -LiteralPath "$database-wal" -PathType Leaf) {
+            $guards += [IO.FileStream]::new(
+                "$database-wal", [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        }
+        $preserved = "$sharedMemory.stale-$([Guid]::NewGuid().ToString('N'))"
+        Move-Item -LiteralPath $sharedMemory -Destination $preserved
+        Write-Host "Preserved orphaned SQLite shared memory: $preserved (database and WAL unchanged)." -ForegroundColor Gray
+    } finally {
+        foreach ($guard in $guards) { $guard.Dispose() }
+    }
+}
+
 function Stop-ProductionPortListeners {
+    $savedPid = Get-RunningPid
     $listenerPids = @(
         Get-NetTCPConnection -LocalPort $DefaultPort -State Listen -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty OwningProcess -Unique |
-            Where-Object { $_ -gt 0 }
-    )
+            Select-Object -ExpandProperty OwningProcess
+        $savedPid
+    ) |
+        Sort-Object -Unique |
+        Where-Object { $_ -gt 0 }
 
     $listenerPids | ForEach-Object {
-        Write-Host "Stopping process on production port $DefaultPort (PID: $_)..." -ForegroundColor Yellow
-        Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+        $process = Get-Process -Id $_ -ErrorAction SilentlyContinue
+        if ($process) {
+            try {
+                Stop-ProductionProcess $process
+            } finally {
+                $process.Dispose()
+            }
+        }
     }
-
-    Remove-Item $PidFile -ErrorAction SilentlyContinue
 
     if (-not (Wait-PortFree $DefaultPort 10)) {
-        throw "Production port $DefaultPort is still in use after stopping its listener"
+        $remaining = @(
+            Get-NetTCPConnection -LocalPort $DefaultPort -State Listen -ErrorAction SilentlyContinue |
+                ForEach-Object { "$($_.LocalAddress) (PID: $($_.OwningProcess))" }
+        )
+        throw "Production port $DefaultPort still has a TCP listener after 10s: $($remaining -join ', ')"
     }
+
+    Repair-ProductionSqliteSharedMemory
+    Remove-Item $PidFile -ErrorAction SilentlyContinue
 }
 
 function Show-Status {

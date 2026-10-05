@@ -1,3 +1,5 @@
+param([switch]$StartupOnly, [switch]$ShutdownOnly)
+
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $repoRoot "treemon.ps1")
@@ -144,6 +146,69 @@ function Stop-TestHost($Process, $Manifest) {
     }
 }
 
+function Test-IsolatedProductionShutdown([string]$Executable, [string]$Directory) {
+    $DefaultPort = Get-TestPort
+    $PublishDir = Split-Path -Parent $Executable
+    $config = Join-Path $Directory "config"
+    New-Item -ItemType Directory -Path $config -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $Directory "wwwroot") | Out-Null
+    Set-Content -LiteralPath (Join-Path $config "config.json") -Value '{"worktreeRoots":[]}'
+    $startInfo = [Diagnostics.ProcessStartInfo]::new($Executable)
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WorkingDirectory = $Directory
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.Environment["TREEMON_CONFIG_DIR"] = $config
+    $startInfo.Environment["TREEMON_TERMINAL_HOST_STATE_DIR"] = Join-Path $Directory "host-state"
+    $startInfo.Environment["TREEMON_TERMINAL_HOST_EXECUTABLE"] = Join-Path $PublishDir "terminal-host\TerminalHost.exe"
+    foreach ($argument in @("--port", "$DefaultPort", "--no-canvas", "--log-dir", (Join-Path $Directory "logs"))) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $process = [Diagnostics.Process]::Start($startInfo)
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    try {
+        Assert-True (Wait-ProductionListening $process $DefaultPort 30) "Isolated shutdown fixture did not listen"
+        $wrongProcessRefused = $false
+        try { Request-ProductionShutdown 0 | Out-Null } catch {
+            $wrongProcessRefused = $_.Exception.Message -ceq
+                "Production shutdown was rejected (HTTP 409); the server was not force-stopped"
+        }
+        Assert-True (
+            $wrongProcessRefused -and -not $process.HasExited
+        ) "Wrong-process shutdown was not refused without stopping the fixture"
+
+        Stop-ProductionProcess $process
+        Assert-True (
+            $process.ExitCode -eq 0
+        ) "Graceful shutdown fixture failed: $($stderr.GetAwaiter().GetResult())"
+        $database = Join-Path $Directory "data\session-activity-$DefaultPort.db"
+        Assert-True (
+            (Test-Path -LiteralPath $database) -and
+            -not (Test-Path -LiteralPath "$database-wal") -and
+            -not (Test-Path -LiteralPath "$database-shm")
+        ) "Graceful shutdown did not checkpoint WAL and release shared memory"
+        $guard = [IO.FileStream]::new($database, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        $guard.Dispose()
+        $log = Get-ChildItem -LiteralPath (Join-Path $Directory "logs") -Filter "server-*.log" |
+            Select-Object -First 1 |
+            Get-Content -Raw
+        Assert-True (
+            $log.Contains("[Shutdown] Stopping session activity")
+        ) "The graceful HTTP shutdown did not drain the activity runtime"
+        Write-Host "PASS: published server accepts exact-process shutdown, drains SQLite, and leaves no WAL/SHM"
+    } finally {
+        if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            Assert-True ($process.WaitForExit(10000)) "Fixture-owned server survived cleanup"
+        }
+        Set-Content -LiteralPath (Join-Path $Directory "stdout.log") -Value $stdout.GetAwaiter().GetResult()
+        Set-Content -LiteralPath (Join-Path $Directory "stderr.log") -Value $stderr.GetAwaiter().GetResult()
+        $process.Dispose()
+    }
+}
+
 $root = Join-Path ([IO.Path]::GetTempPath()) "treemon-deploy-test-$([Guid]::NewGuid().ToString('N'))"
 $legacyPublish = Join-Path $root "legacy-active"
 $baseline = Join-Path $legacyPublish "terminal-host"
@@ -169,6 +234,289 @@ $embeddedListener = $null
 try {
     Remove-Item Env:\TREEMON_TERMINAL_SESSION_ID -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path $root | Out-Null
+
+    foreach ($address in @([Net.IPAddress]::Loopback, [Net.IPAddress]::IPv6Loopback)) {
+        $portListener = [Net.Sockets.TcpListener]::new($address, 0)
+        $client = [Net.Sockets.TcpClient]::new($address.AddressFamily)
+        $accepted = $null
+        try {
+            $portListener.Start()
+            $port = $portListener.LocalEndpoint.Port
+            Assert-True ($port -notin @(5000, 5001, 5002, 5174)) "Port fixture selected a reserved port"
+            Assert-True (-not (Wait-PortFree $port 0)) "An active $address listener counted as released"
+            $client.Connect($address, $port)
+            $accepted = $portListener.AcceptTcpClient()
+            $client.SendTimeout = 5000
+            $accepted.ReceiveTimeout = 5000
+            $portListener.Stop()
+            Assert-True (Wait-PortFree $port 0) "A lingering $address connection counted as a listener"
+            Assert-True (
+                $client.Client.Send([byte[]]@(42)) -eq 1 -and
+                $accepted.Client.Receive([byte[]]::new(1)) -eq 1
+            ) "The lingering connection fixture was not active"
+            $replacement = [Net.Sockets.TcpListener]::new($address, $port)
+            try {
+                $replacement.Start()
+                Assert-True (
+                    Wait-ProductionListening ([pscustomobject]@{ Id = $PID; HasExited = $false }) $port 5
+                ) "The replacement listener was not recognized while the old connection lingered"
+            } finally {
+                $replacement.Stop()
+            }
+        } finally {
+            if ($accepted) { $accepted.Dispose() }
+            $client.Dispose()
+            $portListener.Stop()
+        }
+        Assert-True (Wait-PortFree $port 0) "A closed $address connection counted as a listener"
+    }
+    Write-Host "PASS: port release observes IPv4/IPv6 listeners without counting lingering connections"
+
+    & {
+        $DefaultPort = Get-TestPort
+        $ScriptDir = $root
+        $PidFile = Join-Path $root "listener.pid"
+        $listenerConnections = @(
+            [pscustomobject]@{ LocalAddress = "127.0.0.1"; OwningProcess = 123 },
+            [pscustomobject]@{ LocalAddress = "::1"; OwningProcess = 123 }
+        )
+        $portReleased = $false
+        $script:listenerProcessPresent = $true
+        $script:stoppedListenerPids = @()
+
+        function Get-NetTCPConnection {
+            [CmdletBinding()]
+            param([int]$LocalPort, [string]$State)
+            Assert-True (
+                $LocalPort -eq $DefaultPort -and $State -ceq "Listen"
+            ) "Deployment queried connections other than the fixture's listeners"
+            return $listenerConnections
+        }
+        function Stop-Process {
+            [CmdletBinding()]
+            param([int]$Id, [switch]$Force)
+            $script:stoppedListenerPids += $Id
+        }
+        function Get-Process {
+            [CmdletBinding()]
+            param([int]$Id)
+            if (-not $script:listenerProcessPresent) { return $null }
+            $process = [pscustomobject]@{ Id = $Id; HasExited = $false }
+            $process | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+            return $process
+        }
+        function Stop-ProductionProcess($Process) {
+            Stop-Process -Id $Process.Id -Force
+        }
+        function Wait-PortFree([int]$Port, [int]$TimeoutSec) {
+            Assert-True (
+                $Port -eq $DefaultPort -and $TimeoutSec -eq 10
+            ) "Deployment did not wait for its listener shutdown"
+            return $portReleased
+        }
+
+        Set-Content -LiteralPath $PidFile -Value "123" -NoNewline
+        $shutdownError = $null
+        try {
+            Stop-ProductionPortListeners
+        } catch {
+            $shutdownError = $_.Exception.Message
+        }
+        Assert-True (
+            $shutdownError -ceq
+            "Production port $DefaultPort still has a TCP listener after 10s: 127.0.0.1 (PID: 123), ::1 (PID: 123)"
+        ) "Listener timeout omitted the remaining addresses or owning process"
+        Assert-True (
+            (Get-Content -LiteralPath $PidFile -Raw) -ceq "123" -and
+            ($script:stoppedListenerPids -join ",") -ceq "123"
+        ) "Failed shutdown removed the PID file or stopped a duplicate listener process"
+
+        $portReleased = $true
+        $script:stoppedListenerPids = @()
+        Stop-ProductionPortListeners
+        Assert-True (
+            -not (Test-Path -LiteralPath $PidFile) -and
+            ($script:stoppedListenerPids -join ",") -ceq "123"
+        ) "Successful shutdown did not remove the PID file after stopping the listener"
+
+        $listenerConnections = @()
+        $script:listenerProcessPresent = $false
+        $script:stoppedListenerPids = @()
+        Set-Content -LiteralPath $PidFile -Value "123" -NoNewline
+        Stop-ProductionPortListeners
+        Assert-True (
+            -not (Test-Path -LiteralPath $PidFile) -and
+            $script:stoppedListenerPids.Count -eq 0
+        ) "An already-stopped server triggered another process stop or kept its stale PID file"
+    }
+    Write-Host "PASS: listener shutdown reports remaining owners and preserves failed-shutdown state"
+
+    & {
+        $PublishDir = Join-Path $root "process-stop"
+        $process = [pscustomobject]@{
+            Id = 123
+            Path = Join-Path $PublishDir "Treemon.exe"
+            HasExited = $false
+        }
+        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+            param($timeout)
+            $script:shutdownEvents += "wait-$timeout"
+            return $script:shutdownExitConfirmed
+        }
+        function Request-ProductionShutdown([int]$ProcessId) {
+            $script:shutdownEvents += "request-$ProcessId"
+            return $script:shutdownAccepted
+        }
+        function Stop-Process {
+            [CmdletBinding()]
+            param([int]$Id, [switch]$Force)
+            $script:shutdownEvents += "force-$Id"
+        }
+
+        $script:shutdownAccepted = $true
+        $script:shutdownExitConfirmed = $true
+        $script:shutdownEvents = @()
+        Stop-ProductionProcess $process
+        Assert-True (
+            ($script:shutdownEvents -join "|") -ceq "request-123|wait-30000"
+        ) "Accepted graceful shutdown forced the process or did not wait for its exit"
+
+        $script:shutdownExitConfirmed = $false
+        $script:shutdownEvents = @()
+        $timeoutError = $null
+        try { Stop-ProductionProcess $process } catch { $timeoutError = $_.Exception.Message }
+        Assert-True (
+            $timeoutError -ceq "Production PID 123 did not exit within 30s after accepting shutdown; deployment was stopped" -and
+            ($script:shutdownEvents -join "|") -ceq "request-123|wait-30000"
+        ) "A graceful shutdown timeout triggered a forced stop or lost its diagnostic"
+
+        $script:shutdownAccepted = $false
+        $script:shutdownExitConfirmed = $true
+        $script:shutdownEvents = @()
+        Stop-ProductionProcess $process
+        Assert-True (
+            ($script:shutdownEvents -join "|") -ceq "request-123|force-123|wait-10000"
+        ) "Legacy shutdown did not force only the exact process and await its exit"
+
+        $process.Path = Join-Path $root "unrelated.exe"
+        $script:shutdownEvents = @()
+        $unrelatedError = $null
+        try { Stop-ProductionProcess $process } catch { $unrelatedError = $_.Exception.Message }
+        Assert-True (
+            $unrelatedError -ceq "Refusing to stop non-production process PID 123 on port $DefaultPort" -and
+            $script:shutdownEvents.Count -eq 0
+        ) "An unrelated port owner was sent a shutdown request or force-stopped"
+    }
+    Write-Host "PASS: exact-process shutdown waits for graceful exit and refuses unrelated processes"
+
+    & {
+        $ScriptDir = Join-Path $root "sqlite-recovery"
+        $DefaultPort = Get-TestPort
+        $dataDirectory = Join-Path $ScriptDir "data"
+        New-Item -ItemType Directory -Path $dataDirectory -Force | Out-Null
+        $database = Join-Path $dataDirectory "session-activity-$DefaultPort.db"
+        $sharedMemory = "$database-shm"
+        [IO.File]::WriteAllBytes($database, [byte[]]@(1, 2, 3))
+        [IO.File]::WriteAllBytes("$database-wal", [byte[]]@(4, 5, 6))
+        [IO.File]::WriteAllBytes($sharedMemory, [byte[]]@(7, 8, 9))
+        $reader = [IO.FileStream]::new($database, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        try {
+            $inUseRefused = $false
+            try { Repair-ProductionSqliteSharedMemory } catch { $inUseRefused = $true }
+            Assert-True (
+                $inUseRefused -and (Test-Path -LiteralPath $sharedMemory) -and
+                @(Get-ChildItem -LiteralPath $dataDirectory -Filter "*.stale-*").Count -eq 0
+            ) "SQLite recovery changed shared memory while a database reader was open"
+        } finally {
+            $reader.Dispose()
+        }
+
+        $walReader = [IO.FileStream]::new("$database-wal", [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        try {
+            $inUseRefused = $false
+            try { Repair-ProductionSqliteSharedMemory } catch { $inUseRefused = $true }
+            Assert-True (
+                $inUseRefused -and (Test-Path -LiteralPath $sharedMemory)
+            ) "SQLite recovery changed shared memory while the WAL was open"
+        } finally {
+            $walReader.Dispose()
+        }
+
+        $stream = [IO.FileStream]::new(
+            $sharedMemory, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        $mapping = [IO.MemoryMappedFiles.MemoryMappedFile]::CreateFromFile(
+            $stream, [NullString]::Value, 0, [IO.MemoryMappedFiles.MemoryMappedFileAccess]::ReadWrite,
+            [IO.HandleInheritability]::None, $true)
+        $view = $mapping.CreateViewAccessor()
+        $stream.Dispose()
+        try {
+            if ([OperatingSystem]::IsWindows()) {
+                $truncate = [IO.FileStream]::new(
+                    $sharedMemory, [IO.FileMode]::Open, [IO.FileAccess]::Write,
+                    ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                try {
+                    $truncateRefused = $false
+                    try { $truncate.SetLength(0) } catch { $truncateRefused = $true }
+                    Assert-True $truncateRefused "The mapped shared-memory fixture did not reproduce the truncate failure"
+                } finally {
+                    $truncate.Dispose()
+                }
+            }
+            Repair-ProductionSqliteSharedMemory
+            Assert-True ($view.ReadByte(0) -eq 7) "Recovery invalidated the old shared-memory mapping"
+        } finally {
+            $view.Dispose()
+            $mapping.Dispose()
+        }
+        $preserved = @(Get-ChildItem -LiteralPath $dataDirectory -Filter "*.stale-*")
+        Assert-True (
+            -not (Test-Path -LiteralPath $sharedMemory) -and $preserved.Count -eq 1 -and
+            ([IO.File]::ReadAllBytes($preserved[0].FullName) -join ",") -ceq "7,8,9" -and
+            ([IO.File]::ReadAllBytes($database) -join ",") -ceq "1,2,3" -and
+            ([IO.File]::ReadAllBytes("$database-wal") -join ",") -ceq "4,5,6"
+        ) "SQLite recovery did not preserve shared memory or modified the database/WAL"
+        Repair-ProductionSqliteSharedMemory
+        Assert-True (
+            @(Get-ChildItem -LiteralPath $dataDirectory -Filter "*.stale-*").Count -eq 1
+        ) "SQLite recovery was not idempotent when shared memory was absent"
+    }
+    Write-Host "PASS: offline SQLite recovery preserves shared memory and refuses live database/WAL readers"
+
+    & {
+        $destination = Join-Path $root "directory-swap"
+        $candidate = Join-Path $root "directory-candidate"
+        New-Item -ItemType Directory -Path $destination, $candidate | Out-Null
+        Set-Content -LiteralPath (Join-Path $destination "old.txt") -Value "old"
+        Set-Content -LiteralPath (Join-Path $candidate "new.txt") -Value "new"
+        $originalMove = (Get-Item Function:\Move-DeploymentDirectory).ScriptBlock
+        function Move-DeploymentDirectory([string]$Source, [string]$Destination) {
+            & $originalMove $Source $Destination 0
+        }
+        if ([OperatingSystem]::IsWindows()) {
+            $lockedFile = [IO.FileStream]::new(
+                (Join-Path $candidate "new.txt"), [IO.FileMode]::Open,
+                [IO.FileAccess]::Read, [IO.FileShare]::None)
+            try {
+                $swapRefused = $false
+                try { Install-PreparedDirectory $candidate $destination } catch { $swapRefused = $true }
+                Assert-True (
+                    $swapRefused -and
+                    (Test-Path -LiteralPath (Join-Path $destination "old.txt")) -and
+                    (Test-Path -LiteralPath (Join-Path $candidate "new.txt"))
+                ) "A locked candidate swap did not restore the previous directory"
+            } finally {
+                $lockedFile.Dispose()
+            }
+        }
+        Install-PreparedDirectory $candidate $destination
+        Assert-True (
+            (Test-Path -LiteralPath (Join-Path $destination "new.txt")) -and
+            -not (Test-Path -LiteralPath (Join-Path $destination "old.txt")) -and
+            -not (Test-Path -LiteralPath $candidate)
+        ) "Directory installation did not succeed after the candidate lock was released"
+    }
+    Write-Host "PASS: a locked candidate preserves the previous deployment and installs after release"
 
     $testPort = Get-TestPort
     $testListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $testPort)
@@ -209,6 +557,8 @@ try {
     ) "Startup diagnostics omitted the SQLite error or its log paths"
     Write-Host "PASS: startup waits for its own listener and reports SQLite failures"
 
+    if ($StartupOnly) { return }
+
     $script:publishSetupEvents = @()
     $PublishDir = Join-Path $root "setup-order"
     $originalInstallTtydRuntime = (Get-Item Function:\Install-TtydRuntime).ScriptBlock
@@ -246,6 +596,8 @@ try {
         "-p:ArtifactsPath=$candidateBuildRoot"
     )
     Assert-True ($candidateServer -is [string]) "Server candidate path was not scalar"
+    Test-IsolatedProductionShutdown (Join-Path $candidateServer "Treemon.exe") (Join-Path $root "shutdown-server")
+    if ($ShutdownOnly) { return }
     $candidateHost = Join-Path $candidateServer "terminal-host"
     Assert-True (
         -not (Test-Path -LiteralPath (Join-Path $candidateHost "Shared.dll") -PathType Leaf)
