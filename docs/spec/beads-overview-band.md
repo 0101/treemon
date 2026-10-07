@@ -2,7 +2,8 @@
 
 ## Goals
 
-- Summarize task state and live agent activity across all non-archived worktrees.
+- Summarize task state and live agent activity across non-archived worktrees, optionally scoped by
+  dashboard Focus.
 - Distinguish planned work, work currently owned by agents, unattended work, and work ready to land.
 - Let users drill from an aggregate directly to its contributing worktrees.
 - Reuse one canonical aggregate for the live band, drill-down membership, and durable history.
@@ -12,8 +13,13 @@
 ### Band
 
 The header **Overview** control toggles a persisted, chrome-less band above the repository list. The
-band contains Agents and Tasks sections, omits empty groups, and renders nothing when the complete
-aggregate is empty.
+band contains Agents and Tasks sections and omits empty live groups. With Focus off and history
+hidden, an empty aggregate renders nothing. An empty Focus projection retains the History control
+and explains that there is nothing to summarize.
+
+Focus uses the same eligible worktrees as the cards, including when their repositories are
+collapsed. All physical session instances on a qualifying worktree remain represented.
+Expiry clears empty drill-down selections and sticky-agent state; archived work remains excluded.
 
 The Agents section becomes a compact sticky strip while the dashboard scrolls. Each group shows one
 marker per live session. A reported context gauge renders as a remaining-context donut; otherwise
@@ -68,8 +74,10 @@ does not open the Canvas pane. Archived or no-longer-focusable worktrees are nev
 
 ### History
 
-The history control and drill-down are mutually exclusive. History uses count-only snapshots from
-the same aggregate; see `docs/spec/overview-activity-history.md`.
+The history control and drill-down are mutually exclusive. History uses global count-only snapshots
+from the unfiltered canonical aggregate; see `docs/spec/overview-activity-history.md`. Focus does not
+filter history. While Focus and history are enabled, an explicit scope note says so, and installed
+charts remain usable even when no live group survives the Focus window.
 
 ## Technical Approach
 
@@ -77,7 +85,9 @@ the same aggregate; see `docs/spec/overview-activity-history.md`.
 summary and the feature-free planning projection. Parent-child edges determine whether an open task
 is Planned, Queued, or Loose.
 
-`OverviewData.aggregate` is the single pure aggregation boundary. It accepts the server-shaped
+`OverviewData.aggregate` is the single pure aggregation boundary. The client projects eligible
+worktrees through `WorktreeFocus` before calling it; server-side capture keeps the complete input.
+It accepts the server-shaped
 `RepoWorktrees` list, removes archived worktrees, builds canonical task and agent groups, and stores
 the contributing worktrees in `GroupMember`. Counts are derived from those same members, preventing
 the band and drill-down from diverging. History drops membership and persists only group kinds and
@@ -110,6 +120,7 @@ logic owns selection clearing, worktree navigation, and persisted open state.
 | `src/Server/BeadsStatus.fs` | Beads summary and planning projection |
 | `src/Shared/OverviewData.fs` | Canonical task/agent aggregate and membership |
 | `src/Client/OverviewPresentation.fs` | Labels, styles, and selection type |
+| `src/Client/WorktreeFocus.fs` | Shared client projection for recent-worktree membership |
 | `src/Client/OverviewBand.fs` | Band, sticky behavior, drill-down, and history placement |
 | `src/Client/App.fs` | Toggle, selection, navigation, and history state |
 | `src/Server/SessionActivityService.fs` | Push-based exact process-instance state consumed by the aggregate |

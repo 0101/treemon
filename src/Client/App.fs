@@ -203,6 +203,44 @@ let preservePendingAutoSync (model: Model) repos =
 let markDeleted (path: WorktreePath) (deletedPaths: Set<string>) =
     deletedPaths |> Set.add (WorktreePath.value path)
 
+let private isHiddenByFocus scopedKey model =
+    findWorktree scopedKey model
+    |> Option.exists (WorktreeFocus.includes model.FocusWindow model.Now >> not)
+
+let private reconcileDashboardVisibility (model: Model) =
+    let repos = dashboardRepos model
+    let focus = adjustFocusForVisibility repos model.FocusedElement
+    let preservePaneTargets =
+        focus <> model.FocusedElement
+        && match model.FocusedElement with
+           | Some(Card scopedKey) -> isHiddenByFocus scopedKey model
+           | Some(RepoHeader _)
+           | None -> false
+    let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+    let selection =
+        match model.SelectedOverviewGroup with
+        | Some selection when not (selectionPresent selection overview) -> None
+        | selection -> selection
+
+    { model with
+        FocusedElement = focus
+        Canvas.TargetWorktree =
+            if preservePaneTargets then
+                CanvasState.activeCanvasWorktree model.FocusedElement model.Canvas.TargetWorktree
+            else model.Canvas.TargetWorktree
+        TerminalPaneTarget =
+            if preservePaneTargets then
+                TerminalPane.selectedWorktree model.TerminalPaneTarget model.FocusedElement
+            else model.TerminalPaneTarget
+        OverviewAgentsStuck = model.OverviewAgentsStuck && not (List.isEmpty overview.Agents)
+        SelectedOverviewGroup = selection }
+
+let private revealWorktree scopedKey model =
+    if isHiddenByFocus scopedKey model then
+        { model with FocusWindow = WorktreeFocus.Window.Off }
+        |> reconcileDashboardVisibility
+    else model
+
 let removeWorktreeByPath (path: WorktreePath) (model: Model) =
     let updatedRepos = removeFromRepos path model.Repos
     let updatedModel =
@@ -211,8 +249,11 @@ let removeWorktreeByPath (path: WorktreePath) (model: Model) =
             DeletedPaths = markDeleted path model.DeletedPaths
             TerminalPaneTarget =
                 if model.TerminalPaneTarget = Some path then None
-                else model.TerminalPaneTarget }
-    { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement }
+                else model.TerminalPaneTarget
+            Canvas.TargetWorktree =
+                if model.Canvas.TargetWorktree = Some(WorktreePath.value path) then None
+                else model.Canvas.TargetWorktree }
+    reconcileDashboardVisibility updatedModel
 
 let terminalAction (wt: WorktreeStatus) =
     if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
@@ -398,6 +439,10 @@ let private applyEmbeddedSnapshot snapshot (model: Model) =
 
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
+    | Card _, _
+        when WorktreeFocus.isEnabled model.FocusWindow
+             && not (visibleFocusTargets (dashboardRepos model) |> List.contains focused) ->
+        None
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
     | Card scopedKey, "t" -> findWorktree scopedKey model |> Option.map (_.Path >> OpenEmbeddedTerminal)
     | Card scopedKey, ("a" | "A") -> findWorktree scopedKey model |> Option.map (_.Path >> StartAgent)
@@ -634,6 +679,7 @@ let private focusWorktreeCard scopedKey model =
     if not (resolvesToFocusableCard scopedKey model.Repos) then
         model, Cmd.none
     else
+        let model = revealWorktree scopedKey model
         let repos, expanded = expandRepoOwning scopedKey model.Repos
         let focus = Some (Card scopedKey)
         let retargetedModel, retargetCmd =
@@ -743,8 +789,8 @@ let update msg model =
                 else
                     detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
                     |> List.filter (fun (scopedKey, filename) -> isCanvasDocFresh now currentCanvasModified scopedKey filename)
-            let now = now.ToUnixTimeMilliseconds() |> float
-            let isIdle = now - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
+            let nowMs = now.ToUnixTimeMilliseconds() |> float
+            let isIdle = nowMs - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
             // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
             // dashboard) is server-generated and self-refreshing, so its data churn must not
             // hijack focus; filter it out of the candidates before picking the most recent.
@@ -777,6 +823,7 @@ let update msg model =
                 | _ -> Cmd.none
             { model with
                 Repos = repos
+                Now = now
                 IsLoading = false
                 HasError = false
                 SchedulerEvents = response.SchedulerEvents
@@ -800,19 +847,7 @@ let update msg model =
                 Canvas.PreviousCanvasHashes = currentCanvasHashes
                 Canvas.CanvasEvents = canvasEvents
                 Canvas.CanvasSendState = canvasSendState }
-            |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
-            |> (fun m ->
-                // Drop a now-stale drill-down selection: if the refreshed roll-up no longer contains
-                // the selected group (its count fell to 0), clear it so the panel closes. Removing
-                // every agent group also resets the pinned state before its observer is disposed.
-                let overview = m.Repos |> List.map toRepoWorktrees |> OverviewData.aggregate
-                let selection =
-                    match m.SelectedOverviewGroup with
-                    | Some selection when not (OverviewPresentation.selectionPresent selection overview) -> None
-                    | selection -> selection
-                { m with
-                    OverviewAgentsStuck = m.OverviewAgentsStuck && not (List.isEmpty overview.Agents)
-                    SelectedOverviewGroup = selection })
+            |> reconcileDashboardVisibility
             |> (fun m ->
                 if isFirstLoad then
                     let seeded = seedLastViewedHashes m.Repos m.Canvas.LastViewedHashes
@@ -856,7 +891,9 @@ let update msg model =
         Cmd.none
 
     | CycleWorktreeFocus ->
-        { model with FocusWindow = WorktreeFocus.nextWindow model.FocusWindow }, Cmd.none
+        { model with FocusWindow = WorktreeFocus.nextWindow model.FocusWindow }
+        |> reconcileDashboardVisibility,
+        Cmd.none
 
     | UpdateTerminalHost
         when not (
@@ -1284,7 +1321,8 @@ let update msg model =
                 { model with EmbeddedTerminalPollInFlight = true },
                 fetchEmbeddedTerminals worktreeApi
 
-        { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
+        { model with Now = nowDto; Activity = activity; Canvas.CanvasEvents = expiredEvents }
+        |> reconcileDashboardVisibility,
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd; terminalCmd ]
 
     | UserActivity now -> ActivityUpdate.userActivity now model
@@ -1437,7 +1475,12 @@ let update msg model =
         { model with ActionCooldowns = model.ActionCooldowns.Remove path }, Cmd.none
 
     | SetFocus target ->
-        CanvasUpdate.applyFocus true target model
+        let revealed =
+            match target with
+            | Some(Card scopedKey) -> revealWorktree scopedKey model
+            | Some(RepoHeader _)
+            | None -> model
+        CanvasUpdate.applyFocus true target revealed
 
     | SetFocusNoRetarget target ->
         let focused, cmd =
@@ -1445,7 +1488,8 @@ let update msg model =
         // Idle canvas auto-display changes focus internally, not by selecting a card.
         { focused with
             TerminalPaneTarget = model.TerminalPaneTarget
-            EmbeddedTerminalViewStates = model.EmbeddedTerminalViewStates },
+            EmbeddedTerminalViewStates = model.EmbeddedTerminalViewStates }
+        |> reconcileDashboardVisibility,
         cmd
 
     | ArchiveMsg archiveMsg ->
@@ -1482,7 +1526,12 @@ let update msg model =
                 if CreateWorktreeModal.isOpen model.CreateModal && not (CreateWorktreeModal.isOpen result.Modal) then
                     focusDashboard
                 else Cmd.none
-            { model with CreateModal = result.Modal; FocusedElement = focus },
+            { model with
+                CreateModal = result.Modal
+                FocusedElement = focus
+                FocusWindow =
+                    if result.RefreshWorktrees then WorktreeFocus.Window.Off
+                    else model.FocusWindow },
             Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd; refocusCmd ]
 
     | WorktreeSearchMsg searchMsg
@@ -1546,6 +1595,7 @@ let update msg model =
                 focusDashboard
             | _ -> model, Cmd.none
         | None ->
+            let repos = dashboardRepos model
             let focusWithRetarget newFocus scrollHint extra =
                 let m, retargetCmd = CanvasUpdate.applyFocus true newFocus model
                 m, Cmd.batch (extra @ [ retargetCmd; scrollToFocus scrollHint newFocus ])
@@ -1558,7 +1608,7 @@ let update msg model =
                 { model with SelectedOverviewGroup = None }, Cmd.none
             | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
                 let cols = getColumnCount ()
-                let newFocus, navAction, scrollHint = navigateSpatial key cols model.Repos model.FocusedElement
+                let newFocus, navAction, scrollHint = navigateSpatial key cols repos model.FocusedElement
                 let actionCmd =
                     match navAction with
                     | NoAction -> Cmd.none
@@ -1566,11 +1616,11 @@ let update msg model =
                     | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
                 focusWithRetarget newFocus scrollHint [ actionCmd ]
             | "Home" ->
-                focusWithRetarget (navigateToFirst model.Repos) ScrollToTop []
+                focusWithRetarget (navigateToFirst repos) ScrollToTop []
             | "End" ->
-                focusWithRetarget (navigateToLast model.Repos) ScrollToBottom []
+                focusWithRetarget (navigateToLast repos) ScrollToBottom []
             | "Escape" ->
-                let newFocus = reclaimFocusTarget model.Repos model.FocusedElement
+                let newFocus = reclaimFocusTarget repos model.FocusedElement
                 { model with
                     FocusedElement = newFocus
                     Workspace.ActivePane = WorkspaceLayout.Pane.Worktrees },
@@ -1598,6 +1648,9 @@ let update msg model =
         Cmd.OfAsync.attempt worktreeApi.Value.saveOverviewPanelOpen newState (fun _ -> NoOp)
 
     | SetOverviewAgentsStuck isStuck ->
+        let isStuck =
+            isStuck
+            && OverviewBand.hasAgentGroups (dashboardRepos model)
         if isStuck = model.OverviewAgentsStuck then
             model, Cmd.none
         else
@@ -1606,6 +1659,11 @@ let update msg model =
                 | true, Some (OverviewSelection.Agents _) -> None
                 | _ -> model.SelectedOverviewGroup
             { model with OverviewAgentsStuck = isStuck; SelectedOverviewGroup = selection }, Cmd.none
+
+    | SelectOverviewGroup selection
+        when WorktreeFocus.isEnabled model.FocusWindow
+             && not (OverviewBand.overviewSelectionPresent selection (dashboardRepos model)) ->
+        model, Cmd.none
 
     | SelectOverviewGroup selection ->
         // Toggle: re-selecting the already-selected group clears it (closes the panel).
@@ -1676,6 +1734,7 @@ let update msg model =
             model
 
     | FocusOverviewCard scopedKey ->
+        let model = revealWorktree scopedKey model
         let paneModel, paneCmd = CanvasUpdate.openCanvasPane model
         let repos, expanded = expandRepoOwning scopedKey model.Repos
         let retargetedModel, retargetCmd =
@@ -1864,7 +1923,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
     let panelSubs =
         if model.OverviewPanelOpen
            && WorkspaceLayout.isVisible WorkspaceLayout.Pane.Worktrees true model.Workspace
-           && OverviewBand.hasAgentGroups model.Repos then
+           && OverviewBand.hasAgentGroups (dashboardRepos model) then
             ([ "overview-sticky" ], overviewSticky) :: baseSubs
         else
             baseSubs
@@ -2022,6 +2081,15 @@ let viewTerminalHostUpdateOverlay state =
     | TerminalHostUpdateState.Available ->
         Html.none
 
+let private viewWorktreeFocusButton model dispatch =
+    Html.button [
+        prop.className "ctrl-btn worktree-focus-btn"
+        prop.ariaPressed (WorktreeFocus.isEnabled model.FocusWindow)
+        prop.title "Show worktrees with real session activity in the selected window. Cycle: off, 2h, 8h, 24h."
+        prop.onClick (fun _ -> dispatch CycleWorktreeFocus)
+        prop.text $"Focus: {WorktreeFocus.label model.FocusWindow}"
+    ]
+
 let viewAppHeader model dispatch =
     let onePane = model.Workspace.Mode = WorkspaceLayout.Mode.OnePane
     let widthChoices =
@@ -2098,6 +2166,7 @@ let viewAppHeader model dispatch =
                                 prop.onClick (fun _ -> dispatch ToggleSort)
                                 prop.text ($"Sort: {sortLabel model.SortMode}")
                             ]
+                            if not onePane then viewWorktreeFocusButton model dispatch
                             Html.button [
                                 prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
                                 yield! noFocusProps
@@ -2155,6 +2224,7 @@ let viewAppHeader model dispatch =
                 ]
             ]
             if onePane then WorkspaceView.tabs model dispatch
+            if onePane then viewWorktreeFocusButton model dispatch
         ]
     ]
 
@@ -2167,6 +2237,7 @@ let view model dispatch =
     let onePane = model.Workspace.Mode = WorkspaceLayout.Mode.OnePane
     let terminalPaneOpen = terminalPaneVisible model
     let canvasPaneOpen = CanvasUpdate.isPaneVisible model
+    let repos = dashboardRepos model
 
     let workspaceWidthClass =
         match model.Canvas.WorkspaceWidth with
@@ -2247,7 +2318,8 @@ let view model dispatch =
                         model.OverviewHistoryWindow
                         (fun () -> dispatch (CycleOverviewChart System.DateTimeOffset.Now))
                         model.OverviewHistory
-                        model.Repos
+                        model.FocusWindow
+                        repos
 
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
                     Html.div [
@@ -2256,9 +2328,17 @@ let view model dispatch =
                     ]
                     skeletonGrid ()
                 else
+                    if WorktreeFocus.isEnabled model.FocusWindow
+                       && (model.Repos |> List.forall _.IsReady)
+                       && (repos |> List.forall (fun repo -> repo.Worktrees.IsEmpty && repo.ArchivedWorktrees.IsEmpty)) then
+                        Html.div [
+                            prop.className "status-bar focus-empty"
+                            prop.role "status"
+                            prop.text $"No session activity in the last {WorktreeFocus.label model.FocusWindow}. Set Focus to off to see all worktrees."
+                        ]
                     Html.div [
                         prop.className "repo-list"
-                        prop.children (model.Repos |> List.map (repoSection cardProps cardCallbacks))
+                        prop.children (repos |> List.map (repoSection cardProps cardCallbacks))
                     ]
 
                 OverviewViews.schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory

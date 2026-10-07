@@ -17,6 +17,11 @@ A single focused element tracked in the Model as `FocusedElement: FocusTarget op
 - If the focused card disappears, focus moves to the nearest visible element
 - On first keypress, focus lands on the first visible element
 
+Dashboard Focus windows restrict navigation and focused-card shortcuts to eligible cards, while
+repository headers remain reachable. If a card ages out, keyboard focus falls back to a visible
+target without retargeting its open Canvas or Terminal pane; deliberate subsequent card navigation
+restores ordinary pane following.
+
 ### Arrow Key Navigation — Spatial
 
 Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spatially.
@@ -76,6 +81,8 @@ Ctrl+P opens a command palette from anywhere in the top-level app, including edi
 suppressed while a create-worktree or confirmation modal is active so overlays never stack.
 
 The palette searches every non-archived worktree by repository name, branch, and full path.
+It searches work hidden by dashboard Focus too. Choosing such a result switches Focus off before
+expanding its repository, focusing its card, and scrolling it into view.
 Characters match in order without requiring adjacency. Space-separated terms can match different
 fields, while a compact term can continue from repository into branch in display order
 (`tremokb` matches `treemon` / `kb-navigation`). Results show repository above a compact
