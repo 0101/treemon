@@ -56,6 +56,7 @@
     <Compile Include="ConfirmModalTests.fs" />
     <Compile Include="NavigationTests.fs" />
     <Compile Include="WorktreeSearchTests.fs" />
+    <Compile Include="WorktreeFocusTests.fs" />
     <Compile Include="ComponentsTests.fs" />
     <Compile Include="CardViewsTests.fs" />
     <Compile Include="AutoSyncClientTests.fs" />

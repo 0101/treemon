@@ -116,6 +116,8 @@ let init () =
       IsLoading = true
       HasError = false
       SortMode = ByActivity
+      FocusWindow = WorktreeFocus.Window.Off
+      Now = System.DateTimeOffset.UtcNow
       TerminalHostUpdate = TerminalHostUpdateModel.initial
       IsCompact = false
       SchedulerEvents = []
@@ -852,6 +854,9 @@ let update msg model =
             SortMode = newSort
             Repos = model.Repos |> List.map (fun r -> { r with Worktrees = sortWorktrees newSort r.Worktrees }) },
         Cmd.none
+
+    | CycleWorktreeFocus ->
+        { model with FocusWindow = WorktreeFocus.nextWindow model.FocusWindow }, Cmd.none
 
     | UpdateTerminalHost
         when not (
