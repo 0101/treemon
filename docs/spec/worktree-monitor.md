@@ -23,8 +23,9 @@
   without changing collected data, Sort, monitoring, or resumability. Repository headers and creation
   controls remain available; no matches shows an explicit empty state rather than loading.
   Passive expiry preserves open Canvas/Terminal targets until deliberate card navigation.
-  Ctrl+P searches all non-archived work and clears Focus before revealing a hidden result;
-  successful worktree creation clears Focus so a new worktree without session activity is visible.
+  Ctrl+P searches all non-archived work and clears Focus before revealing a hidden result.
+  Explicit Canvas overview branch/document selections likewise reveal their worktree.
+  Successful worktree creation clears Focus so a new worktree without session activity is visible.
   The Focus control remains beside the workspace tabs in One-pane mode. Overview history remains
   global and is labelled as unfiltered while Focus is active.
 - Merged PRs get dimmed cards with delete button

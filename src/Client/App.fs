@@ -1748,6 +1748,7 @@ let update msg model =
         ]
 
     | OpenCanvasDoc (scopedKey, filename) ->
+        let model = revealWorktree scopedKey model
         CanvasUpdate.openCanvasDoc
             (not (terminalHostUpdateLocksInteraction model))
             scopedKey

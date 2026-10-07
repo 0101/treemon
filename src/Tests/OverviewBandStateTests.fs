@@ -328,6 +328,22 @@ type WorktreeFocusStateTests() =
             Assert.That(selected.FocusWindow, Is.EqualTo WorktreeFocus.Window.Off)
             Assert.That(selected.FocusedElement, Is.EqualTo(Some(Card oldKey))))
 
+    [<Test>]
+    member _.``Explicit Canvas document navigation reveals hidden work and survives Escape``() =
+        let filtered =
+            { fixture with
+                FocusWindow = WorktreeFocus.Window.Hours2
+                Canvas.CanvasPaneOpen = true }
+        let selected, _ = update (OpenCanvasDoc(oldKey, doc.Filename)) filtered
+        let escaped, _ = update (KeyPressed("Escape", false)) selected
+
+        Assert.Multiple(fun () ->
+            Assert.That(selected.FocusWindow, Is.EqualTo WorktreeFocus.Window.Off)
+            Assert.That(selected.FocusedElement, Is.EqualTo(Some(Card oldKey)))
+            Assert.That(CanvasUpdate.activeVisibleDoc selected, Is.EqualTo(Some(oldKey, doc.Filename)))
+            Assert.That(escaped.FocusedElement, Is.EqualTo(Some(Card oldKey)))
+            Assert.That(CanvasUpdate.activeVisibleDoc escaped, Is.EqualTo(Some(oldKey, doc.Filename))))
+
     [<TestCase("")>]
     [<TestCase("legacy setup warning")>]
     member _.``Successful creation clears Focus including warning results``(warning: string) =
