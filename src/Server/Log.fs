@@ -2,6 +2,7 @@ module Log
 
 open System
 open System.IO
+open System.Text.Json
 
 [<RequireQualifiedAccess>]
 type Destination =
@@ -13,6 +14,10 @@ type InitializationError =
     | InvalidPath
     | AlreadyInitialized
     | CannotOpen of path: string * error: exn
+
+type internal WriteError =
+    { Path: string
+      Exception: exn }
 
 let private configuredPathKey = "Treemon.Server.LogPath"
 let private lockObj = obj ()
@@ -123,23 +128,49 @@ let internal currentPath () =
 let internal isSlowOperation (elapsed: TimeSpan) =
     elapsed >= TimeSpan.FromSeconds 5.0
 
-let log (context: string) (message: string) =
+let internal writeAtPath path (context: string) (message: string) =
     let timestamp = DateTimeOffset.Now.ToString("yyyy-MM-ddTHH:mm:ss.fff")
     let line = $"{timestamp} [{context}] {message}{Environment.NewLine}"
-    lock lockObj (fun () ->
-        try
-            let path = currentLogPath ()
-            ensureLogDirectory path
-            use stream =
-                new FileStream(
-                    path,
-                    FileMode.Append,
-                    FileAccess.Write,
-                    FileShare.ReadWrite
-                )
-            use writer = new StreamWriter(stream)
-            writer.Write(line)
-        with _ -> ())
+    try
+        ensureLogDirectory path
+        use stream =
+            new FileStream(
+                path,
+                FileMode.Append,
+                FileAccess.Write,
+                FileShare.ReadWrite
+            )
+        use writer = new StreamWriter(stream)
+        writer.Write(line)
+        Ok()
+    with error ->
+        Error { Path = path; Exception = error }
+
+let internal tryLog context message =
+    lock lockObj (fun () -> writeAtPath (currentLogPath ()) context message)
+
+let internal reportWriteFailure context message (error: WriteError) =
+    try
+        JsonSerializer.Serialize(
+            {| event = "log-write-failed"
+               path = error.Path
+               context = context
+               ``exception`` = error.Exception.ToString()
+               unpersistedRecord = message |})
+        |> Console.Error.WriteLine
+        error
+    with stderrError when (stderrError :? IOException) || (stderrError :? ObjectDisposedException) ->
+        // Redirected stderr can share the failed log's filesystem; retain both failures without aborting.
+        { error with
+            Exception =
+                AggregateException(
+                    "The log append and stderr reporting both failed.",
+                    [| error.Exception; stderrError |]) }
+
+let log context message =
+    match tryLog context message with
+    | Ok() -> ()
+    | Error error -> reportWriteFailure context message error |> ignore
 
 let logException (context: string) (message: string) (error: exn) =
     log context $"{message}{Environment.NewLine}{error}"

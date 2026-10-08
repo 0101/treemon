@@ -9,6 +9,7 @@
   <ItemGroup>
     <Compile Include="TestUtils.fs" />
     <Compile Include="BridgeFixture.fs" />
+    <Compile Include="LaunchLogFixture.fs" />
     <Compile Include="BridgeFixtureTests.fs" />
     <Compile Include="CanvasFilenameTests.fs" />
     <Compile Include="SqliteTestDatabase.fs" />

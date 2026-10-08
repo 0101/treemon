@@ -11,6 +11,7 @@ open Shared
 open Server
 open Server.SessionActivity
 open Tests.BridgeFixture
+open Tests.LaunchLogFixture
 open Tests.TestUtils
 
 let private await (task: Task<'a>) =
@@ -38,16 +39,18 @@ let private started path =
                 SessionIds = []
                 Lifecycle = EmbeddedTerminalLifecycle.Running "http://127.0.0.1:41001/" } ] } }
 
-let private start timeout launch close sessionId path prompt =
+let private startRecorded timeout launch close diagnostics prompt =
     TerminalLaunch.startPromptedAgentWith
         { StartCommand = launch
           CloseTerminal = close
           Timeout = timeout }
-        (SessionId sessionId)
-        None
-        path
-        prompt
+        { Provider = None
+          Prompt = prompt
+          Diagnostics = diagnostics }
     |> Async.StartAsTask
+
+let private start timeout launch close sessionId path prompt =
+    startRecorded timeout launch close (PromptedLaunchDiagnostics.create (SessionId sessionId) path) prompt
 
 let private assertStarted expected (result: Result<EmbeddedTerminalStartResult, PromptedLaunchError>) =
     match result with
@@ -376,6 +379,36 @@ type StartupPromptTests() =
                     Is.EqualTo(Error expected : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))))
 
     [<Test>]
+    member _.``startup timeout still cleans up the exact terminal when both logging sinks fail``() =
+        withTempDir "startup-unavailable-log-sinks" (fun root ->
+            let path = WorktreePath(Path.Combine(root, "worktree"))
+            let sessionId = Guid.NewGuid().ToString()
+            let expectedStart = started path
+            let closes = ConcurrentQueue<EmbeddedTerminalId>()
+            let result =
+                withUnavailableStderr (IOException "stderr write failed") (fun () ->
+                    startRecorded
+                        TimeSpan.Zero
+                        (fun _ _ -> async.Return(Ok expectedStart))
+                        (fun id ->
+                            closes.Enqueue id
+                            async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                        (recordedAttempt root sessionId path)
+                        "Initial task"
+                    |> await)
+
+            Assert.Multiple(fun () ->
+                Assert.That(closes.ToArray(), Is.EqualTo([| expectedStart.TerminalId |]))
+                Assert.That(
+                    result,
+                    Is.EqualTo(
+                        Error(PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut)
+                        : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
+                Assert.That(
+                    SessionBridge.pendingPrompts (WorktreePath.value path) |> Async.RunSynchronously,
+                    Is.Empty)))
+
+    [<Test>]
     member _.``unexpected cleanup failure preserves rejection without exposing exception text``() =
         withBridges 1 (fun bridges ->
             let listener, url = List.exactlyOne bridges
@@ -520,10 +553,9 @@ type StartupPromptTests() =
                             closed.TrySetResult id |> ignore
                             async.Return(Ok EmbeddedTerminalSnapshot.empty)
                       Timeout = TimeSpan.FromSeconds 5.0 }
-                    (SessionId sessionId)
-                    None
-                    path
-                    "Initial task"
+                    { Provider = None
+                      Prompt = "Initial task"
+                      Diagnostics = PromptedLaunchDiagnostics.create (SessionId sessionId) path }
             let launched = Async.StartAsTask(operation, cancellationToken = caller.Token)
             let context = await incoming
             readPrompt context |> ignore
@@ -531,6 +563,172 @@ type StartupPromptTests() =
 
             respond 503 context
             Assert.That(await closed.Task, Is.EqualTo expectedStart.TerminalId))
+
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member _.``timeout logs distinguish absent and unrelated bridge registrations``(otherSession: bool) =
+        withTempDir "launch-log-registration" (fun root ->
+            withBridges 1 (fun bridges ->
+                let _, url = List.exactlyOne bridges
+                let path = WorktreePath(Path.Combine(root, "worktree"))
+                let sessionId = Guid.NewGuid().ToString()
+                let unrelated = Guid.NewGuid().ToString()
+                let logPath = Path.Combine(root, "launch.log")
+                if otherSession then register (WorktreePath.value path) (Some unrelated) url
+                let result =
+                    startRecorded
+                        TimeSpan.Zero
+                        (fun _ _ -> async.Return(Ok(started path)))
+                        (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                        (recordedAttempt logPath sessionId path)
+                        "Initial task"
+                    |> await
+                let events = readEvents logPath sessionId
+                let failure = events |> List.find (fun entry -> eventName entry = "failed")
+                let details = failure.GetProperty("data")
+                Assert.Multiple(fun () ->
+                    Assert.That(result, Is.EqualTo(Error(PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut) : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
+                    Assert.That(details.GetProperty("reason").GetString(),
+                        Is.EqualTo(if otherSession then "no-matching-bridge-registration" else "bridge-registration-not-observed"))
+                    Assert.That(details.GetProperty("otherSessionCount").GetInt32(), Is.EqualTo(if otherSession then 1 else 0))
+                    Assert.That(failure.GetProperty("lastMilestone").GetString(), Is.EqualTo "terminal-started")
+                    Assert.That(failure.GetProperty("terminalId").GetString(), Is.EqualTo(EmbeddedTerminalId.value (started path).TerminalId))
+                    Assert.That(events |> List.map eventName,
+                        Is.EqualTo([ "command-starting"; "prompt-reserved"; "terminal-started"; "failed"; "prompt-removed"; "cleanup-started"; "cleanup-completed" ])))))
+
+    [<Test>]
+    member _.``timeout identifies the expected bridge registered in another worktree``() =
+        withTempDir "launch-log-wrong-worktree" (fun root ->
+            withBridges 1 (fun bridges ->
+                let _, url = List.exactlyOne bridges
+                let path = WorktreePath(Path.Combine(root, "expected"))
+                let otherPath = Path.Combine(root, "other")
+                let sessionId = Guid.NewGuid().ToString()
+                let logPath = Path.Combine(root, "launch.log")
+                register otherPath (Some sessionId) url
+                startRecorded
+                    TimeSpan.Zero
+                    (fun _ _ -> async.Return(Ok(started path)))
+                    (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                    (recordedAttempt logPath sessionId path)
+                    "Initial task"
+                |> await |> ignore
+                let failure =
+                    readEvents logPath sessionId
+                    |> List.find (fun entry -> eventName entry = "failed")
+                    |> _.GetProperty("data")
+                Assert.Multiple(fun () ->
+                    Assert.That(failure.GetProperty("reason").GetString(), Is.EqualTo "bridge-registered-in-different-worktree")
+                    Assert.That(failure.GetProperty("registeredWorktree").GetString(), Is.EqualTo(PathUtils.normalizePath otherPath)))))
+
+    [<Test>]
+    member _.``timeout after dispatch reports missing acceptance rather than missing registration``() =
+        withTempDir "launch-log-missing-acceptance" (fun root ->
+            withBridges 1 (fun bridges ->
+                let listener, url = List.exactlyOne bridges
+                let path = WorktreePath(Path.Combine(root, "worktree"))
+                let sessionId = Guid.NewGuid().ToString()
+                let logPath = Path.Combine(root, "launch.log")
+                let incoming = listener.GetContextAsync()
+                let result =
+                    startRecorded
+                        TimeSpan.Zero
+                        (fun _ _ ->
+                            async {
+                                register (WorktreePath.value path) (Some sessionId) url
+                                let! context = incoming.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+                                Assert.That(readPrompt context, Is.EqualTo(("startup-prompt", "Initial task")))
+                                return Ok(started path)
+                            })
+                        (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                        (recordedAttempt logPath sessionId path)
+                        "Initial task"
+                    |> await
+                SessionBridge.flushPending (WorktreePath.value path) |> Async.RunSynchronously
+                let events = readEvents logPath sessionId
+                let failure = events |> List.find (fun entry -> eventName entry = "failed")
+                Assert.Multiple(fun () ->
+                    Assert.That(result, Is.EqualTo(Error(PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut) : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
+                    Assert.That(failure.GetProperty("data").GetProperty("reason").GetString(), Is.EqualTo "startup-acceptance-not-observed")
+                    Assert.That(failure.GetProperty("lastMilestone").GetString(), Is.EqualTo "sending-prompt")
+                    Assert.That(events |> List.map eventName, Does.Contain "bridge-matched")
+                    Assert.That(events |> List.map eventName, Does.Contain "prompt-sending"))))
+
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member _.``rejection logs preserve HTTP evidence and exact cleanup outcome without response content``(cleanupFails: bool) =
+        withTempDir "launch-log-rejection" (fun root ->
+            withBridges 1 (fun bridges ->
+                let listener, url = List.exactlyOne bridges
+                let path = WorktreePath(Path.Combine(root, "worktree"))
+                let sessionId = Guid.NewGuid().ToString()
+                let logPath = Path.Combine(root, "launch.log")
+                let incoming = listener.GetContextAsync()
+                let launched =
+                    startRecorded
+                        (TimeSpan.FromSeconds 5.0)
+                        (fun _ _ ->
+                            register (WorktreePath.value path) (Some sessionId) url
+                            async.Return(Ok(started path)))
+                        (fun _ -> async.Return(if cleanupFails then Error "exact cleanup failed" else Ok EmbeddedTerminalSnapshot.empty))
+                        (recordedAttempt logPath sessionId path)
+                        "Initial task"
+                let context = await incoming
+                readPrompt context |> ignore
+                let secretBody = "private-response-body\nsecret-token"
+                let body = System.Text.Encoding.UTF8.GetBytes secretBody
+                context.Response.StatusCode <- 503
+                context.Response.ContentLength64 <- int64 body.Length
+                context.Response.OutputStream.Write(body, 0, body.Length)
+                context.Response.Close()
+                let result = await launched
+                SessionBridge.flushPending (WorktreePath.value path) |> Async.RunSynchronously
+                let events = readEvents logPath sessionId
+                let delivery = events |> List.find (fun entry -> eventName entry = "prompt-delivery-failed") |> _.GetProperty("data")
+                let cleanup = events |> List.find (fun entry -> eventName entry = "cleanup-completed") |> _.GetProperty("data")
+                let expected =
+                    if cleanupFails then PromptedLaunchError.StartupCleanupFailed(StartupPromptFailure.Rejected, (started path).TerminalId)
+                    else PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected
+                Assert.Multiple(fun () ->
+                    Assert.That(result, Is.EqualTo(Error expected : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
+                    Assert.That(delivery.GetProperty("status").GetInt32(), Is.EqualTo 503)
+                    Assert.That(delivery.GetProperty("bodyLength").GetInt32(), Is.EqualTo secretBody.Length)
+                    Assert.That(cleanup.GetProperty("outcome").GetString(), Is.EqualTo(if cleanupFails then "failed" else "succeeded"))
+                    Assert.That(File.ReadAllText logPath, Does.Not.Contain "secret-token"))))
+
+    [<Test>]
+    member _.``bridge progress observed before terminal reply never regresses in the log``() =
+        withTempDir "launch-log-early-bridge" (fun root ->
+            withBridges 1 (fun bridges ->
+                let listener, url = List.exactlyOne bridges
+                let path = WorktreePath(Path.Combine(root, "worktree"))
+                let sessionId = Guid.NewGuid().ToString()
+                let logPath = Path.Combine(root, "launch.log")
+                let incoming = listener.GetContextAsync()
+                let result =
+                    startRecorded
+                        (TimeSpan.FromSeconds 5.0)
+                        (fun _ _ ->
+                            async {
+                                register (WorktreePath.value path) (Some sessionId) url
+                                let! context = incoming.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+                                readPrompt context |> ignore
+                                respond 200 context
+                                return Ok(started path)
+                            })
+                        (fun _ -> async.Return(Error "Successful startup must not close the terminal"))
+                        (recordedAttempt logPath sessionId path)
+                        "Initial task"
+                    |> await
+                SessionBridge.flushPending (WorktreePath.value path) |> Async.RunSynchronously
+                let events = readEvents logPath sessionId
+                let terminal = events |> List.find (fun entry -> eventName entry = "terminal-started")
+                Assert.Multiple(fun () ->
+                    assertStarted (started path) result
+                    Assert.That(terminal.GetProperty("lastMilestone").GetString(), Is.EqualTo "sending-prompt")
+                    Assert.That(events |> List.map _.GetProperty("sequence").GetInt64(), Is.EqualTo([ 1L .. int64 events.Length ]))
+                    Assert.That(events |> List.map eventName, Does.Not.Contain "cleanup-started")
+                    Assert.That((List.last events).GetProperty("lastMilestone").GetString(), Is.EqualTo "accepted"))))
 
 [<TestFixture>]
 [<Category("Unit")>]

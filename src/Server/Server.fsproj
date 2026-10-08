@@ -39,6 +39,7 @@
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />
     <Compile Include="LifecycleDiagnostics.fs" />
+    <Compile Include="PromptedLaunchDiagnostics.fs" />
     <Compile Include="SessionActivityProtocol.fs" />
     <Compile Include="SqliteStorage.fs" />
     <Compile Include="OverviewSnapshotBoundary.fs" />

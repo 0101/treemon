@@ -96,7 +96,7 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
             { RepoId = RepoId.value form.RepoId
               BranchName = BranchName.create (form.Name.Trim())
               BaseBranch = BranchName.create form.BaseBranch
-              Prompt = (let t = form.Prompt.Trim() in if t = "" then None else Some t)
+              Prompt = if System.String.IsNullOrWhiteSpace form.Prompt then None else Some form.Prompt
               Skill = form.Skill }
         { Modal = Creating form.RepoId; RestoredFocus = None; RefreshWorktrees = false },
         Cmd.OfAsync.perform (fun request -> api.Value.createWorktree request) request CreateWorktreeCompleted
