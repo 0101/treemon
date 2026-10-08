@@ -372,6 +372,13 @@ try {
             if ($timeout -eq 30000) { return $script:gracefulExitConfirmed }
             return $script:forcedExitConfirmed
         }
+        $process | Add-Member -MemberType ScriptMethod -Name Kill -Value {
+            $script:shutdownEvents += "force-$($this.Id)"
+            if ($script:exitDuringForcedStop) { $this.HasExited = $true }
+            if ($script:forcedStopFails) {
+                throw [ComponentModel.Win32Exception]::new("Fixture forced stop failed")
+            }
+        }
         function Request-ProductionShutdown([int]$ProcessId) {
             $script:shutdownEvents += "request-$ProcessId"
             if ($script:exitDuringShutdownRequest) { $process.HasExited = $true }
@@ -381,8 +388,7 @@ try {
         function Stop-Process {
             [CmdletBinding()]
             param([int]$Id, [switch]$Force)
-            Assert-True ($Id -eq 123 -and $Force) "Shutdown did not force only the captured process"
-            $script:shutdownEvents += "force-$Id"
+            throw "Shutdown must force the captured process without looking up its PID again"
         }
         function git { throw "Shutdown must not depend on Git" }
 
@@ -428,6 +434,17 @@ try {
                 ExpectedEvents = ""
             },
             @{
+                Name = "exit during forced stop"
+                ExitDuringKill = $true
+                ExpectedEvents = "handle|request-123|force-123|wait-10000"
+            },
+            @{
+                Name = "forced stop fails"
+                KillFails = $true
+                ExpectedError = "Fixture forced stop failed"
+                ExpectedEvents = "handle|request-123|force-123"
+            },
+            @{
                 Name = "forced stop cannot confirm exit"
                 ForceTimeout = $true
                 ExpectedError = "Production PID 123 did not exit within 10s after a forced stop"
@@ -441,12 +458,14 @@ try {
             $script:forcedExitConfirmed = -not $scenario.ForceTimeout
             $script:shutdownRequestError = $scenario.RequestError
             $script:exitDuringShutdownRequest = $scenario.ExitDuringRequest
+            $script:exitDuringForcedStop = $scenario.ExitDuringKill -eq $true
+            $script:forcedStopFails = $scenario.KillFails -eq $true
             $script:shutdownEvents = @()
             $shutdownError = $null
             $output = try {
                 Stop-ProductionProcess $process 6>&1 | Out-String
             } catch {
-                $shutdownError = $_.Exception.Message
+                $shutdownError = $_.Exception.GetBaseException().Message
             }
             Assert-True (
                 $shutdownError -ceq $scenario.ExpectedError -and
@@ -463,6 +482,8 @@ try {
         $script:forcedExitConfirmed = $true
         $script:shutdownRequestError = "Fixture shutdown request failed"
         $script:exitDuringShutdownRequest = $false
+        $script:exitDuringForcedStop = $false
+        $script:forcedStopFails = $false
         $PidFile = Join-Path $ScriptDir ".treemon.pid"
         Assert-True (-not (Test-Path -LiteralPath $PidFile)) "The caller unexpectedly has a PID file"
         $process | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
@@ -505,10 +526,13 @@ try {
             $script:shutdownResponseEvents += "wait-$timeout"
             return $true
         }
+        $process | Add-Member -MemberType ScriptMethod -Name Kill -Value {
+            $script:shutdownResponseEvents += "force-$($this.Id)"
+        }
         function Stop-Process {
             [CmdletBinding()]
             param([int]$Id, [switch]$Force)
-            $script:shutdownResponseEvents += "force-$Id"
+            throw "Shutdown must force the captured process without looking up its PID again"
         }
 
         $scenarios = @(

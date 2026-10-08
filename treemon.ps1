@@ -965,7 +965,7 @@ function Stop-ProductionProcess($Process) {
 
     if (-not $Process.HasExited) {
         Write-Host "Stopping production process PID $($Process.Id)..." -ForegroundColor Yellow
-        Stop-Process -Id $Process.Id -Force -ErrorAction Stop
+        $Process.Kill()
         if (-not $Process.WaitForExit(10000)) {
             throw "Production PID $($Process.Id) did not exit within 10s after a forced stop"
         }
