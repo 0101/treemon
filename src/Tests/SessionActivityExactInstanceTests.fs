@@ -139,6 +139,131 @@ type PresenceAcknowledgementTests() =
             ))
 
     [<Test>]
+    member _.``resumed exact processes inherit newest context without sharing later updates``() =
+        let original = exactIdentity 4161 5161L
+        let firstResume = exactIdentity 4162 5162L
+        let secondResume = exactIdentity 4163 5163L
+
+        let identities =
+            [ original; firstResume; secondResume ]
+            |> List.map (fun identity ->
+                ProcessIdentity.processId identity, identity)
+            |> Map.ofList
+
+        let resolver =
+            ProcessIdentityResolver.create (fun processId ->
+                Ok(identities |> Map.tryFind processId))
+
+        let originalTerminal = terminal "61"
+        let firstTerminal = terminal "62"
+        let secondTerminal = terminal "63"
+
+        withService resolver (fun (service, store, _) ->
+            let at = ts "2026-09-04T10:00:00Z"
+
+            present service 4161 "resumed-session" (Some originalTerminal) at
+            |> requirePresence
+            |> ignore
+
+            service.Submit(
+                report
+                    4161
+                    "resumed-session"
+                    (Some originalTerminal)
+                    "original-usage"
+                    (at.AddSeconds(1.0))
+                    (UsageInfo(100000, 200000))
+            )
+
+            service.ExactSnapshot() |> ignore
+
+            Assert.That(
+                service.CloseProcess(original, at.AddSeconds(2.0)),
+                Is.EqualTo ClosureAcknowledge.Closed
+            )
+
+            present
+                service
+                4162
+                "resumed-session"
+                (Some firstTerminal)
+                (at.AddSeconds(3.0))
+            |> requirePresence
+            |> ignore
+
+            let firstInherited =
+                store.InstanceByIdentity firstResume |> Option.get
+
+            service.Submit(
+                report
+                    4162
+                    "resumed-session"
+                    (Some firstTerminal)
+                    "first-resume-usage"
+                    (at.AddSeconds(4.0))
+                    (UsageInfo(120000, 200000))
+            )
+
+            service.ExactSnapshot() |> ignore
+
+            present
+                service
+                4163
+                "resumed-session"
+                (Some secondTerminal)
+                (at.AddSeconds(5.0))
+            |> requirePresence
+            |> ignore
+
+            let secondInherited =
+                store.InstanceByIdentity secondResume |> Option.get
+
+            service.Submit(
+                report
+                    4162
+                    "resumed-session"
+                    (Some firstTerminal)
+                    "later-first-resume-usage"
+                    (at.AddSeconds(6.0))
+                    (UsageInfo(140000, 200000))
+            )
+
+            service.ExactSnapshot() |> ignore
+
+            let originalClosed =
+                store.InstanceByIdentity original |> Option.get
+
+            let firstAfter =
+                store.InstanceByIdentity firstResume |> Option.get
+
+            let secondAfter =
+                store.InstanceByIdentity secondResume |> Option.get
+
+            let context currentTokens =
+                Some
+                    { CurrentTokens = currentTokens
+                      TokenLimit = 200000 }
+
+            Assert.Multiple(fun () ->
+                Assert.That(originalClosed.ClosedAt, Is.EqualTo(Some(at.AddSeconds(2.0))))
+                Assert.That(originalClosed.Status.ContextUsage, Is.EqualTo(context 100000))
+                Assert.That(firstInherited.Status.ContextUsage, Is.EqualTo(context 100000))
+                Assert.That(
+                    firstInherited.ContextUsageAt,
+                    Is.EqualTo(Some(at.AddSeconds(1.0)))
+                )
+                Assert.That(firstInherited.TerminalSessionId, Is.EqualTo(Some firstTerminal))
+                Assert.That(firstInherited.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(secondInherited.Status.ContextUsage, Is.EqualTo(context 120000))
+                Assert.That(
+                    secondInherited.ContextUsageAt,
+                    Is.EqualTo(Some(at.AddSeconds(4.0)))
+                )
+                Assert.That(secondInherited.TerminalSessionId, Is.EqualTo(Some secondTerminal))
+                Assert.That(firstAfter.Status.ContextUsage, Is.EqualTo(context 140000))
+                Assert.That(secondAfter.Status.ContextUsage, Is.EqualTo(context 120000))))
+
+    [<Test>]
     member _.``presence diagnostics distinguish reconnects normal sessions and duplicate processes``() =
         let first = exactIdentity 4151 5151L
         let second = exactIdentity 4152 5152L
