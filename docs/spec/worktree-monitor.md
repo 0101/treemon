@@ -71,6 +71,22 @@ Machine-level configuration persists in `~/.treemon/config.json` (or `$TREEMON_C
   other child processes cannot inherit the production log destination. `treemon.ps1` continues to
   capture production stdout and stderr in separate timestamped `treemon-prod*.log` files.
 
+### Production Lifecycle
+
+Deployment, stop, and restart discover the running dashboard by its listening port even when the
+invoking worktree has no local PID file. The configured production port is reserved operationally
+for Treemon; executable paths and Git repository ownership do not gate shutdown. Only current
+listener owners are stopped, so a stale PID file cannot target a reused PID outside that port.
+
+Shutdown retains the captured process handle and first requests PID-addressed graceful shutdown.
+A missing, rejected, failed, or timed-out request, or an accepted shutdown that does not finish
+within 30 seconds, falls back to forcing only that captured process. Shutdown difficulties are
+reported but do not block deployment when the forced stop succeeds. Failure to stop the process or
+release the port still aborts replacement and preserves the invoking worktree's PID file.
+Deployment checks the candidate against the live TerminalHost before stopping the server, and
+compatible deployments leave the independent host and its terminal processes running. Production
+launches and deploy/restart require an external PowerShell window; see `docs/spec/embedded-terminal.md`.
+
 ### Loopback Request Boundary
 
 - `HttpSecurity.csrfGuard` fronts the complete Fable.Remoting API and every state-changing canvas
