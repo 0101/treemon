@@ -886,14 +886,15 @@ function Start-ProductionServer([string[]]$Roots) {
 }
 
 function Stop-ProductionServer {
-    $runningPid = Get-RunningPid
-    if (-not $runningPid) {
+    if (@(
+        Get-NetTCPConnection -LocalPort $DefaultPort -State Listen -ErrorAction SilentlyContinue
+    ).Count -eq 0) {
         Write-Host "Production server is not running" -ForegroundColor Yellow
         if (Test-Path $PidFile) { Remove-Item $PidFile }
         return
     }
 
-    Write-Host "Stopping production server (PID: $runningPid)..." -ForegroundColor Yellow
+    Write-Host "Stopping production server on port $DefaultPort..." -ForegroundColor Yellow
     Stop-ProductionPortListeners
     Write-Host "Production server stopped" -ForegroundColor Green
 }
@@ -925,17 +926,17 @@ function Request-ProductionShutdown([int]$ProcessId) {
                 } elseif ($response.StatusCode -eq [Net.HttpStatusCode]::NotFound) {
                     Write-Host "The running server does not support graceful shutdown; using an exact-process stop." -ForegroundColor Yellow
                 } else {
-                    throw "Production shutdown was rejected (HTTP $([int]$response.StatusCode)); the server was not force-stopped"
+                    throw "Production shutdown was rejected (HTTP $([int]$response.StatusCode))"
                 }
             } finally {
                 $response.Dispose()
             }
         } catch [Net.Http.HttpRequestException] {
             throw [InvalidOperationException]::new(
-                "Production shutdown response could not be confirmed; the server was not force-stopped",
+                "Production shutdown response could not be confirmed",
                 $_.Exception)
         } catch [Threading.Tasks.TaskCanceledException] {
-            throw "Production shutdown request timed out; the server was not force-stopped"
+            throw "Production shutdown request timed out"
         }
     } finally {
         $request.Dispose()
@@ -948,17 +949,21 @@ function Stop-ProductionProcess($Process) {
     if ($Process.HasExited) { return }
     # Keep the captured process handle so PID reuse cannot redirect the exit check or forced stop.
     $null = $Process.Handle
-    $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $PublishDir "Treemon.exe"))
-    if (-not [string]::Equals($Process.Path, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to stop non-production process PID $($Process.Id) on port $DefaultPort"
+    $accepted = try {
+        Request-ProductionShutdown $Process.Id
+    } catch {
+        $reason = ConvertTo-Json -InputObject $_.Exception.Message -Compress
+        Write-Host "Graceful shutdown of production PID $($Process.Id) failed: $reason. Using an exact-process stop." -ForegroundColor Yellow
+        $false
     }
 
-    if (Request-ProductionShutdown $Process.Id) {
+    if ($accepted) {
         Write-Host "Waiting for production PID $($Process.Id) to finish graceful shutdown..." -ForegroundColor Gray
-        if (-not $Process.WaitForExit(30000)) {
-            throw "Production PID $($Process.Id) did not exit within 30s after accepting shutdown; deployment was stopped"
-        }
-    } elseif (-not $Process.HasExited) {
+        if ($Process.WaitForExit(30000)) { return }
+        Write-Host "Production PID $($Process.Id) did not exit within 30s after accepting shutdown; using an exact-process stop." -ForegroundColor Yellow
+    }
+
+    if (-not $Process.HasExited) {
         Write-Host "Stopping production process PID $($Process.Id)..." -ForegroundColor Yellow
         Stop-Process -Id $Process.Id -Force -ErrorAction Stop
         if (-not $Process.WaitForExit(10000)) {
@@ -994,11 +999,9 @@ function Repair-ProductionSqliteSharedMemory {
 }
 
 function Stop-ProductionPortListeners {
-    $savedPid = Get-RunningPid
     $listenerPids = @(
         Get-NetTCPConnection -LocalPort $DefaultPort -State Listen -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty OwningProcess
-        $savedPid
     ) |
         Sort-Object -Unique |
         Where-Object { $_ -gt 0 }

@@ -148,7 +148,11 @@ function Stop-TestHost($Process, $Manifest) {
 
 function Test-IsolatedProductionShutdown([string]$Executable, [string]$Directory) {
     $DefaultPort = Get-TestPort
-    $PublishDir = Split-Path -Parent $Executable
+    $ScriptDir = Join-Path $Directory "caller"
+    New-Item -ItemType Directory -Path $ScriptDir -Force | Out-Null
+    $PublishDir = Join-Path $Directory ".publish"
+    Copy-Item -LiteralPath (Split-Path -Parent $Executable) -Destination $PublishDir -Recurse
+    $Executable = Join-Path $PublishDir "Treemon.exe"
     $config = Join-Path $Directory "config"
     New-Item -ItemType Directory -Path $config -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $Directory "wwwroot") | Out-Null
@@ -173,7 +177,7 @@ function Test-IsolatedProductionShutdown([string]$Executable, [string]$Directory
         $wrongProcessRefused = $false
         try { Request-ProductionShutdown 0 | Out-Null } catch {
             $wrongProcessRefused = $_.Exception.Message -ceq
-                "Production shutdown was rejected (HTTP 409); the server was not force-stopped"
+                "Production shutdown was rejected (HTTP 409)"
         }
         Assert-True (
             $wrongProcessRefused -and -not $process.HasExited
@@ -197,7 +201,7 @@ function Test-IsolatedProductionShutdown([string]$Executable, [string]$Directory
         Assert-True (
             $log.Contains("[Shutdown] Stopping session activity")
         ) "The graceful HTTP shutdown did not drain the activity runtime"
-        Write-Host "PASS: published server accepts exact-process shutdown, drains SQLite, and leaves no WAL/SHM"
+        Write-Host "PASS: published server shuts down from another checkout directory, drains SQLite, and leaves no WAL/SHM"
     } finally {
         if (-not $process.HasExited) {
             Stop-Process -Id $process.Id -Force -ErrorAction Stop
@@ -315,7 +319,7 @@ try {
             return $portReleased
         }
 
-        Set-Content -LiteralPath $PidFile -Value "123" -NoNewline
+        Set-Content -LiteralPath $PidFile -Value "456" -NoNewline
         $shutdownError = $null
         try {
             Stop-ProductionPortListeners
@@ -327,9 +331,9 @@ try {
             "Production port $DefaultPort still has a TCP listener after 10s: 127.0.0.1 (PID: 123), ::1 (PID: 123)"
         ) "Listener timeout omitted the remaining addresses or owning process"
         Assert-True (
-            (Get-Content -LiteralPath $PidFile -Raw) -ceq "123" -and
+            (Get-Content -LiteralPath $PidFile -Raw) -ceq "456" -and
             ($script:stoppedListenerPids -join ",") -ceq "123"
-        ) "Failed shutdown removed the PID file or stopped a duplicate listener process"
+        ) "Failed shutdown removed the PID file, stopped a duplicate listener, or trusted a stale saved PID"
 
         $portReleased = $true
         $script:stoppedListenerPids = @()
@@ -352,69 +356,148 @@ try {
     Write-Host "PASS: listener shutdown reports remaining owners and preserves failed-shutdown state"
 
     & {
-        $PublishDir = Join-Path $root "process-stop"
+        $DefaultPort = Get-TestPort
+        $ScriptDir = Join-Path $root "shutdown-caller"
         $process = [pscustomobject]@{
             Id = 123
-            Path = Join-Path $PublishDir "Treemon.exe"
             HasExited = $false
+        }
+        $process | Add-Member -MemberType ScriptProperty -Name Handle -Value {
+            $script:shutdownEvents += "handle"
+            return 0
         }
         $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
             param($timeout)
             $script:shutdownEvents += "wait-$timeout"
-            return $script:shutdownExitConfirmed
+            if ($timeout -eq 30000) { return $script:gracefulExitConfirmed }
+            return $script:forcedExitConfirmed
         }
         function Request-ProductionShutdown([int]$ProcessId) {
             $script:shutdownEvents += "request-$ProcessId"
+            if ($script:exitDuringShutdownRequest) { $process.HasExited = $true }
+            if ($script:shutdownRequestError) { throw $script:shutdownRequestError }
             return $script:shutdownAccepted
         }
         function Stop-Process {
             [CmdletBinding()]
             param([int]$Id, [switch]$Force)
+            Assert-True ($Id -eq 123 -and $Force) "Shutdown did not force only the captured process"
             $script:shutdownEvents += "force-$Id"
         }
+        function git { throw "Shutdown must not depend on Git" }
 
-        $script:shutdownAccepted = $true
-        $script:shutdownExitConfirmed = $true
-        $script:shutdownEvents = @()
-        Stop-ProductionProcess $process
-        Assert-True (
-            ($script:shutdownEvents -join "|") -ceq "request-123|wait-30000"
-        ) "Accepted graceful shutdown forced the process or did not wait for its exit"
+        $scenarios = @(
+            @{
+                Name = "graceful exit"
+                Accepted = $true
+                GracefulExit = $true
+                ExpectedEvents = "handle|request-123|wait-30000"
+            },
+            @{
+                Name = "missing legacy endpoint"
+                ExpectedEvents = "handle|request-123|force-123|wait-10000"
+            },
+            @{
+                Name = "failed shutdown request"
+                RequestError = "Fixture shutdown request failed"
+                ExpectedWarning = "Fixture shutdown request failed"
+                ExpectedEvents = "handle|request-123|force-123|wait-10000"
+            },
+            @{
+                Name = "request timeout"
+                RequestError = "Production shutdown request timed out"
+                ExpectedWarning = "Production shutdown request timed out"
+                ExpectedEvents = "handle|request-123|force-123|wait-10000"
+            },
+            @{
+                Name = "graceful exit timeout"
+                Accepted = $true
+                ExpectedWarning = "did not exit within 30s after accepting shutdown"
+                ExpectedEvents = "handle|request-123|wait-30000|force-123|wait-10000"
+            },
+            @{
+                Name = "exit during failed shutdown request"
+                ExitDuringRequest = $true
+                RequestError = "Fixture connection closed after exit"
+                ExpectedWarning = "Fixture connection closed after exit"
+                ExpectedEvents = "handle|request-123"
+            },
+            @{
+                Name = "already-exited process"
+                AlreadyExited = $true
+                ExpectedEvents = ""
+            },
+            @{
+                Name = "forced stop cannot confirm exit"
+                ForceTimeout = $true
+                ExpectedError = "Production PID 123 did not exit within 10s after a forced stop"
+                ExpectedEvents = "handle|request-123|force-123|wait-10000"
+            }
+        )
+        foreach ($scenario in $scenarios) {
+            $process.HasExited = $scenario.AlreadyExited -eq $true
+            $script:shutdownAccepted = $scenario.Accepted -eq $true
+            $script:gracefulExitConfirmed = $scenario.GracefulExit -eq $true
+            $script:forcedExitConfirmed = -not $scenario.ForceTimeout
+            $script:shutdownRequestError = $scenario.RequestError
+            $script:exitDuringShutdownRequest = $scenario.ExitDuringRequest
+            $script:shutdownEvents = @()
+            $shutdownError = $null
+            $output = try {
+                Stop-ProductionProcess $process 6>&1 | Out-String
+            } catch {
+                $shutdownError = $_.Exception.Message
+            }
+            Assert-True (
+                $shutdownError -ceq $scenario.ExpectedError -and
+                ($script:shutdownEvents -join "|") -ceq $scenario.ExpectedEvents
+            ) "Unexpected behavior for $($scenario.Name): error='$shutdownError', events='$($script:shutdownEvents -join "|")'"
+            if ($scenario.ExpectedWarning) {
+                Assert-True ($output.Contains($scenario.ExpectedWarning)) "Shutdown omitted the $($scenario.Name) diagnostic"
+            }
+        }
 
-        $script:shutdownExitConfirmed = $false
-        $script:shutdownEvents = @()
-        $timeoutError = $null
-        try { Stop-ProductionProcess $process } catch { $timeoutError = $_.Exception.Message }
-        Assert-True (
-            $timeoutError -ceq "Production PID 123 did not exit within 30s after accepting shutdown; deployment was stopped" -and
-            ($script:shutdownEvents -join "|") -ceq "request-123|wait-30000"
-        ) "A graceful shutdown timeout triggered a forced stop or lost its diagnostic"
-
+        $process.HasExited = $false
         $script:shutdownAccepted = $false
-        $script:shutdownExitConfirmed = $true
+        $script:gracefulExitConfirmed = $true
+        $script:forcedExitConfirmed = $true
+        $script:shutdownRequestError = "Fixture shutdown request failed"
+        $script:exitDuringShutdownRequest = $false
+        $PidFile = Join-Path $ScriptDir ".treemon.pid"
+        Assert-True (-not (Test-Path -LiteralPath $PidFile)) "The caller unexpectedly has a PID file"
+        $process | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+            $script:shutdownEvents += "dispose"
+        }
+        function Get-Process {
+            [CmdletBinding()]
+            param([int]$Id)
+            Assert-True ($Id -eq 123) "Shutdown looked up a process outside the fixture"
+            return $process
+        }
+        function Get-NetTCPConnection {
+            [CmdletBinding()]
+            param([int]$LocalPort, [string]$State)
+            Assert-True (
+                $LocalPort -eq $DefaultPort -and $State -ceq "Listen"
+            ) "Shutdown queried listeners outside the fixture"
+            return @(
+                [pscustomobject]@{ OwningProcess = 123 },
+                [pscustomobject]@{ OwningProcess = 123 }
+            )
+        }
+        function Wait-PortFree([int]$Port, [int]$TimeoutSec) { return $true }
         $script:shutdownEvents = @()
-        Stop-ProductionProcess $process
+        Stop-ProductionServer
         Assert-True (
-            ($script:shutdownEvents -join "|") -ceq "request-123|force-123|wait-10000"
-        ) "Legacy shutdown did not force only the exact process and await its exit"
-
-        $process.Path = Join-Path $root "unrelated.exe"
-        $script:shutdownEvents = @()
-        $unrelatedError = $null
-        try { Stop-ProductionProcess $process } catch { $unrelatedError = $_.Exception.Message }
-        Assert-True (
-            $unrelatedError -ceq "Refusing to stop non-production process PID 123 on port $DefaultPort" -and
-            $script:shutdownEvents.Count -eq 0
-        ) "An unrelated port owner was sent a shutdown request or force-stopped"
+            ($script:shutdownEvents -join "|") -ceq "handle|request-123|force-123|wait-10000|dispose"
+        ) "Stop blocked on graceful shutdown failure, missed the server without a local PID file, or stopped duplicate listeners"
     }
-    Write-Host "PASS: exact-process shutdown waits for graceful exit and refuses unrelated processes"
+    Write-Host "PASS: shutdown is graceful when possible and otherwise forces only the captured process without Git"
 
     & {
-        $PublishDir = Join-Path $root "shutdown-response"
         $process = [pscustomobject]@{
             Id = 123
             Handle = 0
-            Path = Join-Path $PublishDir "Treemon.exe"
             HasExited = $false
         }
         $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
@@ -432,13 +515,16 @@ try {
             @{
                 Name = "incomplete shutdown acceptance"
                 Response = "HTTP/1.1 202 Accepted`r`nContent-Length: 17`r`nConnection: close`r`n`r`nShutdown"
-                ExpectedError = "Production shutdown response could not be confirmed; the server was not force-stopped"
-                ExpectedEvents = ""
+                ExpectedEvents = "force-123|wait-10000"
             },
             @{
                 Name = "explicit legacy endpoint absence"
                 Response = "HTTP/1.1 404 Not Found`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
-                ExpectedError = $null
+                ExpectedEvents = "force-123|wait-10000"
+            },
+            @{
+                Name = "rejected shutdown request"
+                Response = "HTTP/1.1 409 Conflict`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
                 ExpectedEvents = "force-123|wait-10000"
             }
         )
@@ -486,7 +572,7 @@ try {
                     $headers -contains "X-Treemon-Process-Id: 123"
                 ) "The $($scenario.Name) fixture did not receive the exact-process shutdown request"
                 Assert-True (
-                    $shutdownError -ceq $scenario.ExpectedError -and
+                    $null -eq $shutdownError -and
                     ($script:shutdownResponseEvents -join "|") -ceq $scenario.ExpectedEvents
                 ) "Unexpected process-stop behavior for $($scenario.Name): error='$shutdownError', events='$($script:shutdownResponseEvents -join "|")'"
             } finally {
@@ -495,7 +581,7 @@ try {
             }
         }
     }
-    Write-Host "PASS: incomplete shutdown acceptance aborts without force, while explicit 404 retains the legacy stop"
+    Write-Host "PASS: incomplete, missing, and rejected shutdown responses fall back to an exact-process stop"
 
     & {
         $ScriptDir = Join-Path $root "sqlite-recovery"
