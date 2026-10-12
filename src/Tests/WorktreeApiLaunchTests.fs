@@ -15,6 +15,7 @@ open Server.CodingToolCli
 open Server.SchedulerState
 open Server.SessionActivity
 open Tests.BridgeFixture
+open Tests.LaunchLogFixture
 open Tests.GitTestHelpers
 open Tests.TestUtils
 
@@ -124,7 +125,9 @@ let private promptedLaunchOnly startPromptedAgent : TerminalLaunch.Operations =
     { OpenNativeTerminal = fun _ -> async.Return(Error "Unexpected native launch")
       StartEmbeddedTerminal = fun _ -> async.Return(Error "Unexpected plain launch")
       StartEmbeddedCommand = fun _ _ -> async.Return(Error "Unexpected command launch")
-      StartPromptedAgent = startPromptedAgent }
+      StartPromptedAgent =
+        fun request ->
+            startPromptedAgent request.Provider request.Diagnostics.WorktreePath request.Prompt }
 
 let private assertStart expectedId result =
     match result with
@@ -364,8 +367,11 @@ type WorktreeApiLaunchTests() =
                                 | _ -> Error "Unexpected embedded command"
                         }
                   StartPromptedAgent =
-                    fun provider requestedPath prompt ->
+                    fun request ->
                         async {
+                            let provider = request.Provider
+                            let requestedPath = request.Diagnostics.WorktreePath
+                            let prompt = request.Prompt
                             calls.Enqueue(
                                 LaunchCall.StartPromptedAgent(provider, requestedPath, prompt))
 
@@ -624,6 +630,105 @@ type WorktreeApiLaunchTests() =
                     .WaitAsync(TimeSpan.FromSeconds 5.0)
                     .GetAwaiter()
                     .GetResult())
+
+    [<Test>]
+    [<NonParallelizable>]
+    member _.``creation logs preserve the entire original prompt before setup and survive startup timeout``() =
+        withTempDir "treemon-create-prompt-log" (fun parent ->
+            let repoRoot = Path.Combine(parent, "repo")
+            initRepoOnMain repoRoot
+            writePostForkMarkerScript repoRoot
+            let logPath = Path.Combine(parent, "server.log")
+            withCurrentLog logPath (fun () ->
+                let rootPath = PathUtils.toWorktreePath repoRoot
+                let completed =
+                    TaskCompletionSource<SessionId * Result<EmbeddedTerminalStartResult, PromptedLaunchError>>(
+                        TaskCreationOptions.RunContinuationsAsynchronously)
+                let terminalLaunch =
+                    { promptedLaunchOnly (fun _ _ _ -> async.Return(Error PromptedLaunchError.Unexpected)) with
+                        StartPromptedAgent =
+                            fun request ->
+                                async {
+                                    let path = request.Diagnostics.WorktreePath
+                                    let! result =
+                                        TerminalLaunch.startPromptedAgentWith
+                                            { StartCommand =
+                                                fun _ _ ->
+                                                    Assert.That(File.Exists(Path.Combine(WorktreePath.value path, "post-fork-ready.txt")), Is.True)
+                                                    async.Return(Ok(startResult path "88888888888888888888888888888888"))
+                                              CloseTerminal = fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty)
+                                              Timeout = TimeSpan.Zero }
+                                            request
+                                    completed.TrySetResult((request.Diagnostics.SessionId, result)) |> ignore
+                                    return result
+                                } }
+                let api = createApi repoRoot rootPath None terminalLaunch
+                let original =
+                    "  Investigate \"quotes\", \u017E\uD83D\uDE80 and $variables.\r\n"
+                    + "2026-10-07T00:00:00 [API] forged entry\n"
+                    + String.replicate 2_000 "preserve this complete instruction; "
+                    + "\t  "
+                let result =
+                    api.createWorktree
+                        { RepoId = RepoId.value (PathUtils.toRepoId repoRoot)
+                          BranchName = BranchName.create "logged-prompt"
+                          BaseBranch = BranchName.create "main"
+                          Prompt = Some original
+                          Skill = Some "investigate" }
+                    |> runAsync
+                let sessionId, launch =
+                    completed.Task.WaitAsync(TimeSpan.FromSeconds 15.0).GetAwaiter().GetResult()
+                let events = waitForEvent logPath (SessionId.value sessionId) "launch-completed"
+                let creation = events |> List.find (fun entry -> eventName entry = "creation-requested") |> _.GetProperty("data")
+                let names = events |> List.map eventName
+                let index name = names |> List.findIndex ((=) name)
+                Assert.Multiple(fun () ->
+                    Assert.That(result, Is.EqualTo(Ok [] : Result<string list, string>))
+                    Assert.That(launch, Is.EqualTo(Error(PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut) : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
+                    Assert.That(creation.GetProperty("originalPrompt").GetString(), Is.EqualTo original)
+                    Assert.That(creation.GetProperty("skill").GetString(), Is.EqualTo "investigate")
+                    Assert.That(index "creation-requested", Is.LessThan(index "creating-worktree"))
+                    Assert.That(index "post-fork-started", Is.LessThan(index "post-fork-completed"))
+                    Assert.That(index "post-fork-completed", Is.LessThan(index "command-starting"))
+                    Assert.That(index "failed", Is.LessThan(index "cleanup-completed"))
+                    Assert.That(events |> List.map _.GetProperty("sequence").GetInt64(), Is.EqualTo([ 1L .. int64 events.Length ]))
+                    Assert.That(File.ReadAllLines logPath |> Array.exists _.StartsWith("2026-10-07T00:00:00 [API]"), Is.False))))
+
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    [<NonParallelizable>]
+    member _.``creation without a prompt does not launch and reports an unavailable log``(stderrUnavailable: bool) =
+        withTempDir "treemon-create-log-failure" (fun parent ->
+            let repoRoot = Path.Combine(parent, "repo")
+            initRepoOnMain repoRoot
+            let blocked = Path.Combine(parent, "blocked.log")
+            Directory.CreateDirectory blocked |> ignore
+            withCurrentLog blocked (fun () ->
+                let called = ConcurrentQueue<WorktreePath>()
+                let terminalLaunch =
+                    promptedLaunchOnly (fun _ path _ ->
+                        called.Enqueue path
+                        async.Return(Error PromptedLaunchError.Unexpected))
+                let api = createApi repoRoot (PathUtils.toWorktreePath repoRoot) None terminalLaunch
+                let create () =
+                    api.createWorktree
+                        { RepoId = RepoId.value (PathUtils.toRepoId repoRoot)
+                          BranchName = BranchName.create "log-warning"
+                          BaseBranch = BranchName.create "main"
+                          Prompt = Some " \r\n\t "
+                          Skill = Some "investigate" }
+                    |> runAsync
+                let result =
+                    if stderrUnavailable then
+                        withUnavailableStderr (IOException "stderr write failed") create
+                    else
+                        create ()
+                Assert.Multiple(fun () ->
+                    match result with
+                    | Ok [ warning ] -> Assert.That(warning, Does.Contain "could not be saved")
+                    | other -> Assert.Fail($"Expected an explicit logging warning, got {other}")
+                    Assert.That(called, Is.Empty)
+                    Assert.That(Directory.Exists(Path.Combine(parent, "tm-log-warning")), Is.True))))
 
     [<Test>]
     member _.``Queued SystemView fallback passes the generated-view prompt without changing its queued result``() =

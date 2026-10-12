@@ -513,10 +513,11 @@ type SubmitCreateWorktreeRequestMappingTests() =
         tcs.Task.Result
 
     [<Test>]
-    member _.``SubmitCreateWorktree maps a non-blank prompt to Some trimmed``() =
-        let req = submitAndCapture (baseForm "  investigate the flaky test  ")
+    member _.``SubmitCreateWorktree preserves the complete original non-blank prompt``() =
+        let prompt = "  investigate \"the flaky test\"\r\n\t'quotes' and \u017E\uD83D\uDE80\n  "
+        let req = submitAndCapture (baseForm prompt)
 
-        Assert.That(req.Prompt, Is.EqualTo(Some "investigate the flaky test"))
+        Assert.That(req.Prompt, Is.EqualTo(Some prompt))
 
     [<Test>]
     member _.``SubmitCreateWorktree maps an empty prompt to None``() =

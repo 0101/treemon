@@ -203,6 +203,21 @@ Acceptance and cleanup continue if the requesting browser disconnects. The trans
 depend on the CLI's `-i` submission during plugin loading, but still requires Treemon's extension
 to join and submit through the SDK; a missing bridge fails startup.
 
+Every prompted launch emits correlated `[Launch]` JSON records under its reserved durable session
+UUID (`launchId`). The trace identifies the worktree, actual command and configured provider,
+acceptance deadline, queue reservation, exact started terminal, matched bridge's optional process
+identity and terminal origin, delivery, acceptance or failure, prompt removal, and exact cleanup
+outcome. Sequence and last-milestone values never regress when bridge delivery precedes the
+terminal-start reply. Acceptance observed after cancellation is marked separately.
+
+Timeout evidence distinguishes no eligible registration, an unrelated session, the expected
+session registered in another worktree, matching registration not dispatched, and dispatch without
+observed acceptance. HTTP failures include status and response length without the body; transport
+and cleanup failures retain diagnostic details. No attachment URL, shutdown capability, environment
+dump, or terminal transcript enters this trace. An external CLI's internal reason remains unknown
+when it has not registered. Create-worktree requests additionally preserve their original textarea
+prompt in local logs before startup, as specified in `docs/spec/worktree-monitor.md`.
+
 Every prompted or Resume Copilot command submitted through the host includes `--experimental`, so
 the CLI discovers Treemon's user-scoped reporting extension from the active Copilot config directory. A fresh
 isolated `COPILOT_HOME` therefore uses the same deterministic extension path as a normal launch
@@ -479,8 +494,9 @@ metadata; any changed host assembly or runtime file still changes the fingerprin
 fingerprint skips staging, while a different fingerprint is copied and verified in one
 digest-derived version directory.
 
-The replay buffer is raw and capped at 1 MiB in memory. Terminal bytes, prompts, environment
-contents, and attachment credentials are never persisted or written to diagnostics. The control
+The host replay buffer is raw and capped at 1 MiB in memory. Terminal bytes, prompts, environment
+contents, and attachment credentials are never persisted or written to host diagnostics. Product
+creation-prompt logging is a separate server-side boundary, not a terminal transcript. The control
 bearer exists only in host memory, the required discovery manifest, and live attachment URLs
 returned from the registry; it is never copied into durable state or written to diagnostics.
 
@@ -645,6 +661,7 @@ and dynamically allocated non-production ports. Tests never bind production port
 | `global.json` and `.github/workflows/ci.yml` | Exact repository SDK policy and CI installation from that policy |
 | `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, authenticated control client, staged-executable selection, and the one-pass update sequence |
 | `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
+| `src/Server/PromptedLaunchDiagnostics.fs` | Per-launch correlated milestones, failure evidence, original creation-prompt persistence, and cleanup outcomes |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, cleanup reservation, command-capable start, and authoritative snapshot reconciliation |
 | `src/Server/WorktreeCleanup.fs` | Product-level explicit terminal/worktree teardown, graceful exact-session coordination, host close, and closure publication |
 | `src/Server/ProcessIdentity.fs` | Shared exact PID/start-tick identity and resolver used by activity ingress and process lifecycle checks |
