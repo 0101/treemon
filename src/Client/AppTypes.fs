@@ -42,6 +42,8 @@ type Model =
       IsLoading: bool
       HasError: bool
       SortMode: SortMode
+      FocusWindow: WorktreeFocus.Window
+      Now: System.DateTimeOffset
       TerminalHostUpdate: TerminalHostUpdateModel
       IsCompact: bool
       SchedulerEvents: CardEvent list
@@ -88,6 +90,7 @@ type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
     | DataFailed of exn
     | ToggleSort
+    | CycleWorktreeFocus
     | UpdateTerminalHost
     | TerminalHostUpdateCompleted of TerminalHostUpdateState
     | TerminalHostUpdateRequestFailed of exn
@@ -222,6 +225,9 @@ let findWorktree (scopedKey: string) (model: Model) =
     model.Repos
     |> List.tryPick (fun r ->
         r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
+
+let dashboardRepos (model: Model) =
+    WorktreeFocus.project model.FocusWindow model.Now model.Repos
 
 let saveCollapsedReposCmd (repos: RepoModel list) : Cmd<Msg> =
     let collapsedRepos = repos |> List.filter _.IsCollapsed |> List.map _.RepoId

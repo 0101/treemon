@@ -22,9 +22,8 @@ module OverviewBand
 //                      proportional width is inherently dynamic; spec decision (g)). The old N-unit-cell
 //                      workaround is gone.
 //
-// Empty categories never reach the view (aggregate omits them), so nothing ever renders a 0, and a
-// fully-empty roll-up collapses to Html.none. Group columns toggle the drill-down described by
-// docs/spec/beads-overview-band.md.
+// Empty categories never reach the view (aggregate omits them), so nothing ever renders a 0.
+// Focus and history retain their controls even when the live aggregate is empty.
 
 open Shared
 open Navigation
@@ -340,8 +339,8 @@ let hasAgentGroups (repos: RepoModel list) =
 let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel list) =
     aggregateRepos repos |> selectionPresent selection
 
-/// Render the Overview band for the current repos. Returns Html.none when the whole roll-up is empty
-/// so the band adds no chrome (not even margin) when there is nothing to show. `selection` is the
+/// Render live groups and unfiltered history. An active Focus window or history keeps the controls
+/// available with an empty live aggregate. `selection` is the
 /// currently drilled-down group (if any); `onSelectGroup` toggles a group's selection when its column
 /// is clicked, and `onSelectWorktree` (used by the breakdown panel) focuses a member card with
 /// arrow-nav parity. `historyWindow`/`onCycleChart` drive the ephemeral in-band history chart's cycle,
@@ -354,6 +353,7 @@ let view
     (historyWindow: HistoryWindow option)
     (onCycleChart: unit -> unit)
     (history: InstalledOverviewHistory option)
+    (focusWindow: WorktreeFocus.Window)
     (repos: RepoModel list)
     : ReactElement =
     let overview = aggregateRepos repos
@@ -363,7 +363,7 @@ let view
         | _ -> None
 
     match overview.Agents, overview.Tasks with
-    | [], [] -> Html.none
+    | [], [] when not (WorktreeFocus.isEnabled focusWindow) && Option.isNone historyWindow -> Html.none
     | agents, tasks ->
         let agentSection =
             match agents with
@@ -385,10 +385,9 @@ let view
             | _ -> Html.none
 
         let agentHistory =
-            match agents, chartData with
-            | [], _
-            | _, None -> Html.none
-            | _, Some (window, response) ->
+            match chartData with
+            | None -> Html.none
+            | Some (window, response) ->
                 OverviewChart.agentsChart window response.Anchor response.Snapshots
 
         let taskSection =
@@ -408,10 +407,9 @@ let view
                      | _ -> Html.none)
 
         let taskHistory =
-            match tasks, chartData with
-            | [], _
-            | _, None -> Html.none
-            | _, Some (window, response) ->
+            match chartData with
+            | None -> Html.none
+            | Some (window, response) ->
                 OverviewChart.tasksChart window response.Anchor response.Snapshots
 
         React.Fragment
@@ -432,6 +430,16 @@ let view
                     prop.children
                         [ if List.isEmpty agents then
                               cycleButton false historyWindow onCycleChart
+                          if WorktreeFocus.isEnabled focusWindow && Option.isSome historyWindow then
+                              Html.div [
+                                  prop.className "status-bar overview-history-scope"
+                                  prop.text "History: all worktrees; Focus not applied"
+                              ]
+                          if List.isEmpty agents && List.isEmpty tasks && WorktreeFocus.isEnabled focusWindow then
+                              Html.div [
+                                  prop.className "status-bar overview-focus-empty"
+                                  prop.text "Nothing to summarize in this Focus window."
+                              ]
                           agentBreakdownPanel
                           agentHistory
                           taskSection

@@ -8,6 +8,7 @@
     <Compile Include="BrowserObserverInterop.fs" />
     <Compile Include="OverviewPresentation.fs" />
     <Compile Include="Navigation.fs" />
+    <Compile Include="WorktreeFocus.fs" />
     <Compile Include="CanvasTypes.fs" />
     <Compile Include="Components.fs" />
     <Compile Include="ModalOverlay.fs" />

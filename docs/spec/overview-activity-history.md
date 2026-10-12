@@ -8,7 +8,7 @@ missed time, late inputs, or downtime.
 
 ## Goals
 
-- Persist the same task and per-physical-instance agent projection shown by the live Overview.
+- Persist the unfiltered canonical task and per-physical-instance agent projection used by Overview.
 - Keep captured 12-hour, 24-hour, and 72-hour history available across restart without requiring an
   open browser.
 - Store only task and agent counts, never drill-down membership or session content.
@@ -89,6 +89,9 @@ missed time, late inputs, or downtime.
 
 ### In-band charts
 
+- Dashboard Focus scopes only the live band and worktree cards. History remains global, carries an
+  explicit unfiltered scope note while Focus is active, and stays accessible with an empty live
+  Focus projection. Client filtering never changes capture or stored snapshots.
 - One button cycles `Hidden -> 12h -> 24h -> 72h -> Hidden`; the state is client-only and resets on
   reload.
 - History and drill-down are mutually exclusive. Opening either closes the other.

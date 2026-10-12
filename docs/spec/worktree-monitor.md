@@ -15,6 +15,19 @@
 - Dark theme, responsive 1-4 column card grid
 - Collapsible repo sections — header with folder name, collapse toggle, coding tool status dots per worktree when collapsed
 - Cards sorted by last activity (default), toggleable to alphabetical; compact mode toggle
+- **Focus** cycles `off -> 2h -> 8h -> 24h -> off` and resets to off on reload. It shows worktrees
+  whose greatest real session activity falls within the inclusive rolling window; heartbeat-only
+  liveness, terminal presence, and Git commits do not qualify. Recent closed sessions qualify,
+  unknown activity does not, and all session markers on a qualifying worktree remain visible.
+- Focus scopes normal/archive cards, collapsed repository dots, live Overview, and keyboard targets
+  without changing collected data, Sort, monitoring, or resumability. Repository headers and creation
+  controls remain available; no matches shows an explicit empty state rather than loading.
+  Passive expiry preserves open Canvas/Terminal targets until deliberate card navigation.
+  Ctrl+P searches all non-archived work and clears Focus before revealing a hidden result.
+  Explicit Canvas overview branch/document selections likewise reveal their worktree.
+  Successful worktree creation clears Focus so a new worktree without session activity is visible.
+  The Focus control remains beside the workspace tabs in One-pane mode. Overview history remains
+  global and is labelled as unfiltered while Focus is active.
 - Merged PRs get dimmed cards with delete button
 - Scheduler footer: one row per refresh category, persistent status (never reverts to "pending")
 - Loading skeleton on cold start until first worktree list completes
@@ -416,6 +429,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Client/ActivityState.fs` / `ActivityUpdate.fs` | User-activity / idle-detection: state slice + `Tick`/`UserActivity` bodies + activity subscription |
 | `src/Client/CanvasView.fs` | Canvas pane view wiring (`CanvasPane.view` callbacks/slices) |
 | `src/Client/Navigation.fs` | Keyboard navigation: spatial arrow keys, key bindings |
+| `src/Client/WorktreeFocus.fs` | Client-only fixed Focus windows and shared real-session-activity projection |
 | `src/Tests/fixtures/` | Captured AzDo/GitHub PR + build data and dashboard fixtures for offline tests |
 | `treemon.ps1` | Production-log opt-in plus isolated development and demo log directories |
 

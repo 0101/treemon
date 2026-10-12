@@ -56,6 +56,7 @@
     <Compile Include="ConfirmModalTests.fs" />
     <Compile Include="NavigationTests.fs" />
     <Compile Include="WorktreeSearchTests.fs" />
+    <Compile Include="WorktreeFocusTests.fs" />
     <Compile Include="ComponentsTests.fs" />
     <Compile Include="CardViewsTests.fs" />
     <Compile Include="AutoSyncClientTests.fs" />
@@ -82,6 +83,7 @@
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />
     <Compile Include="OverviewBandE2ETests.fs" />
+    <Compile Include="WorktreeFocusE2ETests.fs" />
     <Compile Include="RemoveWorktreeTests.fs" />
     <Compile Include="CanvasTestHelpers.fs" />
     <Compile Include="CanvasPromptTests.fs" />
