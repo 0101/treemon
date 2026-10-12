@@ -63,24 +63,17 @@ let internal startPromptedAgentWith dependencies (request: PromptedAgentRequest)
                 dependencies.CloseTerminal started.TerminalId
                 |> Async.Catch
 
-            match cleanup with
-            | Choice1Of2(Ok _) ->
-                diagnostics.Emit(PromptedLaunchDiagnostics.Event.CleanupCompleted(Ok()))
-                return Error(PromptedLaunchError.StartupFailed failure)
-            | Choice1Of2(Error cleanupError) ->
-                diagnostics.Emit(PromptedLaunchDiagnostics.Event.CleanupCompleted(Error cleanupError))
-                return
-                    Error(
-                        PromptedLaunchError.StartupCleanupFailed(
-                            failure,
-                            started.TerminalId))
-            | Choice2Of2 ex ->
-                diagnostics.Emit(PromptedLaunchDiagnostics.Event.CleanupCompleted(Error(ex.ToString())))
-                return
-                    Error(
-                        PromptedLaunchError.StartupCleanupFailed(
-                            failure,
-                            started.TerminalId))
+            let cleanupResult =
+                match cleanup with
+                | Choice1Of2 result -> result |> Result.map ignore
+                | Choice2Of2 ex -> Error(ex.ToString())
+
+            diagnostics.Emit(PromptedLaunchDiagnostics.Event.CleanupCompleted cleanupResult)
+
+            return
+                match cleanupResult with
+                | Ok () -> Error(PromptedLaunchError.StartupFailed failure)
+                | Error _ -> Error(PromptedLaunchError.StartupCleanupFailed(failure, started.TerminalId))
     }
 
     let guarded =

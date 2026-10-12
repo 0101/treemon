@@ -336,47 +336,56 @@ type StartupPromptTests() =
 
     [<TestCase(false)>]
     [<TestCase(true)>]
-    member _.``SDK rejection closes only the new terminal and reports cleanup failure``(cleanupFails: bool) =
-        withBridges 1 (fun bridges ->
-            let listener, url = List.exactlyOne bridges
-            let path = WorktreePath(uniquePath "startup-rejection")
-            let sessionId = Guid.NewGuid().ToString()
-            let expectedStart = started path
-            let closes = ConcurrentQueue<EmbeddedTerminalId>()
-            let incoming = listener.GetContextAsync()
-            let launched =
-                start
-                    (TimeSpan.FromSeconds 5.0)
-                    (fun _ _ ->
-                        register (WorktreePath.value path) (Some sessionId) url
-                        async.Return(Ok expectedStart))
-                    (fun id ->
-                        closes.Enqueue id
-                        async.Return(
-                            if cleanupFails then Error "exact cleanup failed"
-                            else Ok EmbeddedTerminalSnapshot.empty))
-                    sessionId
-                    path
-                    "Initial task"
-
-            let context = await incoming
-            readPrompt context |> ignore
-            respond 503 context
-            let result = await launched
-
-            let expected =
-                if cleanupFails then
-                    PromptedLaunchError.StartupCleanupFailed(
-                        StartupPromptFailure.Rejected,
-                        expectedStart.TerminalId)
-                else
-                    PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected
-
-            Assert.Multiple(fun () ->
-                Assert.That(closes.ToArray(), Is.EqualTo([| expectedStart.TerminalId |]))
-                Assert.That(
-                    result,
-                    Is.EqualTo(Error expected : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))))
+    member _.``SDK rejection preserves HTTP evidence and closes only the new terminal with its cleanup outcome``(cleanupFails: bool) =
+        withTempDir "launch-log-rejection" (fun root ->
+            withBridges 1 (fun bridges ->
+                let listener, url = List.exactlyOne bridges
+                let path = WorktreePath(Path.Combine(root, "worktree"))
+                let sessionId = Guid.NewGuid().ToString()
+                let expectedStart = started path
+                let closes = ConcurrentQueue<EmbeddedTerminalId>()
+                let logPath = Path.Combine(root, "launch.log")
+                let incoming = listener.GetContextAsync()
+                let launched =
+                    startRecorded
+                        (TimeSpan.FromSeconds 5.0)
+                        (fun _ _ ->
+                            register (WorktreePath.value path) (Some sessionId) url
+                            async.Return(Ok expectedStart))
+                        (fun id ->
+                            closes.Enqueue id
+                            async.Return(
+                                if cleanupFails then Error "exact cleanup failed"
+                                else Ok EmbeddedTerminalSnapshot.empty))
+                        (recordedAttempt logPath sessionId path)
+                        "Initial task"
+                let context = await incoming
+                readPrompt context |> ignore
+                let secretBody = "private-response-body\nsecret-token"
+                let body = System.Text.Encoding.UTF8.GetBytes secretBody
+                context.Response.StatusCode <- 503
+                context.Response.ContentLength64 <- int64 body.Length
+                context.Response.OutputStream.Write(body, 0, body.Length)
+                context.Response.Close()
+                let result = await launched
+                SessionBridge.flushPending (WorktreePath.value path) |> Async.RunSynchronously
+                let events = readEvents logPath sessionId
+                let delivery = events |> List.find (fun entry -> eventName entry = "prompt-delivery-failed") |> _.GetProperty("data")
+                let cleanup = events |> List.find (fun entry -> eventName entry = "cleanup-completed") |> _.GetProperty("data")
+                let expected =
+                    if cleanupFails then
+                        PromptedLaunchError.StartupCleanupFailed(
+                            StartupPromptFailure.Rejected,
+                            expectedStart.TerminalId)
+                    else
+                        PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected
+                Assert.Multiple(fun () ->
+                    Assert.That(closes.ToArray(), Is.EqualTo([| expectedStart.TerminalId |]))
+                    Assert.That(result, Is.EqualTo(Error expected : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
+                    Assert.That(delivery.GetProperty("status").GetInt32(), Is.EqualTo 503)
+                    Assert.That(delivery.GetProperty("bodyLength").GetInt32(), Is.EqualTo secretBody.Length)
+                    Assert.That(cleanup.GetProperty("outcome").GetString(), Is.EqualTo(if cleanupFails then "failed" else "succeeded"))
+                    Assert.That(File.ReadAllText logPath, Does.Not.Contain "secret-token"))))
 
     [<Test>]
     member _.``startup timeout still cleans up the exact terminal when both logging sinks fail``() =
@@ -653,48 +662,6 @@ type StartupPromptTests() =
                     Assert.That(failure.GetProperty("lastMilestone").GetString(), Is.EqualTo "sending-prompt")
                     Assert.That(events |> List.map eventName, Does.Contain "bridge-matched")
                     Assert.That(events |> List.map eventName, Does.Contain "prompt-sending"))))
-
-    [<TestCase(false)>]
-    [<TestCase(true)>]
-    member _.``rejection logs preserve HTTP evidence and exact cleanup outcome without response content``(cleanupFails: bool) =
-        withTempDir "launch-log-rejection" (fun root ->
-            withBridges 1 (fun bridges ->
-                let listener, url = List.exactlyOne bridges
-                let path = WorktreePath(Path.Combine(root, "worktree"))
-                let sessionId = Guid.NewGuid().ToString()
-                let logPath = Path.Combine(root, "launch.log")
-                let incoming = listener.GetContextAsync()
-                let launched =
-                    startRecorded
-                        (TimeSpan.FromSeconds 5.0)
-                        (fun _ _ ->
-                            register (WorktreePath.value path) (Some sessionId) url
-                            async.Return(Ok(started path)))
-                        (fun _ -> async.Return(if cleanupFails then Error "exact cleanup failed" else Ok EmbeddedTerminalSnapshot.empty))
-                        (recordedAttempt logPath sessionId path)
-                        "Initial task"
-                let context = await incoming
-                readPrompt context |> ignore
-                let secretBody = "private-response-body\nsecret-token"
-                let body = System.Text.Encoding.UTF8.GetBytes secretBody
-                context.Response.StatusCode <- 503
-                context.Response.ContentLength64 <- int64 body.Length
-                context.Response.OutputStream.Write(body, 0, body.Length)
-                context.Response.Close()
-                let result = await launched
-                SessionBridge.flushPending (WorktreePath.value path) |> Async.RunSynchronously
-                let events = readEvents logPath sessionId
-                let delivery = events |> List.find (fun entry -> eventName entry = "prompt-delivery-failed") |> _.GetProperty("data")
-                let cleanup = events |> List.find (fun entry -> eventName entry = "cleanup-completed") |> _.GetProperty("data")
-                let expected =
-                    if cleanupFails then PromptedLaunchError.StartupCleanupFailed(StartupPromptFailure.Rejected, (started path).TerminalId)
-                    else PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected
-                Assert.Multiple(fun () ->
-                    Assert.That(result, Is.EqualTo(Error expected : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
-                    Assert.That(delivery.GetProperty("status").GetInt32(), Is.EqualTo 503)
-                    Assert.That(delivery.GetProperty("bodyLength").GetInt32(), Is.EqualTo secretBody.Length)
-                    Assert.That(cleanup.GetProperty("outcome").GetString(), Is.EqualTo(if cleanupFails then "failed" else "succeeded"))
-                    Assert.That(File.ReadAllText logPath, Does.Not.Contain "secret-token"))))
 
     [<Test>]
     member _.``bridge progress observed before terminal reply never regresses in the log``() =
