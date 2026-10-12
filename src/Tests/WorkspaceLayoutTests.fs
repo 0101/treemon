@@ -365,12 +365,17 @@ type WorkspaceLayoutTests() =
                     "buttons => buttons.length === 3 && buttons.every(button => button.tabIndex === 0)")
             let! legacyHeaderButtonsStayOutOfTabOrder =
                 this.Page
-                    .Locator(".header-controls > .ctrl-btn")
+                    .Locator(".header-controls > .ctrl-btn:not(.worktree-focus-btn)")
                     .EvaluateAllAsync<bool>(
                         "buttons => buttons.length > 0 && buttons.every(button => button.tabIndex === -1)")
+            let! focusButtonTabIndex =
+                this.Page
+                    .Locator(".header-controls > .worktree-focus-btn")
+                    .EvaluateAsync<int>("button => button.tabIndex")
             Assert.Multiple(fun () ->
                 Assert.That(ratioButtonsAreFocusable, Is.True)
-                Assert.That(legacyHeaderButtonsStayOutOfTabOrder, Is.True))
+                Assert.That(legacyHeaderButtonsStayOutOfTabOrder, Is.True)
+                Assert.That(focusButtonTabIndex, Is.EqualTo(0), "Desktop Focus must remain keyboard-focusable"))
 
             do! Assertions.Expect(buttons.First).ToHaveAttributeAsync("aria-pressed", "true")
             do! Assertions.Expect(buttons.Nth(2)).ToHaveAttributeAsync("aria-pressed", "false")

@@ -178,10 +178,11 @@ type WorktreeFocusE2ETests() =
             Assert.That(headerFits, Is.True, "tabs and Focus must not overlap or overflow")
         }
 
-    [<Test>]
-    member this.``The desktop toolbar keeps Focus accessible with all pane and update controls``() =
+    [<TestCase(901)>]
+    [<TestCase(1280)>]
+    member this.``The desktop toolbar keeps Focus accessible with all pane and update controls``(width: int) =
         task {
-            do! this.Page.SetViewportSizeAsync(901, 720)
+            do! this.Page.SetViewportSizeAsync(width, 720)
             let response =
                 { responseAt DateTimeOffset.UtcNow with
                     TerminalPaneOpen = true
@@ -209,4 +210,16 @@ type WorktreeFocusE2ETests() =
             let measured = Newtonsoft.Json.Linq.JObject.Parse layout
             TestContext.Out.WriteLine(layout)
             Assert.That(measured.Value<bool>("fits"), Is.True, "the full toolbar must not overflow or clip Focus")
+
+            let button = this.Page.Locator(".header-controls > .worktree-focus-btn")
+            do! button.ClickAsync()
+            do! Assertions.Expect(button).ToHaveTextAsync("Focus: 2h")
+            do! Assertions.Expect(this.Page.Locator(".card-grid .wt-card")).ToHaveCountAsync(1)
+            do! button.FocusAsync()
+            do! Assertions.Expect(button).ToBeFocusedAsync()
+            do! button.PressAsync("Enter")
+            do! Assertions.Expect(button).ToHaveTextAsync("Focus: 8h")
+            do! button.PressAsync("Space")
+            do! Assertions.Expect(button).ToHaveTextAsync("Focus: 24h")
+            do! Assertions.Expect(this.Page.Locator(".card-grid .wt-card")).ToHaveCountAsync(2)
         }
