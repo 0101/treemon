@@ -172,7 +172,9 @@ type DashboardTests() =
 
     let startTerminalHostUpdate (page: IPage) =
         task {
+            do! page.SetViewportSizeAsync(1280, 720)
             let! prepared = prepareTerminalHostUpdate page
+            do! Assertions.Expect(page.Locator(".header-center")).ToBeVisibleAsync()
             do! prepared.Action.ClickAsync()
             do!
                 prepared.UpdateStarted.WaitAsync(

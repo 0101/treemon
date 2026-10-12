@@ -129,6 +129,9 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 - The overview groups worktrees with AgentDocs by repository and orders entries by latest authored-document activity. SystemViews are excluded.
 - Clicking a worktree entry focuses that card.
 - Clicking a doc entry focuses the worktree, opens the pane if needed, and selects that doc.
+- Explicit overview branch or document selection clears dashboard Focus when its worktree is
+  outside the selected window, so the selected card remains navigable and Escape preserves the
+  document. Passive document updates and tab selections do not clear Focus.
 
 ### Doc Awareness
 

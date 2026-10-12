@@ -42,8 +42,8 @@
             padding: 0 16px; gap: 12px;
         }
         .header-left { display: flex; align-items: center; gap: 10px; }
-        .header-center { position: absolute; left: 50%; transform: translateX(-50%); display: flex; align-items: center; }
-        .header-right { display: flex; align-items: center; gap: 12px; }
+        .header-center { position: absolute; left: 50%; transform: translateX(-50%); display: flex; align-items: center; pointer-events: none; }
+        .header-right { display: flex; align-items: center; gap: 12px; min-width: 0; }
         .app-header .eye-logo { width: 40px; height: 25px; margin-top: 0; }
         .eye-logo { display: block; opacity: 0.7; }
         .eye-closed { }
@@ -57,11 +57,12 @@
         .metric-bar-track { width: 80px; height: 5px; background: #313244; border-radius: 3px; overflow: hidden; }
         .metric-bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease, background-color 0.5s ease; }
         .metric-bar-label { font-size: var(--fs-sm); color: #585b70; white-space: nowrap; line-height: 1; }
-        .header-controls { display: flex; gap: 6px; }
+        .header-controls { display: flex; gap: 6px; min-width: 0; overflow-x: auto; }
         .ctrl-btn {
             background: #313244; border: 1px solid #45475a; border-radius: 6px;
             padding: 4px 10px; font-size: var(--fs-base); cursor: pointer; color: #bac2de;
             font-family: inherit; transition: background 0.15s, border-color 0.15s;
+            flex-shrink: 0; white-space: nowrap;
         }
         .ctrl-btn:hover { background: #45475a; border-color: #585b70; }
         .ctrl-btn.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
@@ -1115,9 +1116,10 @@
         .workspace-single-header > .header-right { display: none; }
         .workspace-tabs { display: flex; gap: 4px; align-items: center; min-width: 0; }
         .workspace-single-header > .workspace-tabs { flex: 1 1 auto; height: 100%; }
-        .workspace-tab { flex: 1 1 0; min-width: 0; }
+        .workspace-tab { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .workspace-tab .canvas-badge { margin-left: 4px; }
-        .workspace-tab:focus-visible { outline: 2px solid #89b4fa; outline-offset: 1px; }
+        .workspace-tab:focus-visible,
+        .worktree-focus-btn:focus-visible { outline: 2px solid #89b4fa; outline-offset: 1px; }
         .app-layout.workspace-single {
             flex-direction: row;
             height: calc(100vh - 36px);
