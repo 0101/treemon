@@ -611,6 +611,12 @@ let private resolveRegistration worktreeKey (queued: QueuedPrompt) =
 let private failureBoundary () =
     lock registrationClockLock (fun () -> lastReceivedAt)
 
+let internal completeStartupAcceptance
+    (completion: TaskCompletionSource<Result<unit, StartupPromptFailure>>)
+    (diagnostics: PromptedLaunchDiagnostics.Attempt) =
+    if not (completion.TrySetResult(Ok())) then
+        diagnostics.Emit(PromptedLaunchDiagnostics.Event.PromptAccepted true)
+
 let private dispatch worktreeKey (registration: RegisteredSession) queued =
     async {
         let cancellationToken =
@@ -636,11 +642,8 @@ let private dispatch worktreeKey (registration: RegisteredSession) queued =
                        worktree = worktreeKey
                        sessionId = SessionId.value registration.Entry.SessionId |})
                 |> Log.log "SessionBridge"
-            | PromptDelivery.Startup(completion, token, diagnostics) ->
-                let afterCancellation = token.IsCancellationRequested
-                completion.TrySetResult(Ok()) |> ignore
-                if afterCancellation then
-                    diagnostics.Emit(PromptedLaunchDiagnostics.Event.PromptAccepted true)
+            | PromptDelivery.Startup(completion, _, diagnostics) ->
+                completeStartupAcceptance completion diagnostics
 
             return None
         | Error deliveryFailure ->
@@ -795,6 +798,9 @@ let internal startWithPrompt timeout (diagnostics: PromptedLaunchDiagnostics.Att
             TaskCompletionSource<Result<unit, StartupPromptFailure>>(
                 TaskCreationOptions.RunContinuationsAsynchronously)
         use deadline = new CancellationTokenSource()
+        use _ =
+            deadline.Token.Register(fun () ->
+                completion.TrySetResult(Error StartupPromptFailure.TimedOut) |> ignore)
         let queued =
             { Id = Guid.NewGuid()
               EnqueuedAt = (deliveryLane worktreeKey).NextEnqueuedAt()
@@ -833,18 +839,14 @@ let internal startWithPrompt timeout (diagnostics: PromptedLaunchDiagnostics.Att
             | Ok started ->
                 deadline.CancelAfter(timeout: TimeSpan)
 
-                try
-                    let! accepted =
-                        completion.Task.WaitAsync(deadline.Token) |> Async.AwaitTask
+                let! accepted = completion.Task |> Async.AwaitTask
 
-                    return
-                        match accepted with
-                        | Ok() ->
-                            diagnostics.Emit(PromptedLaunchDiagnostics.Event.PromptAccepted false)
-                            StartupResult.Accepted started
-                        | Error error -> failed started error
-                with :? OperationCanceledException when deadline.IsCancellationRequested ->
-                    return failed started StartupPromptFailure.TimedOut
+                return
+                    match accepted with
+                    | Ok() ->
+                        diagnostics.Emit(PromptedLaunchDiagnostics.Event.PromptAccepted false)
+                        StartupResult.Accepted started
+                    | Error error -> failed started error
         finally
             deadline.Cancel()
             removeQueued worktreeKey queued.Id

@@ -663,6 +663,69 @@ type StartupPromptTests() =
                     Assert.That(events |> List.map eventName, Does.Contain "bridge-matched")
                     Assert.That(events |> List.map eventName, Does.Contain "prompt-sending"))))
 
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member _.``startup timeout and acceptance share one winner and classify late delivery``(acceptanceWins: bool) =
+        withTempDir "startup-acceptance-winner" (fun root ->
+            let path = WorktreePath(Path.Combine(root, "worktree"))
+            let sessionId = Guid.NewGuid().ToString()
+            let logPath = Path.Combine(root, "launch.log")
+            let diagnostics = recordedAttempt logPath sessionId path
+            let expectedStart = started path
+            let closes = ConcurrentQueue<EmbeddedTerminalId>()
+            let reserved = TaskCompletionSource<_>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let result =
+                startRecorded
+                    TimeSpan.Zero
+                    (fun _ _ ->
+                        async {
+                            let! pending = SessionBridge.pendingPrompts (WorktreePath.value path)
+                            match (List.exactlyOne pending).Delivery with
+                            | SessionBridge.PromptDelivery.Startup(completion, _, _) ->
+                                reserved.TrySetResult completion |> ignore
+                                if acceptanceWins then
+                                    SessionBridge.completeStartupAcceptance completion diagnostics
+                            | SessionBridge.PromptDelivery.Ordinary _ ->
+                                Assert.Fail("Expected a reserved startup prompt")
+                            return Ok expectedStart
+                        })
+                    (fun id ->
+                        closes.Enqueue id
+                        async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                    diagnostics
+                    "Initial task"
+                |> await
+            let completion = await reserved.Task
+            if not acceptanceWins then
+                SessionBridge.completeStartupAcceptance completion diagnostics
+
+            let events = readEvents logPath sessionId
+            let acceptance =
+                events
+                |> List.filter (fun entry -> eventName entry = "prompt-accepted")
+                |> List.exactlyOne
+            let expected =
+                if acceptanceWins then Ok expectedStart
+                else Error(PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut)
+            let expectedCompletion =
+                if acceptanceWins then Ok()
+                else Error StartupPromptFailure.TimedOut
+            let expectedEvents =
+                [ "command-starting"; "prompt-reserved"; "terminal-started" ]
+                @ (if acceptanceWins then
+                       [ "prompt-accepted"; "prompt-removed" ]
+                   else
+                       [ "failed"; "prompt-removed"; "cleanup-started"; "cleanup-completed"; "prompt-accepted" ])
+            Assert.Multiple(fun () ->
+                Assert.That(result, Is.EqualTo expected)
+                Assert.That(await completion.Task, Is.EqualTo expectedCompletion)
+                Assert.That(closes.ToArray(), Is.EqualTo(if acceptanceWins then [||] else [| expectedStart.TerminalId |]))
+                Assert.That(acceptance.GetProperty("data").GetProperty("afterCancellation").GetBoolean(), Is.EqualTo(not acceptanceWins))
+                Assert.That(events |> List.map eventName, Is.EqualTo expectedEvents)
+                Assert.That(
+                    SessionBridge.pendingPrompts (WorktreePath.value path) |> Async.RunSynchronously,
+                    Is.Empty)))
+
     [<Test>]
     member _.``bridge progress observed before terminal reply never regresses in the log``() =
         withTempDir "launch-log-early-bridge" (fun root ->
