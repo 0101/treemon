@@ -484,7 +484,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
   surfaced because the worktree already exists, and it launches even after a post-fork warning.
   Provider is read **directly** from the new worktree's `.treemon.json` because it is not in
   scheduler state yet.
-- The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The complete instruction travels through the shared exact-session startup bridge, not a shell prompt argument, so multiline text, quoted JSON, and repository-derived data remain intact. See `docs/spec/embedded-terminal.md`.
+- The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The complete instruction travels through the shared terminal-bound startup bridge, not a shell prompt argument, so multiline text, quoted JSON, and repository-derived data remain intact. Fresh launches let Copilot generate its session ID; the exact returned terminal identifies the recipient. See `docs/spec/embedded-terminal.md`.
 - Create-worktree and delete-confirm MVU updates defer forcing the lazy remoting proxy until their Elmish commands execute. Constructing a command therefore remains separate from evaluating the pure model transition, including under .NET unit tests.
 
 ## Related Specs

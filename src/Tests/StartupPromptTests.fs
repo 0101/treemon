@@ -16,34 +16,39 @@ open Tests.TestUtils
 let private await (task: Task<'a>) =
     task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
 
-let private register path sessionId url =
+let private defaultTerminalId = EmbeddedTerminalId "6e4d33254b564bde97b723a40721351c"
+
+let private registerFor terminalId path sessionId url =
     let identity =
         Guid.NewGuid().ToString()
         |> collisionResistantProcessIdentityForSessionId
 
-    registerExactSession 'S' identity path url sessionId None |> ignore
+    registerExactSession 'S' identity path url sessionId (Some(EmbeddedTerminalId.value terminalId)) |> ignore
+
+let private register path sessionId url =
+    registerFor defaultTerminalId path sessionId url
 
 let private respond status (context: HttpListenerContext) =
     context.Response.StatusCode <- status
     context.Response.Close()
 
-let private started path =
-    let id = EmbeddedTerminalId "6e4d33254b564bde97b723a40721351c"
-    { TerminalId = id
+let private startedWith terminalId path =
+    { TerminalId = terminalId
       Snapshot =
         { Tabs =
-            [ { Id = id
+            [ { Id = terminalId
                 Worktree = path
                 ReportedActivity = None
                 SessionIds = []
                 Lifecycle = EmbeddedTerminalLifecycle.Running "http://127.0.0.1:41001/" } ] } }
 
-let private start timeout launch close sessionId path prompt =
+let private started path = startedWith defaultTerminalId path
+
+let private start timeout launch close path prompt =
     TerminalLaunch.startPromptedAgentWith
         { StartCommand = launch
           CloseTerminal = close
           Timeout = timeout }
-        (SessionId sessionId)
         None
         path
         prompt
@@ -97,7 +102,6 @@ type StartupPromptTests() =
                     (fun id ->
                         closes.Enqueue id
                         async.Return(Ok EmbeddedTerminalSnapshot.empty))
-                    sessionId
                     path
                     prompt
 
@@ -111,7 +115,7 @@ type StartupPromptTests() =
                 Assert.That(
                     commands.ToArray(),
                     Is.EqualTo(
-                        [| path, $"copilot --experimental --yolo --session-id='{sessionId}'" |]))
+                        [| path, "copilot --experimental --yolo" |]))
                 Assert.That(closes, Is.Empty))
 
             if kind = "AgentDoc" || kind = "SystemView" then
@@ -131,47 +135,224 @@ type StartupPromptTests() =
             await launched |> assertStarted expectedStart)
 
     [<Test>]
-    member _.``concurrent starts deliver only to their own durable session``() =
+    member _.``concurrent starts deliver only to their returned terminals``() =
         withBridges 2 (fun bridges ->
             let firstListener, firstUrl = bridges[0]
             let secondListener, secondUrl = bridges[1]
             let path = WorktreePath(uniquePath "concurrent-startup")
             let firstId = Guid.NewGuid().ToString()
             let secondId = Guid.NewGuid().ToString()
-            let expectedStart = started path
+            let firstTerminal = EmbeddedTerminalId(Guid.NewGuid().ToString("N"))
+            let secondTerminal = EmbeddedTerminalId(Guid.NewGuid().ToString("N"))
+            let firstStart = startedWith firstTerminal path
+            let secondStart = startedWith secondTerminal path
             use ready = new System.Threading.CountdownEvent(2)
-            let launch id =
+            let launch id expectedStart =
                 start
                     (TimeSpan.FromSeconds 5.0)
                     (fun _ _ ->
                         ready.Signal() |> ignore
                         async.Return(Ok expectedStart))
                     (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
-                    id
                     path
                     $"Initial task for {id}"
 
-            let first = launch firstId
-            let second = launch secondId
+            let first = launch firstId firstStart
+            let second = launch secondId secondStart
             Assert.That(
                 ready.Wait(TimeSpan.FromSeconds 5.0),
                 Is.True)
 
             let secondRequest = secondListener.GetContextAsync()
             register (WorktreePath.value path) (Some "unrelated-session") firstUrl
-            register (WorktreePath.value path) (Some secondId) secondUrl
+            registerFor secondTerminal (WorktreePath.value path) (Some secondId) secondUrl
             let secondContext = await secondRequest
             Assert.That(readPrompt secondContext, Is.EqualTo(("startup-prompt", $"Initial task for {secondId}")))
             respond 200 secondContext
-            await second |> assertStarted expectedStart
+            await second |> assertStarted secondStart
             Assert.That(first.IsCompleted, Is.False)
 
             let firstRequest = firstListener.GetContextAsync()
-            register (WorktreePath.value path) (Some firstId) firstUrl
+            registerFor firstTerminal (WorktreePath.value path) (Some firstId) firstUrl
             let firstContext = await firstRequest
             Assert.That(readPrompt firstContext, Is.EqualTo(("startup-prompt", $"Initial task for {firstId}")))
             respond 200 firstContext
-            await first |> assertStarted expectedStart)
+            await first |> assertStarted firstStart)
+
+    [<Test>]
+    member _.``early registration cannot receive startup or interactions before terminal binding``() =
+        withBridges 1 (fun bridges ->
+            let listener, url = List.exactlyOne bridges
+            let path = WorktreePath(uniquePath "early-startup-registration")
+            let sessionId = Guid.NewGuid().ToString()
+            let expectedStart = started path
+            let registered = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseLaunch = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let incoming = listener.GetContextAsync()
+            let launched =
+                start
+                    (TimeSpan.FromSeconds 5.0)
+                    (fun _ _ ->
+                        async {
+                            register (WorktreePath.value path) (Some sessionId) url
+                            registered.TrySetResult() |> ignore
+                            do! releaseLaunch.Task |> Async.AwaitTask
+                            return Ok expectedStart
+                        })
+                    (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                    path
+                    "Initial task"
+
+            try
+                await registered.Task
+                SessionBridge.send System.Threading.CancellationToken.None
+                    { WorktreePath = WorktreePath.value path
+                      Target = SessionBridge.SendTarget.DurableSession(SessionId sessionId)
+                      Prompt = SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" "Follow-up" }
+                |> Async.RunSynchronously
+                |> ignore
+                SessionBridge.flushPending (WorktreePath.value path) |> Async.RunSynchronously
+                Assert.That(incoming.IsCompleted, Is.False, "An unbound launch must not send")
+
+                releaseLaunch.TrySetResult() |> ignore
+                let first = await incoming
+                Assert.That(readPrompt first, Is.EqualTo(("startup-prompt", "Initial task")))
+                respond 200 first
+                let second = await (listener.GetContextAsync())
+                Assert.That(readPrompt second, Is.EqualTo(("canvas", "Follow-up")))
+                respond 200 second
+                await launched |> assertStarted expectedStart
+            finally
+                releaseLaunch.TrySetResult() |> ignore)
+
+    [<TestCase(true)>]
+    [<TestCase(false)>]
+    member _.``startup ignores a bridge with the wrong terminal or worktree``(wrongTerminal: bool) =
+        withBridges 2 (fun bridges ->
+            let wrongListener, wrongUrl = bridges[0]
+            let listener, url = bridges[1]
+            let path = WorktreePath(uniquePath "startup-exact-terminal")
+            let sessionId = Guid.NewGuid().ToString()
+            let expectedStart = started path
+            let launchEntered = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let launched =
+                start
+                    (TimeSpan.FromSeconds 5.0)
+                    (fun _ _ ->
+                        launchEntered.TrySetResult() |> ignore
+                        async.Return(Ok expectedStart))
+                    (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                    path
+                    "Initial task"
+            await launchEntered.Task
+            let wrongRequest = wrongListener.GetContextAsync()
+            let wrongPath =
+                if wrongTerminal then WorktreePath.value path
+                else uniquePath "another-startup-worktree"
+            let terminal =
+                if wrongTerminal then EmbeddedTerminalId(Guid.NewGuid().ToString("N"))
+                else expectedStart.TerminalId
+            registerFor terminal wrongPath (Some sessionId) wrongUrl
+            SessionBridge.flushPending (WorktreePath.value path) |> Async.RunSynchronously
+            Assert.Multiple(fun () ->
+                Assert.That(wrongRequest.IsCompleted, Is.False)
+                Assert.That(launched.IsCompleted, Is.False))
+
+            let incoming = listener.GetContextAsync()
+            register (WorktreePath.value path) (Some sessionId) url
+            let context = await incoming
+            Assert.That(readPrompt context, Is.EqualTo(("startup-prompt", "Initial task")))
+            respond 200 context
+            await launched |> assertStarted expectedStart)
+
+    [<Test>]
+    member _.``ambiguous terminal registrations do not consume the initial prompt``() =
+        withBridges 2 (fun bridges ->
+            let firstListener, firstUrl = bridges[0]
+            let secondListener, secondUrl = bridges[1]
+            let path = WorktreePath(uniquePath "ambiguous-startup-terminal")
+            let expectedStart = started path
+            let registered = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseLaunch = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let firstRequest = firstListener.GetContextAsync()
+            let secondRequest = secondListener.GetContextAsync()
+            let launched =
+                start
+                    (TimeSpan.FromSeconds 1.0)
+                    (fun _ _ ->
+                        async {
+                            register (WorktreePath.value path) (Some(Guid.NewGuid().ToString())) firstUrl
+                            register (WorktreePath.value path) (Some(Guid.NewGuid().ToString())) secondUrl
+                            registered.TrySetResult() |> ignore
+                            do! releaseLaunch.Task |> Async.AwaitTask
+                            return Ok expectedStart
+                        })
+                    (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                    path
+                    "Initial task"
+            try
+                await registered.Task
+                releaseLaunch.TrySetResult() |> ignore
+                Assert.That(
+                    await launched,
+                    Is.EqualTo(
+                        Error(PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut)
+                        : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
+                SessionBridge.flushPending (WorktreePath.value path) |> Async.RunSynchronously
+                Assert.Multiple(fun () ->
+                    Assert.That(firstRequest.IsCompleted, Is.False)
+                    Assert.That(secondRequest.IsCompleted, Is.False))
+            finally
+                releaseLaunch.TrySetResult() |> ignore)
+
+    [<Test>]
+    member _.``failed launch releases interactions held for startup binding``() =
+        withBridges 1 (fun bridges ->
+            let listener, url = List.exactlyOne bridges
+            let path = WorktreePath(uniquePath "failed-startup-releases-interactions")
+            let sessionId = Guid.NewGuid().ToString()
+            let registered = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseLaunch = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let incoming = listener.GetContextAsync()
+            let launched =
+                start
+                    (TimeSpan.FromSeconds 5.0)
+                    (fun _ _ ->
+                        async {
+                            register (WorktreePath.value path) (Some sessionId) url
+                            registered.TrySetResult() |> ignore
+                            do! releaseLaunch.Task |> Async.AwaitTask
+                            return Error "shell launch failed"
+                        })
+                    (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                    path
+                    "Initial task"
+            try
+                await registered.Task
+                SessionBridge.send System.Threading.CancellationToken.None
+                    { WorktreePath = WorktreePath.value path
+                      Target = SessionBridge.SendTarget.DurableSession(SessionId sessionId)
+                      Prompt = SessionBridge.Prompt.canvasFor (WorktreePath.value path) "diff.html" "Preserved interaction" }
+                |> Async.RunSynchronously
+                |> ignore
+                SessionBridge.flushPending (WorktreePath.value path) |> Async.RunSynchronously
+                Assert.That(incoming.IsCompleted, Is.False)
+
+                releaseLaunch.TrySetResult() |> ignore
+                Assert.That(
+                    await launched,
+                    Is.EqualTo(
+                        Error PromptedLaunchError.TerminalStartFailed
+                        : Result<EmbeddedTerminalStartResult, PromptedLaunchError>))
+                let context = await incoming
+                Assert.That(readPrompt context, Is.EqualTo(("canvas", "Preserved interaction")))
+                respond 200 context
+                SessionBridge.flushPending (WorktreePath.value path) |> Async.RunSynchronously
+                Assert.That(
+                    SessionBridge.pendingPrompts (WorktreePath.value path) |> Async.RunSynchronously,
+                    Is.Empty)
+            finally
+                releaseLaunch.TrySetResult() |> ignore)
 
     [<Test>]
     member _.``startup instruction precedes the queued SystemView interaction``() =
@@ -197,7 +378,6 @@ type StartupPromptTests() =
                         register (WorktreePath.value path) (Some sessionId) url
                         async.Return(Ok(started path)))
                     (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
-                    sessionId
                     path
                     initial
 
@@ -236,7 +416,6 @@ type StartupPromptTests() =
                         register (WorktreePath.value path) (Some sessionId) url
                         async.Return(Ok(started path)))
                     (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
-                    sessionId
                     path
                     "Initial task"
 
@@ -289,7 +468,6 @@ type StartupPromptTests() =
                     (fun id ->
                         closes.Enqueue id
                         async.Return(Ok EmbeddedTerminalSnapshot.empty))
-                    sessionId
                     path
                     initial
 
@@ -352,7 +530,6 @@ type StartupPromptTests() =
                         async.Return(
                             if cleanupFails then Error "exact cleanup failed"
                             else Ok EmbeddedTerminalSnapshot.empty))
-                    sessionId
                     path
                     "Initial task"
 
@@ -390,7 +567,6 @@ type StartupPromptTests() =
                         async.Return(Ok(started path)))
                     (fun _ ->
                         async { return raise (InvalidOperationException "private cleanup diagnostics") })
-                    sessionId
                     path
                     "Initial task"
 
@@ -421,7 +597,6 @@ type StartupPromptTests() =
                     (fun id ->
                         closes.Enqueue id
                         async.Return(Ok EmbeddedTerminalSnapshot.empty))
-                    sessionId
                     path
                     "Expired initial task"
                 |> await
@@ -441,7 +616,6 @@ type StartupPromptTests() =
                         register (WorktreePath.value path) (Some sessionId) url
                         async.Return(Ok expectedStart))
                     (fun _ -> async.Return(Ok EmbeddedTerminalSnapshot.empty))
-                    sessionId
                     path
                     "Replacement initial task"
 
@@ -461,7 +635,6 @@ type StartupPromptTests() =
                 (fun id ->
                     closes.Enqueue id
                     async.Return(Ok EmbeddedTerminalSnapshot.empty))
-                (Guid.NewGuid().ToString())
                 path
                 "Initial task"
             |> await
@@ -486,7 +659,6 @@ type StartupPromptTests() =
                 (fun id ->
                     closes.Enqueue id
                     async.Return(Ok EmbeddedTerminalSnapshot.empty))
-                (Guid.NewGuid().ToString())
                 path
                 "Initial task"
             |> await
@@ -520,7 +692,6 @@ type StartupPromptTests() =
                             closed.TrySetResult id |> ignore
                             async.Return(Ok EmbeddedTerminalSnapshot.empty)
                       Timeout = TimeSpan.FromSeconds 5.0 }
-                    (SessionId sessionId)
                     None
                     path
                     "Initial task"
@@ -541,14 +712,13 @@ type StartupPromptTests() =
 type StartupCommandTransportTests() =
 
     [<Test>]
-    member _.``CMD launcher receives only the exact fresh session selector and permission flags``() =
+    member _.``CMD launcher receives fresh startup flags without a session selector``() =
         withTempDir "treemon-startup argv owner's fixture" (fun root ->
             let scriptPath = Path.Combine(root, "launch.ps1")
             let shimPath = Path.Combine(root, "copilot.cmd")
             let recordingPath = Path.Combine(root, "argv.jsonl")
-            let sessionId = Guid.NewGuid().ToString()
             let command =
-                CodingToolCli.build None (CodingToolCli.NewSession sessionId)
+                CodingToolCli.build None CodingToolCli.NewSession
                 |> _.AsShellString
 
             File.WriteAllText(
@@ -590,4 +760,4 @@ type StartupCommandTransportTests() =
             Assert.That(
                 arguments,
                 Is.EqualTo(
-                    [ "--no-auto-update"; "--experimental"; "--yolo"; $"--session-id={sessionId}" ])))
+                    [ "--no-auto-update"; "--experimental"; "--yolo" ])))

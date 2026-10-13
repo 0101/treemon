@@ -581,10 +581,27 @@ let private resolveRegistration worktreeKey (queued: QueuedPrompt) =
             | Prompt.StartupPrompt _ -> true
 
         let now = DateTime.UtcNow
+        let waitsForStartupBinding =
+            match queued.Delivery with
+            | PromptDelivery.Startup _ -> false
+            | PromptDelivery.Ordinary _ ->
+                queuedPrompts worktreeKey
+                |> List.exists (fun pending ->
+                    match pending.Delivery, pending.Target with
+                    | PromptDelivery.Startup _, QueuedTarget.LaunchingTerminal _ -> true
+                    | _ -> false)
         let selected =
-            if sourceMatches then
+            if sourceMatches && not waitsForStartupBinding then
                 canvasSessionsForWorktreeAt now worktreeKey
                 |> selectLiveTarget now queued.Prompt.Kind target
+                |> Option.filter (fun entry ->
+                    match queued.Prompt, queued.Target with
+                    | Prompt.StartupPrompt _, QueuedTarget.ExactTerminal(terminalId, _) ->
+                        entry.TerminalSessionId = Some terminalId
+                    | Prompt.StartupPrompt _, QueuedTarget.Session _
+                    | Prompt.StartupPrompt _, QueuedTarget.LaunchingTerminal _
+                    | Prompt.Canvas _, _
+                    | Prompt.AgentPrompt _, _ -> true)
             else None
 
         return
@@ -764,18 +781,19 @@ let private removeQueued worktreeKey id =
     (deliveryLane worktreeKey).ChangeQueue(fun existing ->
         existing |> List.filter (fun queued -> queued.Id <> id), ())
 
-/// Reserve the first prompt for one new durable session before its terminal starts.
-let internal startWithPrompt timeout worktreePath sessionId prompt launch =
+/// Reserve the first prompt before launch, then bind it to the exact returned terminal.
+let internal startWithPrompt timeout worktreePath prompt launch =
     async {
         let worktreeKey = normalizePath worktreePath
         let completion =
             TaskCompletionSource<Result<unit, StartupPromptFailure>>(
                 TaskCreationOptions.RunContinuationsAsynchronously)
         use deadline = new CancellationTokenSource()
+        let enqueuedAt = (deliveryLane worktreeKey).NextEnqueuedAt()
         let queued =
             { Id = Guid.NewGuid()
-              EnqueuedAt = (deliveryLane worktreeKey).NextEnqueuedAt()
-              Target = QueuedTarget.Session(SendTarget.DurableSession sessionId)
+              EnqueuedAt = enqueuedAt
+              Target = QueuedTarget.LaunchingTerminal enqueuedAt
               Prompt = Prompt.startup prompt
               LastFailure = None
               Delivery = PromptDelivery.Startup(completion, deadline.Token) }
@@ -786,8 +804,26 @@ let internal startWithPrompt timeout worktreePath sessionId prompt launch =
         try
             match! launch () with
             | Error error -> return StartupResult.LaunchFailed error
-            | Ok started ->
+            | Ok (started: EmbeddedTerminalStartResult) ->
+                let terminalId =
+                    TerminalSessionId(EmbeddedTerminalId.value started.TerminalId)
+                let resolveSession () =
+                    async {
+                        return
+                            canvasSessionsForWorktree worktreeKey
+                            |> List.filter (fun entry -> entry.TerminalSessionId = Some terminalId)
+                            |> function
+                                | [ entry ] -> Some entry.SessionId
+                                | _ -> None
+                    }
+                (deliveryLane worktreeKey).ChangeQueue(fun pending ->
+                    pending
+                    |> List.map (fun item ->
+                        if item.Id = queued.Id then
+                            { item with Target = QueuedTarget.ExactTerminal(terminalId, resolveSession) }
+                        else item), ())
                 deadline.CancelAfter(timeout: TimeSpan)
+                retryPending worktreeKey
 
                 try
                     let! accepted =
@@ -802,6 +838,7 @@ let internal startWithPrompt timeout worktreePath sessionId prompt launch =
         finally
             deadline.Cancel()
             removeQueued worktreeKey queued.Id
+            retryPending worktreeKey
     }
 
 let private deliver queueWhenAbsent queueCancellationToken (request: SendRequest) =

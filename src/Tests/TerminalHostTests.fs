@@ -2175,12 +2175,11 @@ type TerminalHostProxyTests() =
 
     [<Test>]
     member _.``fresh prompted session command crosses the real attachment without carrying prompt text``() =
-        let sessionId = "9f6d9d5b-d410-486d-b7d3-b2b7f369d23b"
         withCommandProxy (fun upstream plane ->
             let command =
                 Server.CodingToolCli.build
                     None
-                    (Server.CodingToolCli.NewSession sessionId)
+                    Server.CodingToolCli.NewSession
                 |> _.AsShellString
 
             let result = submitTerminalCommand plane command
