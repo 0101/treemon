@@ -96,7 +96,8 @@ would not be that document's author.
 
 Explicit AgentDoc Start and automatic SystemView startup use the shared prompted-launch handshake
 in `docs/spec/embedded-terminal.md`: the complete initial instruction is reserved for the exact
-fresh session, delivered through its extension, and accepted before already-queued interactions.
+returned terminal, delivered through its extension under Copilot's generated session ID, and
+accepted before already-queued interactions.
 This transport does not assign an AgentDoc owner or change SystemView target resolution.
 
 Ordinary queued messages retain the cap of 10 and five-minute TTL, measured from original enqueue

@@ -6,7 +6,7 @@ open System.Threading
 open Shared
 open Server.SessionActivity
 
-let internal startupPromptTimeout = TimeSpan.FromSeconds 30.0
+let internal startupPromptTimeout = TimeSpan.FromMinutes 2.0
 
 type internal PromptedAgentDependencies =
     { StartCommand:
@@ -15,16 +15,15 @@ type internal PromptedAgentDependencies =
         EmbeddedTerminalId -> Async<Result<EmbeddedTerminalSnapshot, string>>
       Timeout: TimeSpan }
 
-let internal startPromptedAgentWith dependencies sessionId provider worktreePath prompt =
+let internal startPromptedAgentWith dependencies provider worktreePath prompt =
     let operation = async {
         let command =
-            CodingToolCli.build provider (CodingToolCli.NewSession(SessionId.value sessionId))
+            CodingToolCli.build provider CodingToolCli.NewSession
 
         let! attempt =
             SessionBridge.startWithPrompt
                 dependencies.Timeout
                 (WorktreePath.value worktreePath)
-                sessionId
                 prompt
                 (fun () -> dependencies.StartCommand worktreePath command.AsShellString)
 
@@ -104,7 +103,4 @@ let internal create sessionAgent embeddedTerminal prepareSessionClose : Operatio
       StartEmbeddedCommand = prompted.StartCommand
       StartPromptedAgent =
         fun provider path prompt ->
-            async {
-                let sessionId = SessionId(Guid.NewGuid().ToString())
-                return! startPromptedAgentWith prompted sessionId provider path prompt
-            } }
+            startPromptedAgentWith prompted provider path prompt }
