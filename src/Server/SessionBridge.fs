@@ -581,17 +581,8 @@ let private resolveRegistration worktreeKey (queued: QueuedPrompt) =
             | Prompt.StartupPrompt _ -> true
 
         let now = DateTime.UtcNow
-        let waitsForStartupBinding =
-            match queued.Delivery with
-            | PromptDelivery.Startup _ -> false
-            | PromptDelivery.Ordinary _ ->
-                queuedPrompts worktreeKey
-                |> List.exists (fun pending ->
-                    match pending.Delivery, pending.Target with
-                    | PromptDelivery.Startup _, QueuedTarget.LaunchingTerminal _ -> true
-                    | _ -> false)
         let selected =
-            if sourceMatches && not waitsForStartupBinding then
+            if sourceMatches then
                 canvasSessionsForWorktreeAt now worktreeKey
                 |> selectLiveTarget now queued.Prompt.Kind target
                 |> Option.filter (fun entry ->
@@ -604,8 +595,21 @@ let private resolveRegistration worktreeKey (queued: QueuedPrompt) =
                     | Prompt.AgentPrompt _, _ -> true)
             else None
 
+        let waitsForStartup =
+            match queued.Delivery with
+            | PromptDelivery.Startup _ -> false
+            | PromptDelivery.Ordinary _ ->
+                queuedPrompts worktreeKey
+                |> List.exists (fun pending ->
+                    match pending.Delivery, pending.Target with
+                    | PromptDelivery.Startup _, QueuedTarget.LaunchingTerminal _ -> true
+                    | PromptDelivery.Startup _, QueuedTarget.ExactTerminal(terminalId, _) ->
+                        selected |> Option.exists (fun entry -> entry.TerminalSessionId = Some terminalId)
+                    | _ -> false)
+
         return
             selected
+            |> Option.filter (fun _ -> not waitsForStartup)
             |> Option.bind (fun entry ->
                 match sessionRegistry.TryGetValue entry.SessionId with
                 | true, registration when registration.Entry = entry ->

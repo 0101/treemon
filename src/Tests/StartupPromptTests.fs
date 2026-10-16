@@ -305,6 +305,77 @@ type StartupPromptTests() =
             finally
                 releaseLaunch.TrySetResult() |> ignore)
 
+    [<TestCase("canvas")>]
+    [<TestCase("agent-prompt")>]
+    member _.``ambiguous startup holds ordinary prompts only for its terminal``(kind: string) =
+        withBridges 3 (fun bridges ->
+            let listener, url = bridges[0]
+            let conflictingListener, conflictingUrl = bridges[1]
+            let otherListener, otherUrl = bridges[2]
+            let path = uniquePath "ambiguous-startup-ordering"
+            let sessionId = Guid.NewGuid().ToString()
+            let conflictingSessionId = Guid.NewGuid().ToString()
+            let otherSessionId = Guid.NewGuid().ToString()
+            let otherTerminal = EmbeddedTerminalId(Guid.NewGuid().ToString("N"))
+            let expectedStart = started (WorktreePath path)
+            register path (Some sessionId) url
+            register path (Some conflictingSessionId) conflictingUrl
+            registerFor otherTerminal path (Some otherSessionId) otherUrl
+            let incoming = listener.GetContextAsync()
+            let conflictingRequest = conflictingListener.GetContextAsync()
+            let launched =
+                SessionBridge.startWithPrompt
+                    (TimeSpan.FromSeconds 5.0)
+                    path
+                    "Initial task"
+                    (fun () -> async.Return(Ok expectedStart))
+                |> Async.StartImmediateAsTask
+            let send target text =
+                SessionBridge.send System.Threading.CancellationToken.None
+                    { WorktreePath = path
+                      Target = SessionBridge.SendTarget.DurableSession(SessionId target)
+                      Prompt =
+                        match kind with
+                        | "canvas" -> SessionBridge.Prompt.canvasFor path "diff.html" text
+                        | "agent-prompt" -> SessionBridge.Prompt.agentPrompt text
+                        | other -> invalidOp $"Unknown prompt fixture: {other}" }
+                |> Async.StartAsTask
+
+            let followUp = send sessionId "Follow-up"
+            Task.WhenAny(followUp :> Task, incoming :> Task) |> await |> ignore
+            Assert.Multiple(fun () ->
+                Assert.That(incoming.IsCompleted, Is.False, "An ambiguous startup must hold later instructions")
+                Assert.That(conflictingRequest.IsCompleted, Is.False)
+                Assert.That(launched.IsCompleted, Is.False))
+            Assert.That(await followUp, Is.EqualTo SessionBridge.SendResult.Queued)
+            SessionBridge.flushPending path |> Async.RunSynchronously
+
+            let otherRequest = otherListener.GetContextAsync()
+            let otherSend = send otherSessionId "Other terminal instruction"
+            let otherContext = await otherRequest
+            Assert.That(readPrompt otherContext, Is.EqualTo((kind, "Other terminal instruction")))
+            respond 200 otherContext
+            Assert.That(await otherSend, Is.EqualTo SessionBridge.SendResult.Delivered)
+
+            registerFor otherTerminal path (Some conflictingSessionId) conflictingUrl
+            let startup = await incoming
+            Assert.That(readPrompt startup, Is.EqualTo(("startup-prompt", "Initial task")))
+            let followUpRequest = listener.GetContextAsync()
+            Assert.That(followUpRequest.IsCompleted, Is.False, "Later instructions must wait for startup acceptance")
+            respond 200 startup
+            let followUpContext = await followUpRequest
+            Assert.That(readPrompt followUpContext, Is.EqualTo((kind, "Follow-up")))
+            respond 200 followUpContext
+            Assert.That(
+                await launched,
+                Is.EqualTo(SessionBridge.StartupResult.Accepted expectedStart))
+            SessionBridge.flushPending path |> Async.RunSynchronously
+            Assert.Multiple(fun () ->
+                Assert.That(conflictingRequest.IsCompleted, Is.False)
+                Assert.That(
+                    SessionBridge.pendingPrompts path |> Async.RunSynchronously,
+                    Is.Empty)))
+
     [<Test>]
     member _.``failed launch releases interactions held for startup binding``() =
         withBridges 1 (fun bridges ->
