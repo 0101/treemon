@@ -640,10 +640,7 @@ let private runRoute
                 $"Route '{name}' recorder command mismatch: {addedRecorder.Raw}"
         | LaunchExpectation.Prompt expected ->
             let freshSessionCommand =
-                match addedRecorder.Arguments with
-                | [ "--experimental"; "--yolo"; selector ] when selector.StartsWith("--session-id=") ->
-                    Guid.TryParse(selector.Substring("--session-id=".Length)) |> fst
-                | _ -> false
+                addedRecorder.Arguments = [ "--experimental"; "--yolo" ]
 
             ensure
                 (freshSessionCommand && addedRecorder.InitialPrompt = Some expected)
@@ -1256,7 +1253,7 @@ let private verifyForcedDeliveryFailure
                 let command =
                     CodingToolCli.build
                         None
-                        (CodingToolCli.NewSession(Guid.NewGuid().ToString()))
+                        CodingToolCli.NewSession
 
                 let! result =
                     EmbeddedTerminal.startWithCommand
@@ -1755,7 +1752,7 @@ let private runScenario client fixture server api port =
         let queuedFilename = "diff.html"
         let queuedPrompt =
             CanvasPrompt.continueWorking
-                fixture.CanvasWorktree
+                (PathUtils.normalizePath fixture.CanvasWorktree)
                 queuedFilename
 
         do!

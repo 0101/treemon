@@ -346,6 +346,7 @@ let deliver
 
         match! tryDeliver sendRequest with
         | SessionBridge.DeliveryResult.Delivered
+        | SessionBridge.DeliveryResult.Deferred
         | SessionBridge.DeliveryResult.DeliveryFailed ->
             return true
         | SessionBridge.DeliveryResult.NoLiveSession when Option.isSome sessionId ->
@@ -353,6 +354,7 @@ let deliver
 
             match! tryDeliver sendRequest with
             | SessionBridge.DeliveryResult.Delivered
+            | SessionBridge.DeliveryResult.Deferred
             | SessionBridge.DeliveryResult.DeliveryFailed ->
                 return true
             | SessionBridge.DeliveryResult.NoLiveSession ->

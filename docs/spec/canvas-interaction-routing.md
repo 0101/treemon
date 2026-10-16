@@ -96,10 +96,11 @@ would not be that document's author.
 
 Explicit Start for an unowned AgentDoc and automatic SystemView startup use the shared
 prompted-launch handshake in `docs/spec/embedded-terminal.md`: the complete initial instruction is
-reserved for the exact fresh session, delivered through its extension, and accepted before
-already-queued interactions. This transport does not assign an AgentDoc owner or change SystemView
-target resolution. Explicit Start for an owned AgentDoc instead resumes its recorded conversation
-without takeover instructions or ownership changes; queued replies wait for that owner's bridge.
+reserved before launch, bound to the exact returned terminal, delivered through its extension under
+Copilot's generated session ID, and accepted before already-queued interactions. This transport does
+not assign an AgentDoc owner or change SystemView target resolution. Explicit Start for an owned
+AgentDoc instead resumes its recorded conversation without takeover instructions or ownership
+changes; queued replies wait for that owner's bridge.
 
 Ordinary queued messages retain the cap of 10 and five-minute TTL, measured from original enqueue
 time. Startup reservations are separate from those limits and remain until their prompted-launch

@@ -187,15 +187,18 @@ active-session indicator. That flag and its terminal-button glow, focus label, a
 native-kill prompt remain tied only to a tracked Windows Terminal window. Existing coding-tool
 status continues to show whether an embedded agent is working.
 
-Prompted interactive launches reserve their complete initial instruction for a fresh durable
-session ID, then start Copilot with `--session-id=<id>` and no `-i` argument. The registered
-extension receives that exact session's `startup-prompt` over the bridge and submits the original
-text through `session.send`. Prompt text never passes through shell arguments: Windows CMD shims
-do not reliably preserve multiline or quoted argument data.
+Fresh prompted launches run `copilot --experimental --yolo`, letting Copilot create its own durable
+session ID. Treemon reserves the complete initial instruction before launch, then binds delivery
+to the exact returned terminal. That terminal's registered extension receives the `startup-prompt`
+over the bridge and submits the original text through `session.send`. Prompt text never passes
+through shell arguments: Windows CMD shims do not reliably preserve multiline or quoted data.
+Only genuine Resume supplies an existing durable session ID.
 
 Launch succeeds only after the SDK accepts the startup message, not merely when HTTP queueing
-succeeds or the agent finishes its turn. Acceptance has a 30-second deadline after terminal
-startup. Timeout or rejection removes the reserved prompt, closes only the newly created terminal
+succeeds or the agent finishes its turn. Acceptance has a two-minute deadline after terminal
+command launch returns. Worktree creation's post-fork setup finishes before this launch and has
+its own five-minute cap; it does not consume the acceptance deadline. Timeout or rejection removes
+the reserved prompt, closes only the newly created terminal
 through exact-session cleanup, and returns an explicit error; incomplete cleanup is also reported.
 Prompted-launch API results preserve unknown-worktree, unavailable-mode, unavailable-canvas-document,
 terminal-start, startup-timeout/rejection, and cleanup-failure cases in a shared error union. Unexpected failures
@@ -382,15 +385,19 @@ browser selects the started terminal by identity. Comparing registry snapshots t
 after a start cannot distinguish it from a terminal a background launch created in the same window.
 
 `TerminalLaunch.StartPromptedAgent` is the shared prompted-launch boundary. `SessionBridge`
-reserves its startup prompt before the terminal starts, targets the fresh durable session ID, and
-delivers it before already-queued canvas interactions. The startup transport's HTTP success
+reserves an undeliverable launch-local startup prompt before the terminal starts, then binds only
+that reservation to the returned terminal ID. It learns Copilot's actual session ID from exactly
+one live bridge with that terminal ID in the same canonical worktree; absent or ambiguous matches
+wait rather than choosing the latest session. Binding explicitly retries delivery, so registration
+before or after the launcher returns works. Ordinary delivery waits while startup binding is
+pending, then the startup instruction precedes queued interactions. The startup transport's HTTP success
 acknowledges SDK message acceptance; ordinary canvas and agent-prompt queueing retain their existing
 semantics. Active startup reservations are not subject to the ordinary queue's ten-message cap or
 five-minute TTL; their launch deadline and cleanup own their lifetime. Ordinary prompts still keep
 only the ten newest entries, and draining waits for startup acceptance before delivering them.
 Failed startup never reroutes its instructions to another session.
 
-`CodingToolCli` builds only the identity-bearing shell command for these launches.
+`CodingToolCli` builds fresh or Resume shell commands without startup instructions.
 `TerminalHostClient` separately validates the raw command and mirrors the host's 16,384-byte
 attachment-message cap against the complete transmitted input frame. Startup instructions use the
 bridge's bounded JSON HTTP transport instead of terminal input.
