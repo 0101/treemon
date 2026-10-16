@@ -71,6 +71,7 @@ type SendRequest =
 [<RequireQualifiedAccess>]
 type DeliveryResult =
     | Delivered
+    | Deferred
     | NoLiveSession
     | DeliveryFailed
 
@@ -139,6 +140,7 @@ type private QueueTake =
 
 type private DeliveryAttempt =
     | AttemptDelivered
+    | AttemptDeferred
     | AttemptNoLiveSession
     | AttemptFailed of SessionEntry
 
@@ -296,6 +298,11 @@ type private RegisteredSession =
       ShutdownUrl: string
       ShutdownCapability: string
       ProcessIdentityResolver: ProcessIdentityResolver }
+
+type private RegistrationResolution =
+    | Resolved of RegisteredSession
+    | AwaitingStartup
+    | Unavailable
 
 // Mutable: ConcurrentDictionary is the thread-safe boundary for bridge registration and queueing.
 // Separate session and poll maps prevent canvas-document heartbeats from overwriting live sessions.
@@ -604,32 +611,36 @@ let private resolveRegistration worktreeKey (queued: QueuedPrompt) =
                     match pending.Delivery, pending.Target with
                     | PromptDelivery.Startup _, QueuedTarget.LaunchingTerminal _ -> true
                     | PromptDelivery.Startup _, QueuedTarget.ExactTerminal(terminalId, _) ->
-                        selected |> Option.exists (fun entry -> entry.TerminalSessionId = Some terminalId)
+                        selected |> Option.forall (fun entry -> entry.TerminalSessionId = Some terminalId)
                     | _ -> false)
 
-        return
-            selected
-            |> Option.filter (fun _ -> not waitsForStartup)
-            |> Option.bind (fun entry ->
-                match sessionRegistry.TryGetValue entry.SessionId with
-                | true, registration when registration.Entry = entry ->
-                    match queued.Prompt, target with
-                    | Prompt.AgentPrompt _, _
-                    | _, SendTarget.ExactProcess _ ->
-                        let verified =
-                            entry.ProcessIdentity
-                            |> Option.exists (fun identity ->
-                                probeExactProcess registration.ProcessIdentityResolver identity = Ok ExactProcessState.Running)
-                        if verified && isCurrentRegistration registration then
-                            Some registration
-                        else
-                            Log.log "SessionBridge" "Exact-process prompt unavailable: current location could not be verified"
-                            None
-                    | Prompt.Canvas _, SendTarget.DurableSession _
-                    | Prompt.Canvas _, SendTarget.Unspecified
-                    | Prompt.StartupPrompt _, SendTarget.DurableSession _ -> Some registration
-                    | Prompt.StartupPrompt _, SendTarget.Unspecified -> None
-                | _ -> None)
+        if waitsForStartup then
+            return AwaitingStartup
+        else
+            return
+                selected
+                |> Option.bind (fun entry ->
+                    match sessionRegistry.TryGetValue entry.SessionId with
+                    | true, registration when registration.Entry = entry ->
+                        match queued.Prompt, target with
+                        | Prompt.AgentPrompt _, _
+                        | _, SendTarget.ExactProcess _ ->
+                            let verified =
+                                entry.ProcessIdentity
+                                |> Option.exists (fun identity ->
+                                    probeExactProcess registration.ProcessIdentityResolver identity = Ok ExactProcessState.Running)
+                            if verified && isCurrentRegistration registration then
+                                Some registration
+                            else
+                                Log.log "SessionBridge" "Exact-process prompt unavailable: current location could not be verified"
+                                None
+                        | Prompt.Canvas _, SendTarget.DurableSession _
+                        | Prompt.Canvas _, SendTarget.Unspecified
+                        | Prompt.StartupPrompt _, SendTarget.DurableSession _ -> Some registration
+                        | Prompt.StartupPrompt _, SendTarget.Unspecified -> None
+                    | _ -> None)
+                |> Option.map Resolved
+                |> Option.defaultValue Unavailable
     }
 
 let private failureBoundary () =
@@ -705,8 +716,9 @@ let private drainQueue watchedId (worktreeKey: string) =
                 | None -> return! drain outcome (Set.add id attempted) failures rest
                 | Some queued ->
                     match! resolveRegistration worktreeKey queued with
-                    | None -> return! drain outcome (Set.add id attempted) failures rest
-                    | Some registration ->
+                    | AwaitingStartup
+                    | Unavailable -> return! drain outcome (Set.add id attempted) failures rest
+                    | Resolved registration ->
                         let blocked =
                             failures
                             |> List.tryFind (fun (url, _) -> url = registration.Entry.InjectUrl)
@@ -855,13 +867,13 @@ let private deliver queueWhenAbsent queueCancellationToken (request: SendRequest
               Prompt = request.Prompt
               LastFailure = None
               Delivery = PromptDelivery.Ordinary queueCancellationToken }
-        let! registration = resolveRegistration worktreeKey queued
-        if registration.IsNone && not queueWhenAbsent then
+        match! resolveRegistration worktreeKey queued with
+        | Unavailable when not queueWhenAbsent ->
             return AttemptNoLiveSession
-        else
+        | resolution ->
             let addressed =
-                match queued.Target, queued.Prompt, registration with
-                | QueuedTarget.Session SendTarget.Unspecified, Prompt.AgentPrompt _, Some registration ->
+                match queued.Target, queued.Prompt, resolution with
+                | QueuedTarget.Session SendTarget.Unspecified, Prompt.AgentPrompt _, Resolved registration ->
                     { queued with
                         Target = QueuedTarget.Session(
                             SendTarget.ExactProcess(registration.Entry.SessionId, registration.Entry.ProcessIdentity.Value)) }
@@ -869,19 +881,17 @@ let private deliver queueWhenAbsent queueCancellationToken (request: SendRequest
             enqueue worktreeKey addressed
             let started, _ = (deliveryLane worktreeKey).RequestDrain()
             if not started then
-                return
-                    registration
-                    |> Option.map (_.Entry >> AttemptFailed)
-                    |> Option.defaultValue AttemptNoLiveSession
+                return AttemptDeferred
             else
                 let! outcome = runDrain (Some queued.Id) worktreeKey
-                return outcome |> Option.defaultValue AttemptNoLiveSession
+                return outcome |> Option.defaultValue AttemptDeferred
     }
 
 let tryDeliver request =
     async {
         match! deliver false CancellationToken.None request with
         | AttemptDelivered -> return DeliveryResult.Delivered
+        | AttemptDeferred -> return DeliveryResult.Deferred
         | AttemptNoLiveSession -> return DeliveryResult.NoLiveSession
         | AttemptFailed _ -> return DeliveryResult.DeliveryFailed
     }
@@ -890,6 +900,7 @@ let send queueCancellationToken request =
     async {
         match! deliver true queueCancellationToken request with
         | AttemptDelivered -> return SendResult.Delivered
+        | AttemptDeferred
         | AttemptFailed _
         | AttemptNoLiveSession -> return SendResult.Queued
     }

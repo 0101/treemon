@@ -376,6 +376,88 @@ type StartupPromptTests() =
                     SessionBridge.pendingPrompts path |> Async.RunSynchronously,
                     Is.Empty)))
 
+    [<TestCase(false, "exact")>]
+    [<TestCase(false, "retained")>]
+    [<TestCase(false, "unspecified")>]
+    [<TestCase(true, "exact")>]
+    [<TestCase(true, "retained")>]
+    [<TestCase(true, "unspecified")>]
+    member _.``AutoSync retains instructions during startup without a fallback launch``(bound: bool, targetKind: string) =
+        withBridges 2 (fun bridges ->
+            let listener, url = bridges[0]
+            let _, conflictingUrl = bridges[1]
+            let path = uniquePath "auto-sync-startup"
+            let sessionId = Guid.NewGuid().ToString()
+            let conflictingSessionId = Guid.NewGuid().ToString()
+            let identity = collisionResistantProcessIdentityForSessionId sessionId
+            registerExactSession 'S' identity path url (Some sessionId)
+                (Some(EmbeddedTerminalId.value defaultTerminalId))
+            |> ignore
+            register path (Some conflictingSessionId) conflictingUrl
+            let expectedStart = started (WorktreePath path)
+            let incoming = listener.GetContextAsync()
+            let calls = ConcurrentQueue<string>()
+            let releaseLaunch = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let launched =
+                SessionBridge.startWithPrompt
+                    (TimeSpan.FromSeconds 5.0)
+                    path
+                    "Initial task"
+                    (fun () ->
+                        async {
+                            if not bound then
+                                do! releaseLaunch.Task |> Async.AwaitTask
+                            return Ok expectedStart
+                        })
+                |> Async.StartImmediateAsTask
+            let target =
+                match targetKind with
+                | "exact" -> AutoSync.IdleSession(identity, SessionId sessionId)
+                | "retained" -> AutoSync.NoOpenSession(Some(SessionId sessionId))
+                | "unspecified" -> AutoSync.NoOpenSession None
+                | other -> invalidOp $"Unknown AutoSync target fixture: {other}"
+            let instruction = "Sync with upstream/main."
+
+            try
+                let accepted =
+                    AutoSync.deliver
+                        SessionBridge.tryDeliver
+                        (fun () -> async { calls.Enqueue "registration-grace" })
+                        (fun _ _ ->
+                            async {
+                                calls.Enqueue "fallback-launch"
+                                return Ok()
+                            })
+                        { WorktreePath = WorktreePath path
+                          Target = target
+                          Prompt = instruction }
+                    |> Async.RunSynchronously
+
+                Assert.Multiple(fun () ->
+                    Assert.That(accepted, Is.True)
+                    Assert.That(calls, Is.Empty, "Pending startup is not an absent bridge")
+                    Assert.That(incoming.IsCompleted, Is.False)
+                    Assert.That(
+                        SessionBridge.pendingPrompts path |> Async.RunSynchronously |> List.map _.Prompt.Text,
+                        Is.EqualTo([ "Initial task"; instruction ])))
+
+                releaseLaunch.TrySetResult() |> ignore
+                register (uniquePath "relocated-startup-registration") (Some conflictingSessionId) conflictingUrl
+                SessionBridge.retryPending path
+                let startup = await incoming
+                Assert.That(readPrompt startup, Is.EqualTo(("startup-prompt", "Initial task")))
+                let followUp = listener.GetContextAsync()
+                Assert.That(followUp.IsCompleted, Is.False)
+                respond 200 startup
+                let followUpContext = await followUp
+                Assert.That(readPrompt followUpContext, Is.EqualTo(("agent-prompt", instruction)))
+                respond 200 followUpContext
+                Assert.That(await launched, Is.EqualTo(SessionBridge.StartupResult.Accepted expectedStart))
+                SessionBridge.flushPending path |> Async.RunSynchronously
+                Assert.That(SessionBridge.pendingPrompts path |> Async.RunSynchronously, Is.Empty)
+            finally
+                releaseLaunch.TrySetResult() |> ignore)
+
     [<Test>]
     member _.``failed launch releases interactions held for startup binding``() =
         withBridges 1 (fun bridges ->
