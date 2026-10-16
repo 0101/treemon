@@ -102,15 +102,12 @@ let private revealCanvasDoc
     | Hidden -> Cmd.none
 
 let canvasSessionAction (scopedKey: string) (model: Model) =
-    match findWorktree scopedKey model with
-    | Some wt ->
+    match findWorktree scopedKey model, activeVisibleDoc model with
+    | Some wt, Some(docScopedKey, filename) when docScopedKey = scopedKey ->
         let wtPath = WorktreePath.value wt.Path
-        let prompt =
-            activeVisibleDoc model
-            |> Option.map (fun (_, filename) -> CanvasSessionPrompt.forAgentDoc wtPath filename)
-            |> Option.defaultValue ""
-        Some(wt.Path, CanvasSession prompt)
-    | None -> None
+        let prompt = CanvasSessionPrompt.forAgentDoc wtPath filename
+        Some(wt.Path, CanvasSession(filename, prompt))
+    | _ -> None
 
 let openCanvasPane (model: Model) =
     let desktop = model.Workspace.Mode = WorkspaceLayout.Mode.Desktop

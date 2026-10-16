@@ -258,6 +258,7 @@ type StartupPromptFailure =
 type PromptedLaunchError =
     | UnknownWorktree of WorktreePath
     | Unavailable of mode: string
+    | CanvasDocUnavailable
     | TerminalStartFailed
     | StartupFailed of StartupPromptFailure
     | StartupCleanupFailed of StartupPromptFailure * terminalId: EmbeddedTerminalId
@@ -277,6 +278,8 @@ module PromptedLaunchError =
             $"Unknown worktree path: {WorktreePath.value path}"
         | PromptedLaunchError.Unavailable mode ->
             $"Session management is not available in {mode}"
+        | PromptedLaunchError.CanvasDocUnavailable ->
+            "The canvas document is unavailable. Refresh the dashboard and try again."
         | PromptedLaunchError.TerminalStartFailed ->
             "Could not start the embedded terminal. Check the server log for details."
         | PromptedLaunchError.StartupFailed failure -> startupMessage failure
@@ -381,7 +384,7 @@ type DiffCategoryReport =
     | Configured of leaves: DiffCategoryCoverage list * unmatchedCount: int
 
 /// Prompt used when the server auto-starts a session for a queued SystemView interaction.
-/// The AgentDoc `Start session` button has its own client prompt in `CanvasSessionPrompt`.
+/// Unowned AgentDoc startup has its own client prompt in `CanvasSessionPrompt`.
 module CanvasPrompt =
 
     let private jsonChar =
@@ -454,7 +457,7 @@ type ActionKind =
     | FixPr of url: string
     | FixBuild of url: string
     | CreatePr
-    | CanvasSession of prompt: string
+    | CanvasSession of filename: string * prompt: string
 
 type ActionRequest =
     { Path: WorktreePath

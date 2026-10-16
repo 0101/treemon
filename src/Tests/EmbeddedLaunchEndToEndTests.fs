@@ -1707,7 +1707,7 @@ let private runScenario client fixture server api port =
                         let! result =
                             api.launchAction
                                 { Path = WorktreePath fixture.CanvasWorktree
-                                  Action = CanvasSession canvasPrompt }
+                                  Action = CanvasSession(canvasFilename, canvasPrompt) }
 
                         return
                             Some(

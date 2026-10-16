@@ -1437,14 +1437,20 @@ let update msg model =
     | LaunchCanvasSession scopedKey ->
         match CanvasUpdate.canvasSessionAction scopedKey model with
         | Some(path, action) ->
-            targetEmbeddedTerminalLaunch path model,
-            launchEmbeddedTerminalCmd
-                PromptedAgentStarted
-                model
-                path
-                (fun () ->
-                    worktreeApi.Value.launchAction
-                        { Path = path; Action = action })
+            let updated, alreadyStarting =
+                beginEmbeddedTerminalStart path model
+
+            updated,
+            if alreadyStarting then
+                saveTerminalPaneOpenCmd true model
+            else
+                launchEmbeddedTerminalCmd
+                    PromptedAgentStarted
+                    model
+                    path
+                    (fun () ->
+                        worktreeApi.Value.launchAction
+                            { Path = path; Action = action })
         | None ->
             model, Cmd.none
 
