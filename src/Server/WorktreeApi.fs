@@ -1252,10 +1252,16 @@ let internal worktreeApiWithLaunchUsing
 
                       match req.Action with
                       | CanvasSession(filename, _) ->
-                          match PathUtils.validateCanvasPath path filename with
-                          | Ok canvasPath
-                              when CanvasDocKinds.classify filename = AgentDoc
-                                   && File.Exists canvasPath ->
+                          let validation =
+                              PathUtils.validateCanvasPath path filename
+                              |> Result.bind (fun canvasPath ->
+                                  match CanvasDocKinds.classify filename with
+                                  | SystemView -> Error "SystemView documents do not support explicit session start"
+                                  | AgentDoc when File.Exists canvasPath -> Ok()
+                                  | AgentDoc -> Error "Canvas document file does not exist")
+
+                          match validation with
+                          | Ok() ->
                               match! CanvasDocOwnership.getOwner path filename with
                               | Some owner ->
                                   return!
@@ -1264,8 +1270,9 @@ let internal worktreeApiWithLaunchUsing
                                           Log.log "API" $"Canvas owner resume failed for worktree={JsonConvert.SerializeObject path}: {JsonConvert.SerializeObject error}"
                                           PromptedLaunchError.TerminalStartFailed))
                               | None -> return! startPrompted ()
-                          | Ok _
-                          | Error _ -> return Error PromptedLaunchError.CanvasDocUnavailable
+                          | Error reason ->
+                              Log.log "API" $"Canvas Start rejected for worktree={JsonConvert.SerializeObject path} filename={JsonConvert.SerializeObject filename}: {JsonConvert.SerializeObject reason}"
+                              return Error PromptedLaunchError.CanvasDocUnavailable
                       | FixPr _
                       | FixBuild _
                       | CreatePr -> return! startPrompted ()

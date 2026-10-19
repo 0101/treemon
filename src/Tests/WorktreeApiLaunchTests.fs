@@ -257,11 +257,12 @@ type CanvasOwnerLaunchTests() =
                     Is.EqualTo [| LaunchCall.StartEmbeddedCommand(path, expectedCommand) |])
                 Assert.That(CanvasDocOwnership.getOwner root filename |> runAsync, Is.EqualTo(Some owner))))
 
-    [<TestCase("../escape.html")>]
-    [<TestCase("missing.html")>]
-    [<TestCase("diff.html")>]
-    [<TestCase("beads.html")>]
-    member _.``Canvas Start rejects unavailable or system documents before launching``(filename: string) =
+    [<TestCase("../escape.html", "Filename does not match the canvas filename contract")>]
+    [<TestCase("bad\"\r\n\u001b[31m.html", "Filename does not match the canvas filename contract")>]
+    [<TestCase("missing.html", "Canvas document file does not exist")>]
+    [<TestCase("diff.html", "SystemView documents do not support explicit session start")>]
+    [<TestCase("beads.html", "SystemView documents do not support explicit session start")>]
+    member _.``Canvas Start logs its rejection reason without launching``(filename: string, reason: string) =
         withCanvasDocument (fun root path _ ->
             let directory = Path.Combine(root, ".agents", "canvas")
             [ "diff.html"; "beads.html" ]
@@ -282,9 +283,12 @@ type CanvasOwnerLaunchTests() =
                 |> runAsync
             let expected: Result<EmbeddedTerminalStartResult, PromptedLaunchError> =
                 Error PromptedLaunchError.CanvasDocUnavailable
+            let expectedLog =
+                $"Canvas Start rejected for worktree={Newtonsoft.Json.JsonConvert.SerializeObject(WorktreePath.value path)} filename={Newtonsoft.Json.JsonConvert.SerializeObject filename}: {Newtonsoft.Json.JsonConvert.SerializeObject reason}"
 
             Assert.Multiple(fun () ->
                 Assert.That(result, Is.EqualTo expected)
+                Assert.That(File.ReadAllText(Log.currentPath()), Does.Contain(expectedLog + Environment.NewLine))
                 Assert.That(calls, Is.Empty)))
 
 [<TestFixture>]
