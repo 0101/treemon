@@ -163,10 +163,14 @@ Direct dashboard actions that start an agent open and target the terminal pane, 
 returned terminal. When invoked, Resume first joins its durable target session ID to the
 authoritative running terminal snapshot; when that exact session is already live, it returns the
 existing terminal and starts no second Copilot process. An embedded terminal without an open coding
-session does not suppress Resume; any open coding session does. Repeating the terminal-open or
-Resume action while that worktree already has a start in flight re-targets the pane without issuing
-a second launch; the in-flight state clears on both success and failure, so a rejected launch never
-wedges the action. Agent actions do not coalesce with an in-flight start: each one queues a fresh
+session does not suppress Resume; any open coding session does. Explicit Canvas Start uses the same
+exact-session reuse and resume path for the selected document's persisted owner, not the latest
+worktree conversation. It preserves ownership and sends no takeover prompt. Only an unowned
+AgentDoc uses prompted fresh-session startup; invalid, missing, and SystemView targets are rejected.
+Repeating the terminal-open, Resume, or Canvas Start action while that worktree already has a start
+in flight re-targets the pane without issuing a second launch; the in-flight state clears on both
+success and failure, so a rejected launch never wedges the action.
+Agent actions do not coalesce with an in-flight start: each one queues a fresh
 Copilot launch and selects and focuses its exact returned terminal in order.
 Background and CLI launches never steal dashboard focus.
 Queued SystemView fallback retains the exact returned terminal ID in its ephemeral message target.
@@ -196,8 +200,8 @@ command launch returns. Worktree creation's post-fork setup finishes before this
 its own five-minute cap; it does not consume the acceptance deadline. Timeout or rejection removes
 the reserved prompt, closes only the newly created terminal
 through exact-session cleanup, and returns an explicit error; incomplete cleanup is also reported.
-Prompted-launch API results preserve unknown-worktree, unavailable-mode, terminal-start,
-startup-timeout/rejection, and cleanup-failure cases in a shared error union. Unexpected failures
+Prompted-launch API results preserve unknown-worktree, unavailable-mode, unavailable-canvas-document,
+terminal-start, startup-timeout/rejection, and cleanup-failure cases in a shared error union. Unexpected failures
 are logged with operation context and return a generic case; the dashboard and CLI render the
 user-facing text. Backend failure details remain in the server log, while incomplete cleanup
 retains the exact new terminal ID in its typed result. Automatic Canvas startup carries the same

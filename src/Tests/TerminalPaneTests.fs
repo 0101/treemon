@@ -1964,6 +1964,7 @@ type TerminalFocusTests() =
                 Some(
                     first,
                     CanvasSession(
+                        filename,
                         CanvasSessionPrompt.forAgentDoc
                             (WorktreePath.value first)
                             filename
@@ -1971,6 +1972,32 @@ type TerminalFocusTests() =
                 )
             )
         )
+
+        let started, firstCmd =
+            App.update (LaunchCanvasSession(WorktreePath.value first)) model
+        let repeated, repeatedCmd =
+            App.update (LaunchCanvasSession(WorktreePath.value first)) started
+
+        Assert.Multiple(fun () ->
+            Assert.That(started.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(isStarting first started.EmbeddedTerminalStarts, Is.True)
+            Assert.That(List.length firstCmd, Is.EqualTo(2))
+            Assert.That(repeated.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(isStarting first repeated.EmbeddedTerminalStarts, Is.True)
+            Assert.That(List.length repeatedCmd, Is.EqualTo(1))
+            Assert.That(repeated.ActionCooldowns, Is.EqualTo(model.ActionCooldowns))
+            Assert.That(
+                CanvasUpdate.canvasSessionAction (WorktreePath.value second) model,
+                Is.EqualTo None))
+
+    [<Test>]
+    member _.``Canvas Start without an active document does not launch or open the terminal``() =
+        let updated, cmd =
+            App.update (LaunchCanvasSession(WorktreePath.value first)) focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated, Is.EqualTo focusModel)
+            Assert.That(cmd, Is.Empty))
 
     [<Test>]
     member _.``Card focus changes visible terminals without overwriting worktree selections``() =

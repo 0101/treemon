@@ -861,6 +861,49 @@ let internal worktreeApiWithLaunchUsing
     let startEmbeddedCommand wtPath command =
         terminalLaunch.StartEmbeddedCommand wtPath command
 
+    let resumeEmbeddedSession wtPath provider sessionId =
+        async {
+            let inv =
+                sessionId
+                |> Option.map SessionId.value
+                |> CodingToolCli.Resume
+                |> CodingToolCli.build provider
+            let start () =
+                startEmbeddedCommand wtPath inv.AsShellString
+                |> terminalStart
+
+            match sessionId with
+            | None -> return! start ()
+            | Some targetSessionId ->
+                let! snapshot = EmbeddedTerminal.get embeddedTerminal
+                let! state =
+                    agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+                let sessions =
+                    state.SessionInstances
+                    |> Map.values
+                    |> Seq.toList
+                let now = DateTimeOffset.UtcNow
+
+                match
+                    TerminalSessionActivity.tryFindLiveTerminalId
+                        now
+                        wtPath
+                        targetSessionId
+                        sessions
+                        snapshot
+                with
+                | Some terminalId ->
+                    return
+                        Ok
+                            { Snapshot =
+                                snapshot
+                                |> TerminalSessionActivity.withReportedActivity
+                                    now
+                                    sessions
+                              TerminalId = terminalId }
+                | None -> return! start ()
+        }
+
     let startEmbeddedTerminal wtPath =
         withValidatedPath
             wtPath
@@ -1202,10 +1245,37 @@ let internal worktreeApiWithLaunchUsing
                   async {
                       let path = WorktreePath.value req.Path
                       let provider = CodingToolStatus.readConfiguredProvider path
-                      let prompt = CodingToolStatus.actionPrompt provider req.Action
-                      return!
+                      let startPrompted () =
+                          let prompt = CodingToolStatus.actionPrompt provider req.Action
                           terminalLaunch.StartPromptedAgent provider req.Path prompt
                           |> terminalStart
+
+                      match req.Action with
+                      | CanvasSession(filename, _) ->
+                          let validation =
+                              PathUtils.validateCanvasPath path filename
+                              |> Result.bind (fun canvasPath ->
+                                  match CanvasDocKinds.classify filename with
+                                  | SystemView -> Error "SystemView documents do not support explicit session start"
+                                  | AgentDoc when File.Exists canvasPath -> Ok()
+                                  | AgentDoc -> Error "Canvas document file does not exist")
+
+                          match validation with
+                          | Ok() ->
+                              match! CanvasDocOwnership.getOwner path filename with
+                              | Some owner ->
+                                  return!
+                                      resumeEmbeddedSession req.Path provider (Some owner)
+                                      |> Async.map (Result.mapError (fun error ->
+                                          Log.log "API" $"Canvas owner resume failed for worktree={JsonConvert.SerializeObject path}: {JsonConvert.SerializeObject error}"
+                                          PromptedLaunchError.TerminalStartFailed))
+                              | None -> return! startPrompted ()
+                          | Error reason ->
+                              Log.log "API" $"Canvas Start rejected for worktree={JsonConvert.SerializeObject path} filename={JsonConvert.SerializeObject filename}: {JsonConvert.SerializeObject reason}"
+                              return Error PromptedLaunchError.CanvasDocUnavailable
+                      | FixPr _
+                      | FixBuild _
+                      | CreatePr -> return! startPrompted ()
                   })
           reportActivity = fun level -> async { agent.Post(SchedulerState.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
@@ -1227,46 +1297,7 @@ let internal worktreeApiWithLaunchUsing
                           | CodingToolProvider.CopilotCli ->
                               activityStore
                               |> Option.bind _.LatestSessionIdForWorktree(PathUtils.toWorktreePath path)
-                      let inv =
-                          sessionId
-                          |> Option.map SessionId.value
-                          |> CodingToolCli.Resume
-                          |> CodingToolCli.build provider
-                      let start () =
-                          startEmbeddedCommand wtPath inv.AsShellString
-                          |> terminalStart
-
-                      match sessionId with
-                      | None -> return! start ()
-                      | Some targetSessionId ->
-                          let! snapshot = EmbeddedTerminal.get embeddedTerminal
-                          let! state =
-                              agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
-                          let sessions =
-                              state.SessionInstances
-                              |> Map.values
-                              |> Seq.toList
-
-                          let now = DateTimeOffset.UtcNow
-
-                          match
-                              TerminalSessionActivity.tryFindLiveTerminalId
-                                  now
-                                  wtPath
-                                  targetSessionId
-                                  sessions
-                                  snapshot
-                          with
-                          | Some terminalId ->
-                              return
-                                  Ok
-                                      { Snapshot =
-                                          snapshot
-                                          |> TerminalSessionActivity.withReportedActivity
-                                              now
-                                              sessions
-                                        TerminalId = terminalId }
-                          | None -> return! start ()
+                      return! resumeEmbeddedSession wtPath provider sessionId
                   })
           sendCanvasMessage = fun request ->
               let rawPath = WorktreePath.value request.WorktreePath

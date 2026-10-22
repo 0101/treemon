@@ -104,6 +104,14 @@ type WrapperTypeSerializationTests() =
         Assert.That(result.Action, Is.EqualTo(original.Action))
 
     [<Test>]
+    member _.``Canvas action preserves its document identity and unowned startup prompt``() =
+        let original: ActionRequest =
+            { Path = WorktreePath @"Q:\code\test"
+              Action = CanvasSession("review.html", "Take over the unowned document") }
+
+        Assert.That(roundTrip original, Is.EqualTo original)
+
+    [<Test>]
     member _.``Embedded terminal registry snapshot survives JSON round-trip``() =
         let original =
             { Tabs =
@@ -159,6 +167,7 @@ type PromptedLaunchErrorSerializationTests() =
     static member ErrorCases =
         [ PromptedLaunchError.UnknownWorktree(WorktreePath @"Q:\owner's repo")
           PromptedLaunchError.Unavailable "fixture mode"
+          PromptedLaunchError.CanvasDocUnavailable
           PromptedLaunchError.TerminalStartFailed
           PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut
           PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected

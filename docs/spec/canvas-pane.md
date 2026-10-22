@@ -171,16 +171,18 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   running terminal and the Terminal pane is visible. Unowned tabs retain their original colors;
   read opacity and selected borders remain unchanged.
 - The pane shows `▶ Start session` only when the active doc is an `AgentDoc` whose recorded owner is not live. A `SystemView` never has this button.
-- `LaunchCanvasSession` starts an embedded terminal through the shared action-launch flow and sends
-  a cold-start prompt built by `CanvasSessionPrompt.forAgentDoc` in
-  `src/Client/CanvasSessionPrompt.fs`. It carries `worktreePath` and `filename` as escaped JSON data,
-  then tells the replacement session to load the canvas skill, claim the focused doc using the JSON
-  `filename`, and read `.agents/canvas/<filename>` beneath the JSON `worktreePath` before handling
-  user interactions through the doc. The direct action opens the terminal pane and selects the
-  exact new terminal after SDK acceptance. The full instruction reaches the fresh session through
-  the shared `startup-prompt` bridge handshake, never through a multiline `-i` shell argument; the
-  source worktree and bare filename come from the pane's selected document, not document-authored
-  interaction payloads. See `docs/spec/embedded-terminal.md`.
+- `LaunchCanvasSession` sends the selected worktree and bare filename through the shared action
+  flow. The server requires an existing AgentDoc and resolves its persisted owner itself. An owned
+  document resumes that exact conversation, reusing its running embedded terminal when possible;
+  it does not select the latest unrelated worktree session, send takeover instructions, or change
+  ownership. Resume launch failure is reported without a replacement-session fallback.
+- Only an unowned AgentDoc uses the cold-start prompt built by `CanvasSessionPrompt.forAgentDoc`.
+  Its escaped JSON document identity tells the new session to load the canvas skill, claim the doc,
+  and read its file before handling interactions. The complete instruction travels through the
+  shared `startup-prompt` bridge handshake, never a multiline `-i` shell argument.
+  Both paths open the terminal pane and select the exact returned terminal; repeated input while a
+  start is in flight does not launch again. Worktree and filename come from the pane's selection,
+  not document-authored interaction payloads. See `docs/spec/embedded-terminal.md`.
 - AgentDoc messages route to the selected doc's author session.
 - AgentDoc messages route to the sending iframe's document owner, not a later selected tab.
 - If the owner is unreachable, the message queues without starting a nonowner session. A successful
@@ -394,7 +396,7 @@ changed rows already use).
 | `src/Extension/canvas-doc-kinds.mjs` | Shared extension-side SystemView classification for fallback rendering and edit reminders |
 | `src/Server/CanvasFilename.fs` | Server-side embedded-resource loader and exact-match validator |
 | `src/Server/CanvasDocKinds.fs` | Server classifier backed by the shared browser/server SystemView filename list |
-| `src/Client/CanvasSessionPrompt.fs` | AgentDoc replacement-session prompt using the shared JSON document identity |
+| `src/Client/CanvasSessionPrompt.fs` | Unowned AgentDoc startup prompt using the shared JSON document identity |
 | `src/Client/App.fs` | Elmish `init`/`update` logic and the top-level `view` wiring (the `Model`/`Msg` types and shared plumbing live in `AppTypes.fs`; the canvas model slice in `CanvasState.fs`; the canvas `update`-arm bodies in `CanvasUpdate.fs`; the canvas pane view wiring in `CanvasView.fs` — each canvas arm here is a one-line delegation) |
 | `src/Client/AppTypes.fs` | Foundation module: the Elmish `Model` + `Msg` types plus shared plumbing (`worktreeApi` lazy proxy, `findWorktree`, `saveCollapsedReposCmd`) used by both `App.fs` and the canvas update arms. Compiled after `CanvasState.fs` and before `CanvasUpdate.fs`/`App.fs` so canvas update logic can be lifted out of `App.fs` without a cyclic reference. Type relocation only — `update` stays a single function in `App.fs`. |
 | `src/Client/CanvasUpdate.fs` | Canvas `update`-arm bodies extracted from `App.fs` (Toggle/SetWorkspaceWidth/Select/Open/Archive(+Result)/CopyPath(+Result+Reset)/Share(+Result)/ClipboardWriteResult/DismissClipboardNotice/Navigate/MessageReceived/SendResult/Dismiss/LaunchCanvasSession/Morph*), effective-session terminal selection, the shared canvas helpers (`activeVisibleDoc`, `reconcileMountedDocs`, `syncVisibleDocCmd`, `applyFocus`), and the `messageListener` subscription glue. App.fs delegates one arm → one function. Compiled after `AppTypes.fs` and before `App.fs`. Body extraction only — `update` stays one function (no sub-`Msg`/`Cmd.map`). |
@@ -429,7 +431,7 @@ changed rows already use).
   extension only interpret it. Invalid files stay on disk but never become `CanvasDoc` inventory,
   ownership targets, or session-launch prompt inputs.
 - **Prompt identity is JSON data** — `CanvasPrompt.documentIdentityJson` is shared by the
-  AgentDoc replacement prompt (`CanvasSessionPrompt.forAgentDoc`) and the SystemView auto-spawn
+  unowned AgentDoc startup prompt (`CanvasSessionPrompt.forAgentDoc`) and the SystemView auto-spawn
   prompt (`CanvasPrompt.continueWorking`). Both escape `worktreePath` and `filename` into a labeled
   JSON object, then use only fixed instructions to resolve `.agents/canvas/<filename>` beneath the
   worktree. The Client and Shared projects remain free of `System.IO` because they are Fable-compiled.

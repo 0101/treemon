@@ -37,7 +37,9 @@ joins that selected Copilot session to a running terminal through its exact
 `CodingToolCli` builds the provider-specific resume command with the CLI's direct startup selector,
 `--session-id=<id>`, so extensions join the durable target identity from process start.
 `WorktreeApi.resumeSession` either returns the matching terminal or uses the shared embedded
-command-launch operation.
+command-launch operation. Explicit Canvas Start shares that exact-session operation but selects the
+document's persisted owner instead of the latest worktree conversation. It does not fall back to a
+replacement session when owner resume fails; unowned-document startup is separate.
 `CardViews.canResumeSession` is the single visibility predicate used by both mouse and keyboard
 entry points.
 

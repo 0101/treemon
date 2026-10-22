@@ -58,7 +58,7 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     | FixPr url -> skillInvocation provider "pr" url
     | FixBuild url -> skillInvocation provider "fix-build" url
     | CreatePr -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
-    | CanvasSession prompt -> prompt
+    | CanvasSession(_, prompt) -> prompt
 
 // Push-model live-state sourcing.
 //
