@@ -68,7 +68,10 @@ let private schemaSql =
 CREATE TABLE IF NOT EXISTS resume_sessions (
     session_id                 TEXT PRIMARY KEY,
     worktree_path              TEXT NOT NULL,
-    updated_at                 TEXT NOT NULL
+    updated_at                 TEXT NOT NULL,
+    context_current_tokens     INTEGER,
+    context_token_limit        INTEGER,
+    context_usage_at           TEXT
 );
 
 {activityEventsTableSql "CREATE TABLE IF NOT EXISTS" "activity_events"}
@@ -91,18 +94,58 @@ ON resume_sessions(worktree_path, updated_at DESC, session_id DESC);
 CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
 """
 
-/// Copies the durable identity of a pre-upgrade session row into `resume_sessions`, keeping the
-/// greatest `updated_at` per session so repeated startup and several sources converge.
-let private retainResumeIdentitySql sourceTable =
+let private resumeContextColumns =
+    [ "context_current_tokens", "INTEGER"
+      "context_token_limit", "INTEGER"
+      "context_usage_at", "TEXT" ]
+
+let private contextColumnNames =
+    resumeContextColumns
+    |> List.map fst
+    |> Set.ofList
+
+/// Copies the durable identity and optional complete context snapshot of a pre-upgrade session.
+/// Activity and context keep their independent clocks when repeated startup or several sources
+/// converge.
+let private retainResumeIdentitySql sourceTable hasContext =
+    let contextProjection =
+        if hasContext then
+            "context_current_tokens, context_token_limit, context_usage_at"
+        else
+            "NULL, NULL, NULL"
+
     $"""
-INSERT INTO resume_sessions (session_id, worktree_path, updated_at)
-SELECT session_id, worktree_path, MAX(updated_at)
+INSERT INTO resume_sessions
+    (session_id, worktree_path, updated_at,
+     context_current_tokens, context_token_limit, context_usage_at)
+SELECT session_id, worktree_path, MAX(updated_at),
+       {contextProjection}
 FROM {sourceTable}
 GROUP BY session_id
 ON CONFLICT(session_id) DO UPDATE SET
-    worktree_path = excluded.worktree_path,
-    updated_at = excluded.updated_at
-WHERE excluded.updated_at >= resume_sessions.updated_at;
+    worktree_path =
+        CASE WHEN excluded.updated_at >= resume_sessions.updated_at
+             THEN excluded.worktree_path
+             ELSE resume_sessions.worktree_path END,
+    updated_at = MAX(resume_sessions.updated_at, excluded.updated_at),
+    context_current_tokens =
+        CASE WHEN excluded.context_usage_at IS NOT NULL
+                   AND (resume_sessions.context_usage_at IS NULL
+                        OR excluded.context_usage_at >= resume_sessions.context_usage_at)
+             THEN excluded.context_current_tokens
+             ELSE resume_sessions.context_current_tokens END,
+    context_token_limit =
+        CASE WHEN excluded.context_usage_at IS NOT NULL
+                   AND (resume_sessions.context_usage_at IS NULL
+                        OR excluded.context_usage_at >= resume_sessions.context_usage_at)
+             THEN excluded.context_token_limit
+             ELSE resume_sessions.context_token_limit END,
+    context_usage_at =
+        CASE WHEN excluded.context_usage_at IS NOT NULL
+                   AND (resume_sessions.context_usage_at IS NULL
+                        OR excluded.context_usage_at >= resume_sessions.context_usage_at)
+             THEN excluded.context_usage_at
+             ELSE resume_sessions.context_usage_at END;
 """
 
 let private tableExists
@@ -166,6 +209,59 @@ let private executeMigrationSql
     command.Transaction <- transaction
     command.CommandText <- sql
     command.ExecuteNonQuery() |> ignore
+
+let private ensureResumeContextColumns
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction)
+    =
+    let existing = columnNames connection transaction "resume_sessions"
+
+    resumeContextColumns
+    |> List.iter (fun (name, columnType) ->
+        if not (Set.contains name existing) then
+            executeMigrationSql
+                connection
+                transaction
+                $"ALTER TABLE resume_sessions ADD COLUMN {name} {columnType};")
+
+let private validateCompleteContext
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction)
+    tableName
+    =
+    use command = connection.CreateCommand()
+    command.Transaction <- transaction
+    command.CommandText <-
+        $"""
+SELECT count(*)
+FROM {tableName}
+WHERE (context_current_tokens IS NOT NULL
+       OR context_token_limit IS NOT NULL
+       OR context_usage_at IS NOT NULL)
+  AND (context_current_tokens IS NULL
+       OR context_token_limit IS NULL
+       OR context_usage_at IS NULL);
+"""
+
+    if Convert.ToInt32(command.ExecuteScalar()) > 0 then
+        invalidOp $"Session activity migration found incomplete context data in {tableName}"
+
+let private sourceHasContext
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction)
+    tableName
+    =
+    let present =
+        columnNames connection transaction tableName
+        |> Set.intersect contextColumnNames
+
+    if Set.isEmpty present then
+        false
+    elif present = contextColumnNames then
+        validateCompleteContext connection transaction tableName
+        true
+    else
+        invalidOp $"Session activity migration found an incomplete context schema in {tableName}"
 
 /// Branch databases created before per-instance lifecycle ordering lack `lifecycle_at`; adding it
 /// keeps those exact rows readable instead of failing startup.
@@ -277,18 +373,27 @@ let private retainResumeIdentity
     sourceTable
     =
     if tableExists connection transaction sourceTable then
+        let hasContext =
+            sourceHasContext
+                connection
+                transaction
+                sourceTable
+
         executeMigrationSql
             connection
             transaction
-            (retainResumeIdentitySql sourceTable)
+            (retainResumeIdentitySql sourceTable hasContext)
 
 let internal initializeSchema (connection: SqliteConnection) =
     use transaction = connection.BeginTransaction()
     executeMigrationSql connection transaction schemaSql
+    ensureResumeContextColumns connection transaction
+    validateCompleteContext connection transaction "resume_sessions"
     ensureLifecycleColumn connection transaction
     rebuildSessionInstancesIfNeeded connection transaction
     retainResumeIdentity connection transaction "session_status"
     retainResumeIdentity connection transaction "retained_sessions"
+    validateCompleteContext connection transaction "resume_sessions"
     rebuildActivityEventsIfNeeded connection transaction
     executeMigrationSql
         connection

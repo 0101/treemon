@@ -153,7 +153,7 @@ let internal applyPresence
                     TerminalSessionId = terminalSessionId
                     LastSeen = max existing.LastSeen exact.ReceivedAt }
 
-            let persisted = store.UpsertInstance next
+            let persisted = store.EstablishInstance next
             let published =
                 publishInstance
                     scheduler
@@ -165,7 +165,9 @@ let internal applyPresence
             Ok(published, persisted)
     | None ->
         let persisted =
-            exact |> createPresenceInstance |> store.UpsertInstance
+            exact
+            |> createPresenceInstance
+            |> store.EstablishInstance
 
         Ok(
             publishInstance
