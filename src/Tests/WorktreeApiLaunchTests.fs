@@ -258,7 +258,10 @@ type CanvasOwnerLaunchTests() =
                 Assert.That(CanvasDocOwnership.getOwner root filename |> runAsync, Is.EqualTo(Some owner))))
 
     [<TestCase("../escape.html", "Filename does not match the canvas filename contract")>]
-    [<TestCase("bad\"\r\n\u001b[31m.html", "Filename does not match the canvas filename contract")>]
+    [<TestCase(
+        "bad\"\r\n\u001b[31m.html",
+        "Filename does not match the canvas filename contract",
+        TestName = "Canvas Start logs a control-character filename rejection without launching")>]
     [<TestCase("missing.html", "Canvas document file does not exist")>]
     [<TestCase("diff.html", "SystemView documents do not support explicit session start")>]
     [<TestCase("beads.html", "SystemView documents do not support explicit session start")>]
