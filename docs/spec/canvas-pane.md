@@ -149,9 +149,14 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   strip fits a newest-first prefix, ellipsizes only the final title as needed, and shows the exact
   hidden count as `+X` before a canvas glyph. It hides when no AgentDocs exist, and excludes archived
   documents through the active inventory. Viewed, unowned, and offline-author documents still
-  contribute. Full names and hidden documents are available in tooltips. These informational
-  previews do not select a document or mark it read. Canvas published/updated notifications are not
-  appended to the console; normal activity, user/assistant messages, and other events remain.
+  contribute. Unviewed previews stay at full contrast; viewed previews reuse the pane's
+  `canvas-tab-viewed` 0.5-opacity styling. Eligibility comes from the same worktree/filename
+  `LastViewedHashes` and content-hash comparison as the pane and unread badge, so a timestamp-only
+  change does not restore unread highlighting, but a content change does. Full names and hidden
+  documents are available in tooltips. These informational previews do not select a document or
+  mark it read, and focusing the card while the pane is closed does not clear the highlight.
+  Canvas published/updated notifications stay out of the console; normal activity, user/assistant
+  messages, and other events remain.
 - **Freshness gate (restart-phantom suppression).** The idle auto-display target requires a real
   file `LastModified` within five minutes (`isCanvasDocFresh` in `CanvasAwareness.fs`). A pre-existing
   doc that reappears after an incomplete restart snapshot therefore cannot steal focus. The card

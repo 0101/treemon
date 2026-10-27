@@ -124,6 +124,7 @@ let beadsProgressBar (b: BeadsSummary) =
 /// The model read-slice the card views render over, without a Model/Msg dependency.
 type CardViewProps =
     { Now: System.DateTimeOffset
+      LastViewedHashes: Map<string, Map<string, string>>
       EditorName: string
       IsCompact: bool
       FocusedElement: FocusTarget option
@@ -739,7 +740,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                     yield! trailingWorkMetrics wt.WorkMetrics
                 ]
             ]
-            CanvasDocStrip.view props.Now wt.CanvasDocs
+            CanvasDocStrip.view props.Now props.LastViewedHashes wt
         ]
     ]
 
@@ -796,7 +797,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                 ]
             ]
 
-            CanvasDocStrip.view props.Now wt.CanvasDocs
+            CanvasDocStrip.view props.Now props.LastViewedHashes wt
 
             Html.div [
                 prop.className footerClass

@@ -33,10 +33,14 @@ let fit availableWidth gap minimumLastWidth (widths: float list) (overflowWidths
                 choose (count - 1)
     choose total
 
-let private docChip now (lastWidth: float option) (doc: CanvasDoc) =
+let private docChip now viewedHashes (lastWidth: float option) (doc: CanvasDoc) =
     Html.span [
         prop.key doc.Filename
-        prop.className "canvas-tab canvas-card-doc"
+        prop.className (
+            [ "canvas-tab"
+              "canvas-card-doc"
+              if not (CanvasAwareness.isUnviewed viewedHashes doc) then "canvas-tab-viewed" ]
+            |> String.concat " ")
         prop.custom ("data-filename", doc.Filename)
         prop.title $"{doc.Filename} - modified {Components.relativeTime now doc.LastModified}"
         match lastWidth with
@@ -55,7 +59,7 @@ let private docChip now (lastWidth: float option) (doc: CanvasDoc) =
     ]
 
 [<ReactComponent>]
-let private Strip (now: System.DateTimeOffset) (docs: CanvasDoc list) =
+let private Strip (now: System.DateTimeOffset) (viewedHashes: Map<string, string>) (docs: CanvasDoc list) =
     let root = React.useRef<Browser.Types.Element option>(None)
     let layout, updateLayout =
         React.useStateWithUpdater { VisibleCount = docs.Length; LastWidth = 180.0 }
@@ -109,7 +113,7 @@ let private Strip (now: System.DateTimeOffset) (docs: CanvasDoc list) =
                     docs
                     |> List.truncate visibleCount
                     |> List.mapi (fun index doc ->
-                        docChip now (if index = visibleCount - 1 then Some layout.LastWidth else None) doc))
+                        docChip now viewedHashes (if index = visibleCount - 1 then Some layout.LastWidth else None) doc))
             ]
             if hiddenCount > 0 then
                 Html.span [
@@ -127,7 +131,7 @@ let private Strip (now: System.DateTimeOffset) (docs: CanvasDoc list) =
                 prop.className "canvas-card-measures"
                 prop.ariaHidden true
                 prop.children [
-                    yield! docs |> List.map (docChip now None)
+                    yield! docs |> List.map (docChip now viewedHashes None)
                     for count in 1 .. docs.Length - 1 do
                         Html.span [
                             prop.key $"overflow-{count}"
@@ -139,7 +143,11 @@ let private Strip (now: System.DateTimeOffset) (docs: CanvasDoc list) =
         ]
     ]
 
-let view now docs =
-    match orderedDocs docs with
+let view now lastViewedHashes (worktree: WorktreeStatus) =
+    let viewedHashes =
+        lastViewedHashes
+        |> Map.tryFind (WorktreePath.value worktree.Path)
+        |> Option.defaultValue Map.empty
+    match orderedDocs worktree.CanvasDocs with
     | [] -> Html.none
-    | documents -> Strip now documents
+    | documents -> Strip now viewedHashes documents

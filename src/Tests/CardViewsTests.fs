@@ -506,6 +506,85 @@ type CanvasDocStripRenderingTests() =
             Assert.That(interruptedPixels, Is.Zero, "Both selection edges must stay visible through the strip")
         }
 
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member this.``Unseen strip previews match pane styling and follow content hash read state``(compact: bool) =
+        task {
+            do! this.Page.RouteAsync(
+                "**/IWorktreeApi/loadLastViewedHashes",
+                Func<IRoute, System.Threading.Tasks.Task>(fun route ->
+                    route.FulfillAsync(RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = JsonConvert.SerializeObject(Map.empty<string, Map<string, string>>, dashboardConverter)))))
+            do! this.Page.RouteAsync(
+                "**/some-canvas-doc.html",
+                Func<IRoute, System.Threading.Tasks.Task>(fun route ->
+                    route.FulfillAsync(RouteFulfillOptions(
+                        ContentType = "text/html",
+                        Body = "<!doctype html><title>Canvas document</title><p>Document content</p>"))))
+            do! this.Navigate()
+            if compact then
+                do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Compact", Exact = true)).ClickAsync()
+
+            let canvasToggle = this.Page.Locator("button[title='Toggle canvas pane (C)']")
+            let! openPanes = this.Page.Locator(".canvas-pane.open").CountAsync()
+            if openPanes > 0 then do! canvasToggle.ClickAsync()
+
+            let card = cardByBranch this.Page "feature-active"
+            let first = card.Locator(".canvas-card-docs > [data-filename='some-canvas-doc.html']")
+            let viewed = card.Locator(".canvas-card-docs > .canvas-tab-viewed[data-filename='some-canvas-doc.html']")
+            let unseen = card.Locator(".canvas-card-docs > :not(.canvas-tab-viewed)[data-filename='some-canvas-doc.html']")
+            do! viewed.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let setDocuments docs =
+                task {
+                    do! this.Page.UnrouteAsync("**/IWorktreeApi/getWorktrees")
+                    do! routeDashboard (withCanvasStripDocs docs) this.Page
+                }
+
+            let modified =
+                documents
+                |> List.map (fun document ->
+                    if document.Filename = "some-canvas-doc.html" then
+                        { document with LastModified = DateTimeOffset.UtcNow }
+                    else document)
+            do! setDocuments modified
+            let! _ = this.Page.WaitForFunctionAsync(
+                """() => document.querySelector('.canvas-card-docs [data-filename="some-canvas-doc.html"] .canvas-card-doc-age')?.textContent === 'now'""")
+            let! viewedAfterTimeChange = viewed.CountAsync()
+            Assert.That(viewedAfterTimeChange, Is.EqualTo(1), "A timestamp-only change must not make content unread")
+
+            let changed hash =
+                modified
+                |> List.map (fun document ->
+                    if document.Filename = "some-canvas-doc.html" then { document with ContentHash = hash }
+                    else document)
+            do! setDocuments (changed "unseen-1")
+            do! unseen.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! unseenOpacity = first.EvaluateAsync<string>("element => getComputedStyle(element).opacity")
+            let! otherViewed = card.Locator(".canvas-card-docs > .canvas-tab-viewed[data-filename='another-canvas-doc.html']").CountAsync()
+            Assert.Multiple(fun () ->
+                Assert.That(unseenOpacity, Is.EqualTo("1"), "Unseen content should stay at full contrast")
+                Assert.That(otherViewed, Is.EqualTo(1), "Other viewed previews should stay dimmed"))
+
+            do! card.Locator(".branch-name").ClickAsync()
+            let! stillUnseen = unseen.CountAsync()
+            Assert.That(stillUnseen, Is.EqualTo(1), "Card focus alone must not mark a document viewed")
+            do! canvasToggle.ClickAsync()
+            do! viewed.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! stripOpacity = first.EvaluateAsync<string>("element => getComputedStyle(element).opacity")
+            let! paneOpacity =
+                this.Page.Locator(".canvas-pane .canvas-tab-viewed").First.EvaluateAsync<string>(
+                    "element => getComputedStyle(element).opacity")
+            Assert.That(stripOpacity, Is.EqualTo(paneOpacity), "Viewed previews should reuse the pane's dimming")
+
+            do! canvasToggle.ClickAsync()
+            do! setDocuments (changed "unseen-2")
+            do! unseen.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! changedOpacity = first.EvaluateAsync<string>("element => getComputedStyle(element).opacity")
+            Assert.That(changedOpacity, Is.EqualTo("1"), "A later content change should restore the highlight")
+        }
+
     [<Test>]
     member this.``Document updates reorder the strip and empty inventory unmounts and restores it``() =
         task {

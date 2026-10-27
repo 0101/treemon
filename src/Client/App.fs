@@ -2248,6 +2248,7 @@ let view model dispatch =
 
     let cardProps: CardViewProps =
         { Now = model.Now
+          LastViewedHashes = model.Canvas.LastViewedHashes
           EditorName = model.EditorName
           IsCompact = model.IsCompact
           FocusedElement = model.FocusedElement

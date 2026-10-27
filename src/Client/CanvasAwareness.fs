@@ -53,8 +53,8 @@ let seedLastViewedHashes (repos: RepoModel list) (hashes: Map<string, Map<string
 
 /// A doc is unviewed when its current ContentHash differs from the last viewed hash for that
 /// filename (a missing entry means it was never viewed). This is the single unviewed predicate,
-/// shared by unviewedDocsByScopedKey (badge counts) and mostRecentUnviewedDoc (focus retarget).
-let private isUnviewed (viewedHashes: Map<string, string>) (doc: CanvasDoc) : bool =
+/// shared by badge counts, focus retargeting, and worktree-card document previews.
+let isUnviewed (viewedHashes: Map<string, string>) (doc: CanvasDoc) : bool =
     match viewedHashes |> Map.tryFind doc.Filename with
     | Some hash -> hash <> doc.ContentHash
     | None -> true
