@@ -961,13 +961,27 @@ type TerminalFocusTests() =
                 Is.EqualTo None
             ))
 
-    [<Test>]
-    member _.``T key opens or focuses the embedded terminal for the focused card``() =
+    [<TestCase("t", false)>]
+    [<TestCase("t", true)>]
+    [<TestCase("Enter", false)>]
+    [<TestCase("Enter", true)>]
+    member _.``Terminal keys target the embedded terminal regardless of native session state``(key: string, hasNativeSession: bool) =
+        let model =
+            { focusModel with
+                Repos =
+                    focusModel.Repos
+                    |> List.map (fun repo ->
+                        { repo with
+                            Worktrees =
+                                repo.Worktrees
+                                |> List.map (fun wt ->
+                                    { wt with HasActiveSession = hasNativeSession }) }) }
+
         Assert.That(
             App.keyBinding
                 (Card (WorktreePath.value first))
-                "t"
-                focusModel,
+                key
+                model,
             Is.EqualTo(Some(OpenEmbeddedTerminal first))
         )
 

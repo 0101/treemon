@@ -268,7 +268,7 @@ A "+" button on each repo header opens a modal to create new worktrees without l
 
 ### Native Session Management
 
-Windows Terminal integration is retained only for the card's explicit `>` / Enter terminal action.
+Windows Terminal integration is retained only for the card's click-only `>` terminal action.
 The always-visible robot-head Agent action starts a fresh embedded Copilot terminal instead of a
 native Windows Terminal tab. See `docs/spec/native-session-management.md` and
 `docs/spec/embedded-terminal.md`.
