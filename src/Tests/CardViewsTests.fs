@@ -424,8 +424,12 @@ type CanvasDocStripRenderingTests() =
                         const problems = [];
                         const bounds = strip.getBoundingClientRect();
                         const cardBounds = card.getBoundingClientRect();
+                        const iconBounds = strip.querySelector('.canvas-card-icon').getBoundingClientRect();
+                        const controlsBounds = card.querySelector('.card-header').lastElementChild.getBoundingClientRect();
                         if (Math.abs(bounds.left - cardBounds.left) > 1 || Math.abs(bounds.right - cardBounds.right) > 1)
                             problems.push('strip is not edge-to-edge');
+                        if (Math.abs(iconBounds.right - controlsBounds.right) > 1)
+                            problems.push('canvas icon does not align with the card controls');
                         if (strip.querySelectorAll('.canvas-card-measures .canvas-card-doc').length !== 6)
                             problems.push('system views contributed to inventory');
                         if (!docs.length || docs[0].dataset.filename !== 'some-canvas-doc.html')
@@ -436,6 +440,10 @@ type CanvasDocStripRenderingTests() =
                             const title = chip.querySelector('.canvas-card-doc-title');
                             const age = chip.querySelector('.canvas-card-doc-age');
                             const rect = chip.getBoundingClientRect();
+                            if (getComputedStyle(chip).cursor !== 'pointer'
+                                || getComputedStyle(title).cursor !== 'pointer'
+                                || getComputedStyle(age).cursor !== 'pointer')
+                                problems.push('tab preview does not use a pointer cursor');
                             if (title.nextElementSibling !== age || title.getBoundingClientRect().right > age.getBoundingClientRect().left + 1)
                                 problems.push('title and age overlap or are reversed');
                             if (age.scrollWidth > age.clientWidth + 1 || rect.right > bounds.right + 1)

@@ -1306,17 +1306,17 @@
         .canvas-card-strip {
             --canvas-card-gap: 2px;
             --canvas-card-min-width: 96px;
-            align-items: center; gap: 6px; min-height: 0;
+            align-items: center; gap: 6px; min-height: 0; padding-right: 14px;
         }
         .canvas-card-docs { display: flex; align-items: center; gap: var(--canvas-card-gap); flex: 1; min-width: 0; overflow: hidden; }
-        .canvas-card-doc { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; min-width: 0; max-width: 180px; cursor: default; }
+        .canvas-card-doc { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; min-width: 0; max-width: 180px; }
         .canvas-card-doc-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
         .canvas-card-doc-age { flex-shrink: 0; color: #9399b2; font-family: 'Consolas', 'Cascadia Mono', monospace; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
         .canvas-card-overflow { display: inline-block; flex-shrink: 0; color: #a6adc8; font-family: 'Consolas', 'Cascadia Mono', monospace; font-size: var(--fs-sm); white-space: nowrap; }
         .canvas-card-icon { width: 13px; height: 13px; flex-shrink: 0; color: #89dceb; }
         .canvas-card-measures { position: absolute; width: 0; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
         .canvas-card-measures .canvas-card-doc { width: max-content; }
-        .wt-card.compact .canvas-card-strip { margin: 6px -10px -6px; }
+        .wt-card.compact .canvas-card-strip { margin: 6px -10px -6px; padding-right: 10px; }
         .canvas-tab-copy {
             position: absolute; top: 50%; right: 10px; transform: translateY(-50%);
             width: 18px; height: 18px; padding: 2px; box-sizing: border-box;
