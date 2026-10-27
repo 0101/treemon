@@ -23,20 +23,14 @@ type StartCommandTests() =
 type BuildNewSessionCommandTests() =
 
     [<Test>]
-    member _.``New session selects its durable identity without a shell prompt``() =
-        let id = "f68f73bd-b6ef-4598-b64b-346a263244d4"
-        let result = (build (Some CodingToolProvider.CopilotCli) (NewSession id)).AsShellString
-        Assert.That(result, Is.EqualTo($"copilot --experimental --yolo --session-id='{id}'"))
+    member _.``New session starts without a caller supplied identity or shell prompt``() =
+        let result = (build (Some CodingToolProvider.CopilotCli) NewSession).AsShellString
+        Assert.That(result, Is.EqualTo("copilot --experimental --yolo"))
 
     [<Test>]
     member _.``None provider falls back to the default``() =
-        let result = (build None (NewSession "session-id")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --experimental --yolo --session-id='session-id'"))
-
-    [<Test>]
-    member _.``New session quotes its identity at the shell boundary``() =
-        let result = (build None (NewSession "$(calc); '")).AsShellString
-        Assert.That(result, Is.EqualTo("copilot --experimental --yolo --session-id='$(calc); '''"))
+        let result = (build None NewSession).AsShellString
+        Assert.That(result, Is.EqualTo("copilot --experimental --yolo"))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -81,7 +75,7 @@ type PermissionFlagInvariantTests() =
     static member InvariantCases : obj array seq =
         seq {
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box Start |]
-            yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (NewSession "session-id") |]
+            yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box NewSession |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Resume (Some "abc")) |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Resume None) |]
         }
@@ -99,7 +93,7 @@ type ExtensionDiscoveryFlagInvariantTests() =
 
     static member InvocationCases : obj array seq =
         seq {
-            yield [| box (NewSession "session-id") |]
+            yield [| box NewSession |]
             yield [| box (Resume (Some "abc")) |]
             yield [| box (Resume None) |]
             yield [| box (NonInteractive "hello") |]

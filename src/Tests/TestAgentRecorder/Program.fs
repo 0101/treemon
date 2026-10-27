@@ -25,9 +25,10 @@ let private startupPrompt (args: string array) =
         args
         |> Array.tryFind _.StartsWith("--session-id=")
         |> Option.map _.Substring("--session-id=".Length)
+        |> Option.defaultWith (fun () -> Guid.NewGuid().ToString())
 
-    match Environment.GetEnvironmentVariable("TM_COPILOT_BRIDGE_STARTUP"), sessionId with
-    | "1", Some sessionId ->
+    match Environment.GetEnvironmentVariable("TM_COPILOT_BRIDGE_STARTUP") with
+    | "1" ->
         let serverPort =
             match Int32.TryParse(Environment.GetEnvironmentVariable("TREEMON_PORT")) with
             | true, port when port > 0 && port <> 5000 -> port

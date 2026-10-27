@@ -5,7 +5,7 @@ open System.Threading
 open Shared
 open Server.SessionActivity
 
-let internal startupPromptTimeout = TimeSpan.FromSeconds 30.0
+let internal startupPromptTimeout = TimeSpan.FromMinutes 2.0
 
 type internal PromptedAgentRequest =
     { Provider: CodingToolProvider option
@@ -30,7 +30,7 @@ let internal startPromptedAgentWith dependencies (request: PromptedAgentRequest)
     let worktreePath = diagnostics.WorktreePath
     let operation = async {
         let command =
-            CodingToolCli.build request.Provider (CodingToolCli.NewSession(SessionId.value diagnostics.SessionId))
+            CodingToolCli.build request.Provider CodingToolCli.NewSession
         diagnostics.Emit(
             PromptedLaunchDiagnostics.Event.CommandStarting(
                 request.Provider, command.AsShellString, request.Prompt.Length, dependencies.Timeout))

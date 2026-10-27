@@ -409,15 +409,15 @@ let private failEmbeddedTerminalStart path error model =
                     (TerminalPane.TerminalStartState.Failed error) },
         Cmd.none
 
-let private startFocusedEmbeddedTerminal path start model =
+let private startEmbeddedTerminal beginStart completed path start model =
     let updated, alreadyStarting =
-        beginFocusedEmbeddedTerminalStart path model
+        beginStart path model
 
     updated,
     if alreadyStarting then
         saveTerminalPaneOpenCmd true model
     else
-        launchEmbeddedTerminalCmd EmbeddedTerminalStarted model path start
+        launchEmbeddedTerminalCmd completed model path start
 
 /// Adopts an incoming registry snapshot, keeping terminals the user dismissed hidden while their
 /// teardown is unresolved and carrying each worktree's selection across the change.
@@ -1004,7 +1004,9 @@ let update msg model =
         Cmd.batch [ saveTerminalPaneOpenCmd true model; focusCmd ]
     | OpenEmbeddedTerminal path
     | StartEmbeddedTerminal path ->
-        startFocusedEmbeddedTerminal
+        startEmbeddedTerminal
+            beginFocusedEmbeddedTerminalStart
+            EmbeddedTerminalStarted
             path
             (fun () ->
                 worktreeApi.Value.startEmbeddedTerminal path)
@@ -1026,7 +1028,9 @@ let update msg model =
         model.EmbeddedTerminals
         |> TerminalPane.tryFindTab terminalId
         |> Option.map (fun tab ->
-            startFocusedEmbeddedTerminal
+            startEmbeddedTerminal
+                beginFocusedEmbeddedTerminalStart
+                EmbeddedTerminalStarted
                 tab.Worktree
                 (fun () ->
                     worktreeApi.Value.startEmbeddedTerminal tab.Worktree)
@@ -1421,30 +1425,24 @@ let update msg model =
         model, Cmd.OfAsync.perform worktreeApi.Value.focusSession path SessionResult
 
     | ResumeSession path ->
-        let updated, alreadyStarting =
-            beginEmbeddedTerminalStart path model
-
-        updated,
-        if alreadyStarting then
-            saveTerminalPaneOpenCmd true model
-        else
-            launchEmbeddedTerminalCmd
-                EmbeddedTerminalStarted
-                model
-                path
-                (fun () -> worktreeApi.Value.resumeSession path)
+        startEmbeddedTerminal
+            beginEmbeddedTerminalStart
+            EmbeddedTerminalStarted
+            path
+            (fun () -> worktreeApi.Value.resumeSession path)
+            model
 
     | LaunchCanvasSession scopedKey ->
         match CanvasUpdate.canvasSessionAction scopedKey model with
         | Some(path, action) ->
-            targetEmbeddedTerminalLaunch path model,
-            launchEmbeddedTerminalCmd
+            startEmbeddedTerminal
+                beginEmbeddedTerminalStart
                 PromptedAgentStarted
-                model
                 path
                 (fun () ->
                     worktreeApi.Value.launchAction
                         { Path = path; Action = action })
+                model
         | None ->
             model, Cmd.none
 

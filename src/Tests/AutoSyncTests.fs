@@ -1667,9 +1667,10 @@ type AutoSyncDeliveryTests() =
         finally
             if Directory.Exists root then Directory.Delete(root, true)
 
-    [<Test>]
+    [<TestCase(false)>]
+    [<TestCase(true)>]
     [<Category("AutoSyncVerification")>]
-    member _.``Selected session registering during grace receives prompt without fallback launch``() =
+    member _.``Selected session delivered or deferred during grace avoids fallback launch``(deferred: bool) =
         // Callback probes cross async boundaries, so immutable values cannot capture their ordering.
         let mutable attempts = 0
         let mutable registrationCompleted = false
@@ -1682,7 +1683,8 @@ type AutoSyncDeliveryTests() =
 
                 return
                     if registrationCompleted then
-                        SessionBridge.DeliveryResult.Delivered
+                        if deferred then SessionBridge.DeliveryResult.Deferred
+                        else SessionBridge.DeliveryResult.Delivered
                     else
                         SessionBridge.DeliveryResult.NoLiveSession
             }

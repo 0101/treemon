@@ -94,10 +94,13 @@ special attachment affinity.
 An AgentDoc interaction with no reachable author is queued without launching, because a new session
 would not be that document's author.
 
-Explicit AgentDoc Start and automatic SystemView startup use the shared prompted-launch handshake
-in `docs/spec/embedded-terminal.md`: the complete initial instruction is reserved for the exact
-fresh session, delivered through its extension, and accepted before already-queued interactions.
-This transport does not assign an AgentDoc owner or change SystemView target resolution.
+Explicit Start for an unowned AgentDoc and automatic SystemView startup use the shared
+prompted-launch handshake in `docs/spec/embedded-terminal.md`: the complete initial instruction is
+reserved before launch, bound to the exact returned terminal, delivered through its extension under
+Copilot's generated session ID, and accepted before already-queued interactions. This transport does
+not assign an AgentDoc owner or change SystemView target resolution. Explicit Start for an owned
+AgentDoc instead resumes its recorded conversation without takeover instructions or ownership
+changes; queued replies wait for that owner's bridge.
 
 Ordinary queued messages retain the cap of 10 and five-minute TTL, measured from original enqueue
 time. Startup reservations are separate from those limits and remain until their prompted-launch
@@ -207,9 +210,9 @@ gating every lifecycle affordance on `CanvasDoc.Kind`.
   instance may become current again. Simultaneous instances of one session may alternate endpoints.
 - **Activity chooses, reachability gates dispatch:** a bridge gap waits briefly rather than
   silently substituting a quieter co-located session.
-- **No resume:** an unreachable session is not restarted to receive an interaction. If nothing is
-  reachable, a SystemView launches a new session; an AgentDoc waits for its author. Without a resume
-  path there is no resume failure, and therefore no reassignment UI.
+- **No automatic resume:** an interaction does not restart an unreachable session. If nothing is
+  reachable, a SystemView launches a new session; an AgentDoc waits for its author. Only explicit
+  Start opts into owner resume, without automatically reassigning the document.
 - **Case-preserving filename identity:** ownership keys retain the real on-disk filename case; only
   worktree paths are normalized, so scanner lookup and pruning share one identity on
   case-sensitive hosts.

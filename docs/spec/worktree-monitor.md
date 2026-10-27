@@ -186,6 +186,8 @@ launches and deploy/restart require an external PowerShell window; see `docs/spe
 - A selected exact process whose bridge is not registered gets a bounded registration grace
   period. If that exact bridge appears, delivery continues there; only a confirmed absence after
   the grace period starts an embedded terminal and submits the sync prompt.
+- Delivery deferred by unresolved startup retains the prompt and its target in the bridge queue.
+  AutoSync treats it as handled, without registration grace or a fallback terminal launch.
 - A failed POST to a known live bridge queues the session-targeted prompt for retry instead of launching a replacement session.
 - Agent prompt acceptance is observable; completion of agent-owned synchronization is not. Mechanical completion is accepted only after the Git and conditional-push checks above succeed.
 
@@ -481,7 +483,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Retained/offline identity is still consulted only when nothing is open, and a settled-idle session
   receives any fallback prompt itself instead of triggering an unnecessary second session.
 - Generic `SessionBridge` under canvas routing: session registration, liveness, queueing, and prompt forwarding are shared infrastructure; `CanvasBridge` retains only document ownership and canvas-specific message semantics.
-- New session fallback: wait briefly for a selected session's bridge registration, then launch a new prompted session only when no live bridge exists; delivery failures to known live bridges stay queued for that session rather than creating parallel agents.
+- New session fallback: wait briefly for a selected session's bridge registration, then launch a new prompted session only when neither a live bridge nor pending startup can receive the prompt; delivery failures to known live bridges stay queued for that session rather than creating parallel agents.
 - Exact SDK policy over feature-band roll-forward: local and CI builds select `10.0.401` through
   `global.json`, so compiler and bundled dependency changes cannot enter a TerminalHost publication
   silently.
@@ -502,7 +504,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
   surfaced because the worktree already exists, and it launches even after a post-fork warning.
   Provider is read **directly** from the new worktree's `.treemon.json` because it is not in
   scheduler state yet.
-- The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The complete instruction travels through the shared exact-session startup bridge, not a shell prompt argument, so multiline text, quoted JSON, and repository-derived data remain intact. See `docs/spec/embedded-terminal.md`.
+- The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The complete instruction travels through the shared terminal-bound startup bridge, not a shell prompt argument, so multiline text, quoted JSON, and repository-derived data remain intact. Fresh launches let Copilot generate its session ID; the exact returned terminal identifies the recipient. See `docs/spec/embedded-terminal.md`.
 - Create-worktree and delete-confirm MVU updates defer forcing the lazy remoting proxy until their Elmish commands execute. Constructing a command therefore remains separate from evaluating the pure model transition, including under .NET unit tests.
 
 ## Related Specs

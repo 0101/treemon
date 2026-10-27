@@ -163,10 +163,14 @@ Direct dashboard actions that start an agent open and target the terminal pane, 
 returned terminal. When invoked, Resume first joins its durable target session ID to the
 authoritative running terminal snapshot; when that exact session is already live, it returns the
 existing terminal and starts no second Copilot process. An embedded terminal without an open coding
-session does not suppress Resume; any open coding session does. Repeating the terminal-open or
-Resume action while that worktree already has a start in flight re-targets the pane without issuing
-a second launch; the in-flight state clears on both success and failure, so a rejected launch never
-wedges the action. Agent actions do not coalesce with an in-flight start: each one queues a fresh
+session does not suppress Resume; any open coding session does. Explicit Canvas Start uses the same
+exact-session reuse and resume path for the selected document's persisted owner, not the latest
+worktree conversation. It preserves ownership and sends no takeover prompt. Only an unowned
+AgentDoc uses prompted fresh-session startup; invalid, missing, and SystemView targets are rejected.
+Repeating the terminal-open, Resume, or Canvas Start action while that worktree already has a start
+in flight re-targets the pane without issuing a second launch; the in-flight state clears on both
+success and failure, so a rejected launch never wedges the action.
+Agent actions do not coalesce with an in-flight start: each one queues a fresh
 Copilot launch and selects and focuses its exact returned terminal in order.
 Background and CLI launches never steal dashboard focus.
 Queued SystemView fallback retains the exact returned terminal ID in its ephemeral message target.
@@ -183,18 +187,21 @@ active-session indicator. That flag and its terminal-button glow, focus label, a
 native-kill prompt remain tied only to a tracked Windows Terminal window. Existing coding-tool
 status continues to show whether an embedded agent is working.
 
-Prompted interactive launches reserve their complete initial instruction for a fresh durable
-session ID, then start Copilot with `--session-id=<id>` and no `-i` argument. The registered
-extension receives that exact session's `startup-prompt` over the bridge and submits the original
-text through `session.send`. Prompt text never passes through shell arguments: Windows CMD shims
-do not reliably preserve multiline or quoted argument data.
+Fresh prompted launches run `copilot --experimental --yolo`, letting Copilot create its own durable
+session ID. Treemon reserves the complete initial instruction before launch, then binds delivery
+to the exact returned terminal. That terminal's registered extension receives the `startup-prompt`
+over the bridge and submits the original text through `session.send`. Prompt text never passes
+through shell arguments: Windows CMD shims do not reliably preserve multiline or quoted data.
+Only genuine Resume supplies an existing durable session ID.
 
 Launch succeeds only after the SDK accepts the startup message, not merely when HTTP queueing
-succeeds or the agent finishes its turn. Acceptance has a 30-second deadline after terminal
-startup. Timeout or rejection removes the reserved prompt, closes only the newly created terminal
+succeeds or the agent finishes its turn. Acceptance has a two-minute deadline after terminal
+command launch returns. Worktree creation's post-fork setup finishes before this launch and has
+its own five-minute cap; it does not consume the acceptance deadline. Timeout or rejection removes
+the reserved prompt, closes only the newly created terminal
 through exact-session cleanup, and returns an explicit error; incomplete cleanup is also reported.
-Prompted-launch API results preserve unknown-worktree, unavailable-mode, terminal-start,
-startup-timeout/rejection, and cleanup-failure cases in a shared error union. Unexpected failures
+Prompted-launch API results preserve unknown-worktree, unavailable-mode, unavailable-canvas-document,
+terminal-start, startup-timeout/rejection, and cleanup-failure cases in a shared error union. Unexpected failures
 are logged with operation context and return a generic case; the dashboard and CLI render the
 user-facing text. Backend failure details remain in the server log, while incomplete cleanup
 retains the exact new terminal ID in its typed result. Automatic Canvas startup carries the same
@@ -203,16 +210,17 @@ Acceptance and cleanup continue if the requesting browser disconnects. The trans
 depend on the CLI's `-i` submission during plugin loading, but still requires Treemon's extension
 to join and submit through the SDK; a missing bridge fails startup.
 
-Every prompted launch emits correlated `[Launch]` JSON records under its reserved durable session
-UUID (`launchId`). The trace identifies the worktree, actual command and configured provider,
-acceptance deadline, queue reservation, exact started terminal, matched bridge's optional process
-identity and terminal origin, delivery, acceptance or failure, prompt removal, and exact cleanup
-outcome. Sequence and last-milestone values never regress when bridge delivery precedes the
-terminal-start reply. Acceptance observed after cancellation is marked separately.
+Every prompted launch emits correlated `[Launch]` JSON records under a launch-local UUID
+(`launchId`), independent of Copilot's generated durable session ID. The trace identifies the
+worktree, actual command and configured provider, acceptance deadline, queue reservation, exact
+started terminal, matched bridge's optional process identity and terminal origin, delivery,
+acceptance or failure, prompt removal, and exact cleanup outcome. Bridge delivery waits for exact
+terminal binding, and sequence and last-milestone values never regress. Acceptance observed after
+cancellation is marked separately.
 
 Timeout evidence distinguishes no eligible registration, an unrelated session, the expected
-session registered in another worktree, matching registration not dispatched, and dispatch without
-observed acceptance. HTTP failures include status and response length without the body; transport
+terminal's bridge registered in another worktree, matching registration not dispatched, and dispatch
+without observed acceptance. HTTP failures include status and response length without the body; transport
 and cleanup failures retain diagnostic details. No attachment URL, shutdown capability, environment
 dump, or terminal transcript enters this trace. An external CLI's internal reason remains unknown
 when it has not registered. Create-worktree requests additionally preserve their original textarea
@@ -393,15 +401,19 @@ browser selects the started terminal by identity. Comparing registry snapshots t
 after a start cannot distinguish it from a terminal a background launch created in the same window.
 
 `TerminalLaunch.StartPromptedAgent` is the shared prompted-launch boundary. `SessionBridge`
-reserves its startup prompt before the terminal starts, targets the fresh durable session ID, and
-delivers it before already-queued canvas interactions. The startup transport's HTTP success
+reserves an undeliverable launch-local startup prompt before the terminal starts, then binds only
+that reservation to the returned terminal ID. It learns Copilot's actual session ID from exactly
+one live bridge with that terminal ID in the same canonical worktree; absent or ambiguous matches
+wait rather than choosing the latest session. Binding explicitly retries delivery, so registration
+before or after the launcher returns works. Ordinary delivery waits while startup binding is
+pending, then the startup instruction precedes queued interactions. The startup transport's HTTP success
 acknowledges SDK message acceptance; ordinary canvas and agent-prompt queueing retain their existing
 semantics. Active startup reservations are not subject to the ordinary queue's ten-message cap or
 five-minute TTL; their launch deadline and cleanup own their lifetime. Ordinary prompts still keep
 only the ten newest entries, and draining waits for startup acceptance before delivering them.
 Failed startup never reroutes its instructions to another session.
 
-`CodingToolCli` builds only the identity-bearing shell command for these launches.
+`CodingToolCli` builds fresh or Resume shell commands without startup instructions.
 `TerminalHostClient` separately validates the raw command and mirrors the host's 16,384-byte
 attachment-message cap against the complete transmitted input frame. Startup instructions use the
 bridge's bounded JSON HTTP transport instead of terminal input.

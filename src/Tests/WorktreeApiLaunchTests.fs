@@ -80,6 +80,10 @@ let private createApiWithStateUsing
     =
     let agent = SchedulerState.createAgent ()
     let repoId = PathUtils.toRepoId root
+    let terminalConfig =
+        { TerminalHostClient.defaultConfig [] with
+            HostStateDirectory = Path.Combine(root, "terminal-host-state")
+            LaunchHost = fun _ -> Error "Unexpected TerminalHost launch" }
 
     agent.Post(
         UpdateWorktreeList(
@@ -99,10 +103,9 @@ let private createApiWithStateUsing
             terminalLaunch
             { Agent = agent
               CardLog = CardEventLog.createAgent ()
-              // These backends are deliberately unavailable: every start in this fixture must cross
-              // the injected TerminalLaunch boundary or fail loudly by dereferencing the test sentinel.
+              // Starts must use the injected launch boundary; snapshot reads use isolated host state.
               SessionAgent = Unchecked.defaultof<SessionManager.SessionAgent>
-              EmbeddedTerminal = Unchecked.defaultof<EmbeddedTerminal.Manager>
+              EmbeddedTerminal = EmbeddedTerminal.createWithConfig terminalConfig
               TerminalSessionCleanup = WorktreeCleanup.noSessionClose
               ActivityStore = activityStore
               SnapshotStore = None
@@ -152,6 +155,147 @@ let private writePostForkMarkerScript repoRoot =
             Path.Combine(repoRoot, "post-fork.sh"),
             "#!/usr/bin/env bash\nprintf 'ready' > \"$1/post-fork-ready.txt\"\n"
         )
+
+[<TestFixture>]
+[<Category("Integration")>]
+[<Category("Fast")>]
+[<NonParallelizable>]
+type CanvasOwnerLaunchTests() =
+
+    let withCanvasDocument action =
+        withTempCwd (fun () ->
+            let root = Environment.CurrentDirectory
+            let path = PathUtils.toWorktreePath root
+            let filename = "report.html"
+            let directory = Path.Combine(root, ".agents", "canvas")
+            Directory.CreateDirectory directory |> ignore
+            File.WriteAllText(Path.Combine(directory, filename), "<h1>Report</h1>")
+
+            try
+                action root path filename
+            finally
+                assertOk
+                    (CanvasDocOwnership.removeWorktree root |> runAsync |> Result.mapError string)
+                    "remove fixture document ownership")
+
+    [<Test>]
+    member _.``Canvas Start resumes the document owner instead of the newer worktree session``() =
+        withCanvasDocument (fun root path filename ->
+            let owner = SessionId "11111111-1111-4111-8111-111111111111"
+            let newer = SessionId "22222222-2222-4222-8222-222222222222"
+            let now = DateTimeOffset.UtcNow
+            use store = new SessionActivityStore.SessionActivityStore(Path.Combine(root, "activity.db"))
+            store.UpsertInstance(
+                liveSession
+                    (now.AddMinutes -5.0)
+                    path
+                    (terminalId "11111111111111111111111111111111")
+                    (SessionId.value owner))
+            |> ignore
+            store.UpsertInstance(
+                liveSession
+                    now
+                    path
+                    (terminalId "22222222222222222222222222222222")
+                    (SessionId.value newer))
+            |> ignore
+            assertOk
+                (CanvasDocOwnership.assign root filename owner |> runAsync |> Result.mapError string)
+                "assign document owner"
+
+            let calls = ConcurrentQueue<string>()
+            let launchedId = "33333333333333333333333333333333"
+            let terminalLaunch =
+                { promptedLaunchOnly (fun _ _ _ -> async.Return(Error PromptedLaunchError.Unexpected)) with
+                    StartEmbeddedCommand =
+                        fun requestedPath command ->
+                            calls.Enqueue command
+                            async.Return(Ok(startResult requestedPath launchedId)) }
+            let api = createApi root path (Some store) terminalLaunch
+            let result =
+                api.launchAction
+                    { Path = path
+                      Action = CanvasSession(filename, "Do not start a replacement conversation") }
+                |> runAsync
+            let expectedCommand =
+                (build None (Resume(Some(SessionId.value owner)))).AsShellString
+
+            assertStart (terminalId launchedId) result
+            Assert.Multiple(fun () ->
+                Assert.That(calls.ToArray(), Is.EqualTo [| expectedCommand |])
+                Assert.That(CanvasDocOwnership.getOwner root filename |> runAsync, Is.EqualTo(Some owner))
+                Assert.That(store.LatestSessionIdForWorktree path, Is.EqualTo(Some newer)))
+            assertTerminalCommandAccepted expectedCommand)
+
+    [<Test>]
+    member _.``Canvas owner resume failure preserves ownership without starting a replacement``() =
+        withCanvasDocument (fun root path filename ->
+            let owner = SessionId "44444444-4444-4444-8444-444444444444"
+            assertOk
+                (CanvasDocOwnership.assign root filename owner |> runAsync |> Result.mapError string)
+                "assign document owner"
+            let calls = ConcurrentQueue<LaunchCall>()
+            let terminalLaunch =
+                { promptedLaunchOnly (fun provider requestedPath prompt ->
+                    calls.Enqueue(LaunchCall.StartPromptedAgent(provider, requestedPath, prompt))
+                    async.Return(Error PromptedLaunchError.Unexpected)) with
+                    StartEmbeddedCommand =
+                        fun requestedPath command ->
+                            calls.Enqueue(LaunchCall.StartEmbeddedCommand(requestedPath, command))
+                            async.Return(Error "Owner resume failed") }
+            let api = createApi root path None terminalLaunch
+            let result =
+                api.launchAction
+                    { Path = path; Action = CanvasSession(filename, "Replacement prompt") }
+                |> runAsync
+            let expected: Result<EmbeddedTerminalStartResult, PromptedLaunchError> =
+                Error PromptedLaunchError.TerminalStartFailed
+            let expectedCommand =
+                (build None (Resume(Some(SessionId.value owner)))).AsShellString
+
+            Assert.Multiple(fun () ->
+                Assert.That(result, Is.EqualTo expected)
+                Assert.That(
+                    calls.ToArray(),
+                    Is.EqualTo [| LaunchCall.StartEmbeddedCommand(path, expectedCommand) |])
+                Assert.That(CanvasDocOwnership.getOwner root filename |> runAsync, Is.EqualTo(Some owner))))
+
+    [<TestCase("../escape.html", "Filename does not match the canvas filename contract")>]
+    [<TestCase(
+        "bad\"\r\n\u001b[31m.html",
+        "Filename does not match the canvas filename contract",
+        TestName = "Canvas Start logs a control-character filename rejection without launching")>]
+    [<TestCase("missing.html", "Canvas document file does not exist")>]
+    [<TestCase("diff.html", "SystemView documents do not support explicit session start")>]
+    [<TestCase("beads.html", "SystemView documents do not support explicit session start")>]
+    member _.``Canvas Start logs its rejection reason without launching``(filename: string, reason: string) =
+        withCanvasDocument (fun root path _ ->
+            let directory = Path.Combine(root, ".agents", "canvas")
+            [ "diff.html"; "beads.html" ]
+            |> List.iter (fun name -> File.WriteAllText(Path.Combine(directory, name), "<h1>System view</h1>"))
+            let calls = ConcurrentQueue<LaunchCall>()
+            let terminalLaunch =
+                { promptedLaunchOnly (fun provider requestedPath prompt ->
+                    calls.Enqueue(LaunchCall.StartPromptedAgent(provider, requestedPath, prompt))
+                    async.Return(Error PromptedLaunchError.Unexpected)) with
+                    StartEmbeddedCommand =
+                        fun requestedPath command ->
+                            calls.Enqueue(LaunchCall.StartEmbeddedCommand(requestedPath, command))
+                            async.Return(Error "Unexpected resume") }
+            let api = createApi root path None terminalLaunch
+            let result =
+                api.launchAction
+                    { Path = path; Action = CanvasSession(filename, "Replacement prompt") }
+                |> runAsync
+            let expected: Result<EmbeddedTerminalStartResult, PromptedLaunchError> =
+                Error PromptedLaunchError.CanvasDocUnavailable
+            let expectedLog =
+                $"Canvas Start rejected for worktree={Newtonsoft.Json.JsonConvert.SerializeObject(WorktreePath.value path)} filename={Newtonsoft.Json.JsonConvert.SerializeObject filename}: {Newtonsoft.Json.JsonConvert.SerializeObject reason}"
+
+            Assert.Multiple(fun () ->
+                Assert.That(result, Is.EqualTo expected)
+                Assert.That(File.ReadAllText(Log.currentPath()), Does.Contain(expectedLog + Environment.NewLine))
+                Assert.That(calls, Is.Empty)))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -304,10 +448,14 @@ type WorktreeApiLaunchTests() =
 
             let launchPrompt = "Read the copied prompt and implement it"
             let action = FixBuild "https://example.test/build/42"
+            let canvasFilename = "review.html"
+            let canvasDirectory = Path.Combine(root, ".agents", "canvas")
+            Directory.CreateDirectory canvasDirectory |> ignore
+            File.WriteAllText(Path.Combine(canvasDirectory, canvasFilename), "<h1>Review</h1>")
             let canvasPrompt =
                 CanvasSessionPrompt.forAgentDoc
                     (WorktreePath.value path)
-                    "review.html"
+                    canvasFilename
             let agentCommand =
                 (build (Some CodingToolProvider.CopilotCli) Start).AsShellString
             let actionPrompt =
@@ -416,7 +564,7 @@ type WorktreeApiLaunchTests() =
             let canvasLaunched =
                 api.launchAction
                     { Path = path
-                      Action = CanvasSession canvasPrompt }
+                      Action = CanvasSession(canvasFilename, canvasPrompt) }
                 |> runAsync
             let resumed = api.resumeSession path |> runAsync
 
