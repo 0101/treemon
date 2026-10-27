@@ -131,9 +131,7 @@ type CardViewProps =
       BranchEvents: Map<string, CardEvent list>
       ActionCooldowns: Set<WorktreePath>
       AutoSyncPending: Set<WorktreePath>
-      /// Currently unread by the card views; kept as part of the model read-slice — it
-      /// formalizes the previously dead `canvasPaneOpen` arg that was threaded through renderCard.
-      CanvasPaneOpen: bool }
+      ActiveCanvasDoc: (string * string) option }
 
 /// The dispatch-derived actions the card views raise back to the host, mirroring
 /// CanvasPaneCallbacks. Every field is a plain `… -> unit` function — no Msg dependency — so the
@@ -159,6 +157,7 @@ type CardCallbacks =
       ArchiveWorktree: string -> unit
       ToggleAutoSync: WorktreeStatus -> unit
       LaunchAction: WorktreePath -> ActionKind -> unit
+      OpenCanvasDoc: string -> string -> unit
       OpenDiff: string -> unit
       DispatchArchive: ArchiveViews.Msg -> unit }
 
@@ -740,7 +739,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                     yield! trailingWorkMetrics wt.WorkMetrics
                 ]
             ]
-            CanvasDocStrip.view props.Now props.LastViewedHashes wt
+            CanvasDocStrip.view props.Now props.LastViewedHashes props.ActiveCanvasDoc callbacks.OpenCanvasDoc wt
         ]
     ]
 
@@ -797,7 +796,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                 ]
             ]
 
-            CanvasDocStrip.view props.Now props.LastViewedHashes wt
+            CanvasDocStrip.view props.Now props.LastViewedHashes props.ActiveCanvasDoc callbacks.OpenCanvasDoc wt
 
             Html.div [
                 prop.className footerClass

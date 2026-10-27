@@ -8,6 +8,33 @@ open CanvasDocStrip
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type CanvasTabPresentationTests() =
+    [<TestCase(false, false, false, "canvas-tab")>]
+    [<TestCase(false, true, false, "canvas-tab canvas-tab-viewed")>]
+    [<TestCase(true, true, false, "canvas-tab active")>]
+    [<TestCase(true, false, false, "canvas-tab active")>]
+    [<TestCase(false, true, true, "canvas-tab canvas-tab-viewed canvas-terminal-linked")>]
+    [<TestCase(true, true, true, "canvas-tab active canvas-terminal-linked")>]
+    member _.``Active tabs stay undimmed while terminal linkage remains independent``
+        (active: bool, viewed: bool, linked: bool, expected: string) =
+        let state: CanvasTab.State =
+            { IsActive = active; IsViewed = viewed; IsTerminalLinked = linked }
+        Assert.That(CanvasTab.className [ "canvas-tab" ] state, Is.EqualTo(expected))
+
+    [<TestCase("Report-1_2.v3.html", "Report-1_2.v3")>]
+    [<TestCase("review.html.details.html", "review.html.details")>]
+    member _.``Tab labels remove only the final HTML suffix``(filename: string, expected: string) =
+        let document =
+            { Filename = filename
+              ContentHash = ""
+              LastModified = DateTimeOffset.UnixEpoch
+              OwnerSessionId = None
+              Kind = AgentDoc }
+        Assert.That(CanvasTab.labelText document, Is.EqualTo(expected))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type CanvasDocStripTests() =
     let timestamp = DateTimeOffset(2026, 10, 26, 16, 36, 0, TimeSpan.Zero)
     let doc name kind modified owner =

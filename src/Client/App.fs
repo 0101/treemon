@@ -2251,7 +2251,7 @@ let view model dispatch =
           BranchEvents = model.BranchEvents
           ActionCooldowns = model.ActionCooldowns
           AutoSyncPending = model.AutoSyncPending
-          CanvasPaneOpen = canvasPaneOpen }
+          ActiveCanvasDoc = if canvasPaneOpen then CanvasUpdate.activeVisibleDoc model else None }
 
     let cardCallbacks: CardCallbacks =
         { FocusCard = fun key -> dispatch (SetFocus (Some (Card key)))
@@ -2266,6 +2266,7 @@ let view model dispatch =
           ArchiveWorktree = fun key -> dispatch (ConfirmArchiveWorktree key)
           ToggleAutoSync = fun wt -> dispatch (ToggleAutoSync wt.Path)
           LaunchAction = fun path action -> dispatch (LaunchAction (path, action))
+          OpenCanvasDoc = fun key filename -> dispatch (OpenCanvasDoc (key, filename))
           OpenDiff = OpenWorktreeDiff >> dispatch
           DispatchArchive = ArchiveMsg >> dispatch }
 

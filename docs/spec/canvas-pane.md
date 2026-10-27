@@ -119,8 +119,10 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 - Selecting a tab marks that doc viewed. When its effective session matches a terminal in the
   targeted worktree, selection also selects that terminal without opening, revealing, or focusing
   the Terminal pane.
-- Viewed but inactive tabs render at 0.5 opacity, preserving the original whole-tab treatment. The
-  active tab stays full opacity.
+- Viewed but inactive tabs render at 0.5 opacity. The active tab stays full opacity. Pane tabs and
+  worktree-card tabs share state-class resolution, filename labels, compact ages, selection-button
+  behavior, and the same CSS; copy overlays, liveness, terminal links, and standalone-browser
+  double-click controls remain pane-specific.
 - The archive button moves the active doc to `.agents/canvas/archive/`. It is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-regenerated, not user-owned, so it has no archive button.
 - The share button publishes the active doc to an unguessable, auto-expiring authenticated-viewer URL and copies a rich titled link to the clipboard. Like archive, it is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-generated, not shareable, so it has no share button. Clipboard success uses the dismissible `ClipboardNotice` channel (green), independent of the send `Waiting` and delivery-`Failed` banners: a successful publish shows `Shared — link copied` (or `Shared — link ready, copy it manually: <url>` when the async clipboard write is rejected), while a *failed* publish reuses the existing red `CanvasSendState.Failed` error banner. Success and failure are mutually exclusive — each result arm clears the other channel — so a red + green stack never renders. Share cannot start while a path copy is pending, and path copy cannot start until Share has completed its publish and clipboard phases. See `docs/spec/canvas-sharing.md` for the full publish/viewer/clipboard flow.
 
@@ -153,8 +155,16 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
   `canvas-tab-viewed` 0.5-opacity styling. Eligibility comes from the same worktree/filename
   `LastViewedHashes` and content-hash comparison as the pane and unread badge, so a timestamp-only
   change does not restore unread highlighting, but a content change does. Full names and hidden
-  documents are available in tooltips. These informational previews do not select a document or
-  mark it read, and focusing the card while the pane is closed does not clear the highlight.
+  documents are available in tooltips. Activating a card tab opens the pane on that exact document,
+  using the same reveal/read transition as other explicit canvas selections. Native Enter/Space
+  activation does not bubble into dashboard terminal shortcuts. Merely rendering a preview or
+  focusing the card while the pane is closed does not mark a document read.
+  The document actually visible in the open pane is active in its matching worktree card, even
+  when the pane targets a different worktree than dashboard focus. An active tab stays undimmed
+  after it is viewed. If it is outside the visible newest-first prefix, `+X` carries the active
+  colors and names it in the tooltip; the strip never pins or reorders older active documents.
+  Closing or hiding the pane removes the card active treatment rather than exposing sticky
+  last-open selections as currently visible documents.
   Canvas published/updated notifications stay out of the console; normal activity, user/assistant
   messages, and other events remain.
 - **Freshness gate (restart-phantom suppression).** The idle auto-display target requires a real
@@ -402,6 +412,11 @@ the diff. Each is promoted to its nearest block, deduplicated, and given the `ca
 - Canvas awareness and document ordering/fitting stay pure. Clock values come from the model;
   strip width measurements use a component-local ResizeObserver, update only local layout state,
   and disconnect on unmount.
+- `CanvasTab` owns shared tab attributes, active/read/terminal-linked class policy, filename labels,
+  and compact age markup. Both hosts compose their own layout and controls around it; card clicks
+  dispatch the existing `OpenCanvasDoc` action rather than implementing a second navigation flow.
+  Overflow measurements include the selected `+X` treatment when its hidden group contains the
+  open document.
 - The Elmish `update` reads no wall-clock; time enters only via message payloads (e.g. a `Tick` carrying `now`), keeping `update` a pure function of `(model, msg)`.
 
 ## Key Files
@@ -424,6 +439,7 @@ the diff. Each is promoted to its nearest block, deduplicated, and given the `ca
 | `src/Client/Navigation.fs` | `CanvasSendState` DU |
 | `src/Client/CanvasAwareness.fs` | AgentDoc eligibility, viewed hashes, unread detection, content-hash changes, and fresh idle auto-display |
 | `src/Client/CanvasDocStrip.fs` | Authored-document card strip with newest-first ordering, title/age previews, and local responsive fitting |
+| `src/Client/CanvasTab.fs` | Shared canvas tab presentation and native selection-button behavior for pane and card hosts |
 | `src/Client/index.html` | Canvas layout, badge, tab, banner, liveness, and overview styling |
 | `src/Server/RefreshScheduler.fs` | Canvas scanning, content hashing, watcher lifecycle, scheduler state updates |
 | `src/Server/WorktreeApi.fs` | Canvas config persistence, archive endpoint, send routing, bridge-liveness API wiring |

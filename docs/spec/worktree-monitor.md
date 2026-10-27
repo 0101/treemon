@@ -150,8 +150,10 @@ launches and deploy/restart require an external PowerShell window; see `docs/spe
   fits one line, truncating only titles, followed by `+X` hidden docs and a canvas glyph.
   SystemViews do not count, and an empty authored inventory hides the strip. Compact cards place
   it below their details. Unviewed or content-changed docs remain at full contrast; viewed previews
-  use the canvas pane's dimmed tab styling and shared content-hash read state. Previews are
-  informational; existing Canvas controls open documents.
+  use the canvas pane's dimmed tab styling and shared content-hash read state. Activating a tab
+  opens the pane on that exact document. The currently visible document uses the pane's active
+  treatment without dimming; if it is hidden among older docs, `+X` carries that highlight instead,
+  preserving newest-first order. Closing the pane clears the card's active treatment.
 - Always-visible robot-head Agent action starts a fresh embedded terminal for the worktree, submits exactly `copilot --yolo`, and selects the returned terminal in the terminal pane
 - Green left border on cards with active terminal sessions
 - Contextual action buttons: fix PR comments, fix failed builds, and create PRs
@@ -435,6 +437,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, TerminalHost update overlay, subscriptions, and top-level view wiring |
 | `src/Client/CardViews.fs` | Worktree card rendering, including the persistent circular two-arrow auto-sync toggle, action buttons, badges, and event-log helpers |
 | `src/Client/CanvasDocStrip.fs` | Authored-document inventory, newest-first ordering, width fitting, and the card's canvas strip |
+| `src/Client/CanvasTab.fs` | Shared canvas tab state classes, selection/keyboard behavior, filename labels, and compact age rendering |
 | `src/Client/OverviewViews.fs` | Status-overview row + scheduler footer rendering |
 | `src/Client/MascotState.fs` / `MascotView.fs` | Mascot eyes: gaze slice + eye SVG render (observes `ActivityLevel`) |
 | `src/Client/ActivityState.fs` / `ActivityUpdate.fs` | User-activity / idle-detection: state slice + `Tick`/`UserActivity` bodies + activity subscription |

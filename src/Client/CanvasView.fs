@@ -116,7 +116,8 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           LaunchSession = launchCanvasSession }
 
     let canvasState: CanvasPane.CanvasPaneState =
-        { IsOpen = CanvasUpdate.isPaneVisible model
+        { Now = model.Now
+          IsOpen = CanvasUpdate.isPaneVisible model
           WorkspaceMode = model.Workspace.Mode
           SendState = model.Canvas.CanvasSendState
           DocError = model.Canvas.DocError
