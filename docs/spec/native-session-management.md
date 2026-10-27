@@ -11,7 +11,8 @@
 
 ### Card actions
 
-The card's `>` action and Enter key are the only ways to open or focus a tracked native terminal.
+Clicking the card's `>` action is the only way to open or focus a tracked native terminal.
+The focused-card Enter and `t` keys open or focus the embedded terminal instead.
 With no tracked window, Treemon starts:
 
 `wt.exe --window new -- pwsh -NoExit -EncodedCommand <base64>`
