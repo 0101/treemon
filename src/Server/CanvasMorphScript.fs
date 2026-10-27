@@ -4,9 +4,7 @@ let source = EmbeddedResource.readText "CanvasMorph.js"
 
 let script = "<script>" + source + "</script>"
 
-/// Marks the blocks a morph just changed. Yellow is Treemon's existing "this changed" colour —
-/// worktree-card canvas notifications and the diff viewer's changed rows already use it — so the
-/// card badge and the in-doc tint say the same thing.
+/// Marks the blocks a morph just changed using the diff viewer's yellow change colour.
 ///
 /// The entry flash is derived from the resting tint rather than fixed: against a .22 rest a
 /// hardcoded .3 flash is a 1.28:1 step and reads as no animation at all, while doubling holds a

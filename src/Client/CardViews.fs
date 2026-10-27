@@ -6,7 +6,6 @@ open Navigation
 open Feliz
 open Components
 open ActionButtons
-open CanvasAwareness
 open CanvasState
 
 let ctClassName =
@@ -122,19 +121,15 @@ let beadsProgressBar (b: BeadsSummary) =
         ]
     ]
 
-/// The model read-slice the card views render over. Bundles the eight values that were
-/// previously threaded as loose positional args through repoSection/renderCard/worktreeCard
-/// (repoSection alone took nine), so a silent argument transposition can no longer compile.
-/// References only Shared/Navigation/CanvasAwareness types — no Model/Msg dependency — so this
-/// record can later move ahead of AppTypes alongside the card views.
+/// The model read-slice the card views render over, without a Model/Msg dependency.
 type CardViewProps =
-    { EditorName: string
+    { Now: System.DateTimeOffset
+      EditorName: string
       IsCompact: bool
       FocusedElement: FocusTarget option
       BranchEvents: Map<string, CardEvent list>
       ActionCooldowns: Set<WorktreePath>
       AutoSyncPending: Set<WorktreePath>
-      CanvasEvents: Map<string, CanvasEvent list>
       /// Currently unread by the card views; kept as part of the model read-slice — it
       /// formalizes the previously dead `canvasPaneOpen` arg that was threaded through renderCard.
       CanvasPaneOpen: bool }
@@ -163,7 +158,6 @@ type CardCallbacks =
       ArchiveWorktree: string -> unit
       ToggleAutoSync: WorktreeStatus -> unit
       LaunchAction: WorktreePath -> ActionKind -> unit
-      OpenCanvasDoc: string -> string -> unit
       OpenDiff: string -> unit
       DispatchArchive: ArchiveViews.Msg -> unit }
 
@@ -284,29 +278,6 @@ let eventLog (events: CardEvent list) =
         Html.div [
             prop.className "event-log"
             prop.children (evts |> List.sortBy _.Timestamp |> List.map eventLogEntry)
-        ]
-
-let canvasEventEntry (callbacks: CardCallbacks) (scopedKey: string) (evt: CanvasEvent) =
-    let verb = match evt.Kind with NewDoc -> "published" | UpdatedDoc -> "updated"
-    Html.div [
-        prop.className "event-entry canvas-event"
-        prop.onClick (fun e ->
-            e.stopPropagation()
-            callbacks.OpenCanvasDoc scopedKey evt.Filename)
-        prop.children [
-            Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
-            Html.span [ prop.className "event-message"; prop.text $"{verb} " ]
-            Html.span [ prop.className "event-source"; prop.text evt.Filename ]
-        ]
-    ]
-
-let canvasEventLog (callbacks: CardCallbacks) (scopedKey: string) (events: CanvasEvent list) =
-    match events with
-    | [] -> Html.none
-    | evts ->
-        Html.div [
-            prop.className "event-log"
-            prop.children (evts |> List.sortBy _.Timestamp |> List.map (canvasEventEntry callbacks scopedKey))
         ]
 
 let abbreviatePipelineName (repoName: string) (name: string) =
@@ -696,19 +667,6 @@ let activityLineView (wt: WorktreeStatus) =
             ]
         ]
 
-let private canvasMessageGlyph =
-    Svg.svg [
-        svg.className "canvas-message-glyph"
-        svg.viewBox (0, 0, 297, 297)
-        svg.fill "currentColor"
-        svg.children [
-            Svg.title "Canvas"
-            Svg.path [
-                svg.d "M247.5,188H241V43h6.5c5.523,0,10-4.478,10-10s-4.477-10-10-10h-89V10c0-5.523-4.477-10-10-10s-10,4.477-10,10v13h-89c-5.522,0-10,4.478-10,10s4.478,10,10,10H56v145h-6.5c-5.522,0-10,4.477-10,10s4.478,10,10,10h53.829l-30.114,75.283c-2.051,5.128,0.443,10.947,5.571,12.999c1.218,0.487,2.475,0.718,3.711,0.718c3.969,0,7.724-2.379,9.288-6.289l33.001-82.5c0.027-0.07,0.046-0.141,0.072-0.211H138.5v78.997c0,5.522,4.477,10,10,10s10-4.478,10-10V208h13.642c0.026,0.07,0.045,0.141,0.072,0.211l33.001,82.5c1.564,3.91,5.319,6.289,9.288,6.289c1.236,0,2.493-0.231,3.711-0.718c5.128-2.052,7.622-7.871,5.571-12.999L193.671,208H247.5c5.523,0,10-4.477,10-10S253.023,188,247.5,188z M76,43h145v145H76V43z"
-            ]
-        ]
-    ]
-
 let private messageLineView
     (className: string)
     (source: string option)
@@ -724,7 +682,7 @@ let private messageLineView
             | Some value -> Html.span [ prop.className "event-source"; prop.text value ]
             | None -> ()
             match glyph with
-            | Some MessageGlyph.Canvas -> canvasMessageGlyph
+            | Some MessageGlyph.Canvas -> canvasIcon "canvas-message-glyph"
             | None -> ()
             Html.span [ prop.text text ]
         ]
@@ -781,10 +739,11 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                     yield! trailingWorkMetrics wt.WorkMetrics
                 ]
             ]
+            CanvasDocStrip.view props.Now wt.CanvasDocs
         ]
     ]
 
-let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
     let hasFooterLines =
@@ -792,7 +751,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
         || wt.LastUserMessage.IsSome
         || wt.LastAssistantMessage.IsSome
     let visibleBranchEvents = branchEvents |> List.filter isVisibleCardEvent
-    let hasContent = hasFooterLines || (not (List.isEmpty visibleBranchEvents)) || (not (List.isEmpty canvasEvents))
+    let hasContent = hasFooterLines || (not (List.isEmpty visibleBranchEvents))
     let footerClass = if hasContent then "card-footer has-content" else "card-footer"
     Html.div [
         prop.key (WorktreePath.value wt.Path)
@@ -837,6 +796,8 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                 ]
             ]
 
+            CanvasDocStrip.view props.Now wt.CanvasDocs
+
             Html.div [
                 prop.className footerClass
                 prop.children [
@@ -845,7 +806,6 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                     assistantMsgLineView wt
 
                     eventLog visibleBranchEvents
-                    canvasEventLog callbacks scopedKey canvasEvents
                 ]
             ]
         ]
@@ -854,10 +814,9 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
 let renderCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (wt: WorktreeStatus) =
     let scopedKey = WorktreePath.value wt.Path
     let events = props.BranchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
-    let cvEvents = props.CanvasEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let isFocused = props.FocusedElement = Some (Card scopedKey)
     if props.IsCompact then compactWorktreeCard props callbacks repoName baseBranch scopedKey isFocused wt
-    else worktreeCard props callbacks repoName baseBranch events cvEvents scopedKey isFocused wt
+    else worktreeCard props callbacks repoName baseBranch events scopedKey isFocused wt
 
 let skeletonCard () =
     Html.div [

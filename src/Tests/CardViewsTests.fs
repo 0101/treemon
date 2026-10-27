@@ -168,7 +168,7 @@ type CardFooterRenderingTests() =
     inherit ServerFixture.SharedPageTest()
 
     [<Test>]
-    member this.``Canvas event activity and messages render together in the card footer``() =
+    member this.``Canvas strip preserves activity and messages without console notifications``() =
         task {
             let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
             let branch = "feature-active"
@@ -199,7 +199,7 @@ type CardFooterRenderingTests() =
             do! activityLine.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! userLine.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! assistantLine.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            do! canvasEvent.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! targetCard.Locator(".canvas-card-strip").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! activityLineCount = activityLine.CountAsync()
             let! activityTextCount = activityLine.Locator(":scope > .activity-text").CountAsync()
@@ -212,7 +212,7 @@ type CardFooterRenderingTests() =
             let! canvasEventCount = canvasEvent.CountAsync()
 
             Assert.Multiple(fun () ->
-                Assert.That(activityLineCount, Is.EqualTo(1), "Activity line should remain visible beside a canvas event")
+                Assert.That(activityLineCount, Is.EqualTo(1), "Activity line should remain visible beside the canvas strip")
                 Assert.That(activityTextCount, Is.EqualTo(1), "Activity line should contain one activity-text span")
                 Assert.That(userSpanCount, Is.EqualTo(2), "User line should keep time and message spans")
                 Assert.That(userGlyphCount, Is.EqualTo(1), "Canvas user line should contain the easel glyph")
@@ -220,7 +220,7 @@ type CardFooterRenderingTests() =
                 Assert.That(assistantSpanCount, Is.EqualTo(3), "Assistant line should keep its three-span DOM structure")
                 Assert.That(eventTimeCount, Is.EqualTo(1), "Assistant line should contain one event-time span")
                 Assert.That(eventSourceCount, Is.EqualTo(1), "Assistant line should contain one event-source span")
-                Assert.That(canvasEventCount, Is.EqualTo(1), "Canvas event should be a sibling entry in the same footer"))
+                Assert.That(canvasEventCount, Is.Zero, "Canvas changes must not append console notification entries"))
         }
 
 /// Running post-fork setup stays visible so users can see why launch is waiting. Success is hidden,
@@ -359,6 +359,138 @@ let private cardByBranch (page: IPage) branch =
     page.Locator(
         ".wt-card",
         PageLocatorOptions(Has = page.Locator(".branch-name", PageLocatorOptions(HasText = branch))))
+
+let private withCanvasStripDocs docs (response: DashboardResponse) =
+    { response with
+        Repos =
+            response.Repos
+            |> List.map (fun repo ->
+                { repo with
+                    Worktrees =
+                        repo.Worktrees
+                        |> List.map (fun wt ->
+                            if wt.Branch = "feature-active" then { wt with CanvasDocs = docs }
+                            else wt) }) }
+
+[<TestFixture>]
+[<Category("E2E")>]
+type CanvasDocStripRenderingTests() =
+    inherit ServerFixture.SharedPageTest()
+
+    let timestamp = DateTimeOffset.UtcNow
+    let doc name minutes kind =
+        { Filename = name
+          ContentHash = name
+          LastModified = timestamp.AddMinutes(-minutes)
+          OwnerSessionId = None
+          Kind = kind }
+    let documents =
+        [ doc "build-notes.html" 1440.0 AgentDoc
+          doc "some-canvas-doc.html" 3.0 AgentDoc
+          doc "future-view.html" 0.0 SystemView
+          doc "session-routing-and-document-ownership-investigation.html" 240.0 AgentDoc
+          doc "another-canvas-doc.html" 120.0 AgentDoc
+          doc "test-results.html" 420.0 AgentDoc
+          doc "investigation.html" 2880.0 AgentDoc
+          doc "diff.html" 0.0 SystemView ]
+
+    member private this.Navigate() =
+        task {
+            do! this.Page.SetViewportSizeAsync(1600, 1000)
+            do! routeDashboard (withCanvasStripDocs documents) this.Page
+            let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
+            do! (cardByBranch this.Page "feature-active").Locator(".canvas-card-strip").WaitForAsync(
+                LocatorWaitForOptions(Timeout = 15000.0f))
+        }
+
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member this.``Full and compact strips fit newest titles and match the pane palette``(compact: bool) =
+        task {
+            do! this.Navigate()
+            if compact then
+                do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Compact", Exact = true)).ClickAsync()
+
+            let card = cardByBranch this.Page "feature-active"
+            let strip = card.Locator(".canvas-card-strip")
+            for width in [ 280; 420; 960; 420 ] do
+                let! _ = card.EvaluateAsync("(card, width) => { card.style.width = width + 'px'; }", width)
+                let! problems = card.EvaluateAsync<string>(
+                    """async card => {
+                        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                        const strip = card.querySelector('.canvas-card-strip');
+                        const docs = [...strip.querySelectorAll('.canvas-card-docs > .canvas-card-doc')];
+                        const more = strip.querySelector(':scope > .canvas-card-overflow');
+                        const problems = [];
+                        const bounds = strip.getBoundingClientRect();
+                        const cardBounds = card.getBoundingClientRect();
+                        if (Math.abs(bounds.left - cardBounds.left) > 1 || Math.abs(bounds.right - cardBounds.right) > 1)
+                            problems.push('strip is not edge-to-edge');
+                        if (strip.querySelectorAll('.canvas-card-measures .canvas-card-doc').length !== 6)
+                            problems.push('system views contributed to inventory');
+                        if (!docs.length || docs[0].dataset.filename !== 'some-canvas-doc.html')
+                            problems.push('newest document is missing');
+                        if ((more?.textContent || '') !== (docs.length < 6 ? '+' + (6 - docs.length) : ''))
+                            problems.push('incorrect hidden count');
+                        for (const chip of docs) {
+                            const title = chip.querySelector('.canvas-card-doc-title');
+                            const age = chip.querySelector('.canvas-card-doc-age');
+                            const rect = chip.getBoundingClientRect();
+                            if (title.nextElementSibling !== age || title.getBoundingClientRect().right > age.getBoundingClientRect().left + 1)
+                                problems.push('title and age overlap or are reversed');
+                            if (age.scrollWidth > age.clientWidth + 1 || rect.right > bounds.right + 1)
+                                problems.push('age or title clipped');
+                            if (Math.abs(rect.top - docs[0].getBoundingClientRect().top) > 1)
+                                problems.push('tabs wrapped');
+                        }
+                        if (!card.classList.contains('compact')) {
+                            if (!strip.previousElementSibling.matches('.card-body') || !strip.nextElementSibling.matches('.card-footer'))
+                                problems.push('strip is not directly above console');
+                        }
+                        if (getComputedStyle(strip).backgroundColor !== 'rgb(24, 24, 37)')
+                            problems.push('incorrect pane strip color');
+                        if (getComputedStyle(docs[0]).backgroundColor !== 'rgb(49, 50, 68)')
+                            problems.push('incorrect tab color');
+                        if (card.querySelector('.canvas-event')) problems.push('canvas console notification remains');
+                        return problems.join('; ');
+                    }""")
+                Assert.That(problems, Is.Empty, $"Strip layout at {width}px")
+                if width = 960 then
+                    let! visible = strip.Locator(".canvas-card-docs > .canvas-card-doc").CountAsync()
+                    Assert.That(visible, Is.EqualTo(6), "All documents should fit in the wide card")
+                    let! truncated = strip.Locator(".canvas-card-doc-title").EvaluateAllAsync<bool>(
+                        "titles => titles.some(title => title.scrollWidth > title.clientWidth)")
+                    Assert.That(truncated, Is.True, "Long titles should ellipsize without hiding the age")
+        }
+
+    [<Test>]
+    member this.``Document updates reorder the strip and empty inventory unmounts and restores it``() =
+        task {
+            do! this.Navigate()
+            let card = cardByBranch this.Page "feature-active"
+            let changed =
+                documents
+                |> List.map (fun document ->
+                    if document.Filename = "build-notes.html" then
+                        { document with LastModified = DateTimeOffset.UtcNow; ContentHash = "changed" }
+                    else document)
+            do! this.Page.UnrouteAsync("**/IWorktreeApi/getWorktrees")
+            do! routeDashboard (withCanvasStripDocs changed) this.Page
+            do! card.Locator(".canvas-card-docs > :first-child[data-filename='build-notes.html']").WaitForAsync(
+                LocatorWaitForOptions(Timeout = 10000.0f))
+
+            do! this.Page.UnrouteAsync("**/IWorktreeApi/getWorktrees")
+            do! routeDashboard (withCanvasStripDocs (documents |> List.filter (fun document -> document.Kind = SystemView))) this.Page
+            do! card.Locator(".canvas-card-strip").WaitForAsync(
+                LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 10000.0f))
+
+            do! this.Page.UnrouteAsync("**/IWorktreeApi/getWorktrees")
+            do! routeDashboard (withCanvasStripDocs documents) this.Page
+            do! card.Locator(".canvas-card-docs > :first-child[data-filename='some-canvas-doc.html']").WaitForAsync(
+                LocatorWaitForOptions(Timeout = 10000.0f))
+            let! notifications = card.Locator(".canvas-event").CountAsync()
+            Assert.That(notifications, Is.Zero)
+        }
 
 /// Focus a card and wait until it is actually marked focused.
 ///

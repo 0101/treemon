@@ -144,6 +144,12 @@ launches and deploy/restart require an external PowerShell window; see `docs/spe
 - PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
 - Event log (up to the last 2 events), diff/auto-sync/terminal/delete actions
+- Authored canvas documents appear in an edge-to-edge strip immediately above the console, using
+  the canvas pane's tab styling. Each preview shows its filename without `.html`, followed by its
+  compact modification age. Documents sort newest-first with filename ties; the newest prefix
+  fits one line, truncating only titles, followed by `+X` hidden docs and a canvas glyph.
+  SystemViews do not count, and an empty authored inventory hides the strip. Compact cards place
+  it below their details. Previews are informational; existing Canvas controls open documents.
 - Always-visible robot-head Agent action starts a fresh embedded terminal for the worktree, submits exactly `copilot --yolo`, and selects the returned terminal in the terminal pane
 - Green left border on cards with active terminal sessions
 - Contextual action buttons: fix PR comments, fix failed builds, and create PRs
@@ -223,8 +229,8 @@ so restart retains active delegated work until its terminal event or stale-gap c
   footer data. Built-in selection actions show their `request`, known actions get action-specific
   summaries, and unknown valid JSON is formatted structurally without changing string values.
   Activity titles use the same text projection before duplicate suppression, so a raw canvas title
-  cannot reappear beside its formatted user-message line. Canvas notifications render alongside all
-  footer lines rather than replacing them.
+  cannot reappear beside its formatted user-message line. Canvas publish/update notifications do
+  not enter this console; document discovery uses the separate strip above it.
 
 ### Create Worktree
 
@@ -426,6 +432,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
 | `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, TerminalHost update overlay, subscriptions, and top-level view wiring |
 | `src/Client/CardViews.fs` | Worktree card rendering, including the persistent circular two-arrow auto-sync toggle, action buttons, badges, and event-log helpers |
+| `src/Client/CanvasDocStrip.fs` | Authored-document inventory, newest-first ordering, width fitting, and the card's canvas strip |
 | `src/Client/OverviewViews.fs` | Status-overview row + scheduler footer rendering |
 | `src/Client/MascotState.fs` / `MascotView.fs` | Mascot eyes: gaze slice + eye SVG render (observes `ActivityLevel`) |
 | `src/Client/ActivityState.fs` / `ActivityUpdate.fs` | User-activity / idle-detection: state slice + `Tick`/`UserActivity` bodies + activity subscription |

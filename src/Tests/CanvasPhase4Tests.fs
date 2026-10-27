@@ -23,7 +23,7 @@ let private clickTabsInOrder (tabs: ILocator) count =
     loop 0
 
 /// E2E tests for Phase 4 canvas awareness visual elements:
-/// badge, liveness dot, start session button, waiting banner, canvas events.
+/// badge, liveness dot, start session button, and waiting banner.
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("Canvas")>]
@@ -237,46 +237,4 @@ type CanvasPhase4Tests() =
             let dismissBtn = this.Page.Locator(".canvas-waiting-dismiss")
             let! dismissCount = dismissBtn.CountAsync()
             Assert.That(dismissCount, Is.EqualTo(1), "Waiting banner should have a dismiss button")
-        }
-
-    // ── Canvas Events in Card Footer ────────────────────────────────────
-
-    [<Test>]
-    member this.``Canvas events have correct CSS class and yellow color``() =
-        task {
-            // Canvas events only appear when canvas hash changes between polls.
-            // Since fixture data is static, we verify the CSS rule exists and is correct
-            // by injecting a canvas-event element and checking computed style.
-            let! color = this.Page.EvaluateAsync<string>(
-                "() => {
-                    const el = document.createElement('div');
-                    el.className = 'event-entry canvas-event';
-                    document.body.appendChild(el);
-                    const color = getComputedStyle(el).color;
-                    document.body.removeChild(el);
-                    return color;
-                }")
-
-            // #f9e2af in RGB is approximately rgb(249, 226, 175)
-            Assert.That(color, Is.EqualTo("rgb(249, 226, 175)"), "Canvas event text should be yellow (#f9e2af)")
-        }
-
-    [<Test>]
-    member this.``Canvas event source spans have yellow color``() =
-        task {
-            // Verify the .canvas-event .event-source CSS rule
-            let! color = this.Page.EvaluateAsync<string>(
-                "() => {
-                    const parent = document.createElement('div');
-                    parent.className = 'event-entry canvas-event';
-                    const source = document.createElement('span');
-                    source.className = 'event-source';
-                    parent.appendChild(source);
-                    document.body.appendChild(parent);
-                    const color = getComputedStyle(source).color;
-                    document.body.removeChild(parent);
-                    return color;
-                }")
-
-            Assert.That(color, Is.EqualTo("rgb(249, 226, 175)"), "Canvas event source should be yellow (#f9e2af)")
         }

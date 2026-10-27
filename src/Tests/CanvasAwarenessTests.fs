@@ -479,68 +479,27 @@ type UnviewedDocsByScopedKeyTests() =
         Assert.That(result |> Map.containsKey "repo2/dev", Is.True, "repo2/dev has no viewed hashes")
 
 
-// ── detectCanvasEvents ───────────────────────────────────────────────
-
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type DetectCanvasEventsTests() =
-
-    [<Test>]
-    member _.``Detects new doc as NewDoc``() =
-        let prev = Map.empty
-        let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
-
-        let result = detectCanvasEvents DateTimeOffset.UtcNow prev curr
-
-        Assert.That(result |> Map.containsKey "r/feat", Is.True)
-        let events = result["r/feat"]
-        Assert.That(events.Length, Is.EqualTo(1))
-        Assert.That(events[0].Filename, Is.EqualTo("report.html"))
-        Assert.That(events[0].Kind, Is.EqualTo(NewDoc))
-
-    [<Test>]
-    member _.``Detects updated contentHash as UpdatedDoc``() =
-        let prev = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
-        let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h2" ] ]
-
-        let result = detectCanvasEvents DateTimeOffset.UtcNow prev curr
-
-        let events = result["r/feat"]
-        Assert.That(events.Length, Is.EqualTo(1))
-        Assert.That(events[0].Filename, Is.EqualTo("report.html"))
-        Assert.That(events[0].Kind, Is.EqualTo(UpdatedDoc), "Updated doc should have Kind=UpdatedDoc")
-
-    [<Test>]
-    member _.``Returns empty map when no changes``() =
-        let hashes = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
-
-        let result = detectCanvasEvents DateTimeOffset.UtcNow hashes hashes
-
-        Assert.That(result, Is.Empty, "No changes should produce no events")
+type CanvasChangeDetectionTests() =
 
     [<Test>]
     member _.``Detects both new and updated docs in same worktree``() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "existing.html", "h1" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "existing.html", "h2"; "new.html", "h3" ] ]
 
-        let result = detectCanvasEvents DateTimeOffset.UtcNow prev curr
-
-        let events = result["r/feat"]
-        Assert.That(events.Length, Is.EqualTo(2))
-        let newDoc = events |> List.find (fun e -> e.Filename = "new.html")
-        let updatedDoc = events |> List.find (fun e -> e.Filename = "existing.html")
-        Assert.That(newDoc.Kind, Is.EqualTo(NewDoc))
-        Assert.That(updatedDoc.Kind, Is.EqualTo(UpdatedDoc))
+        let result = detectChangedCanvasDocs prev curr
+        Assert.That(result, Is.EqualTo([ "r/feat", "existing.html"; "r/feat", "new.html" ]))
 
     [<Test>]
     member _.``Ignores removed docs``() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "old.html", "h1"; "kept.html", "h2" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "kept.html", "h2" ] ]
 
-        let result = detectCanvasEvents DateTimeOffset.UtcNow prev curr
+        let result = detectChangedCanvasDocs prev curr
 
-        Assert.That(result, Is.Empty, "Removal of a doc without changes to remaining should produce no events")
+        Assert.That(result, Is.Empty, "Removal must not trigger auto-display")
 
     [<Test>]
     member _.``Handles multiple scoped keys independently``() =
@@ -549,79 +508,39 @@ type DetectCanvasEventsTests() =
             "r1/main", Map.ofList [ "a.html", "h1" ]
             "r2/dev", Map.ofList [ "b.html", "h2" ] ]
 
-        let result = detectCanvasEvents DateTimeOffset.UtcNow prev curr
-
-        Assert.That(result |> Map.containsKey "r1/main", Is.False, "r1/main unchanged")
-        Assert.That(result |> Map.containsKey "r2/dev", Is.True, "r2/dev is new")
-
-
-// ── Freshness gate (phantom "published" suppression on restart) ──────
+        let result = detectChangedCanvasDocs prev curr
+        Assert.That(result, Is.EqualTo([ "r2/dev", "b.html" ]))
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type CanvasEventFreshnessGateTests() =
-
-    let event filename kind : CanvasEvent =
-        { Filename = filename; Timestamp = DateTimeOffset.UtcNow; Kind = kind }
+type CanvasDocFreshnessTests() =
 
     [<Test>]
-    member _.``gate drops a phantom event whose doc mtime is stale``() =
-        let now = DateTimeOffset.UtcNow
-        let events = Map.ofList [ "r/feat", [ event "old.html" NewDoc ] ]
-        let modified = Map.ofList [ "r/feat", Map.ofList [ "old.html", now.AddHours(-3.0) ] ]
-
-        let result = gateCanvasEventsByFreshness now modified events
-
-        Assert.That(result, Is.Empty, "A pre-existing doc (stale mtime) must not surface as a canvas event")
-
-    [<Test>]
-    member _.``gate keeps a fresh event and restamps it with the real mtime``() =
-        let now = DateTimeOffset.UtcNow
-        let mtime = now.AddMinutes(-1.0)
-        let events = Map.ofList [ "r/feat", [ event "new.html" NewDoc ] ]
-        let modified = Map.ofList [ "r/feat", Map.ofList [ "new.html", mtime ] ]
-
-        let result = gateCanvasEventsByFreshness now modified events
-
-        let evts = result["r/feat"]
-        Assert.That(evts.Length, Is.EqualTo(1))
-        Assert.That(evts[0].Filename, Is.EqualTo("new.html"))
-        Assert.That(evts[0].Timestamp, Is.EqualTo(mtime), "Event is restamped with the file's real mtime")
-
-    [<Test>]
-    member _.``gate drops events for a doc missing from the modified map``() =
-        let now = DateTimeOffset.UtcNow
-        let events = Map.ofList [ "r/feat", [ event "ghost.html" UpdatedDoc ] ]
-
-        let result = gateCanvasEventsByFreshness now Map.empty events
-
-        Assert.That(result, Is.Empty)
-
-    [<Test>]
-    member _.``detect + gate suppresses a pre-existing doc reappearing after a restart``() =
-        // Baseline was momentarily empty (restart scan gap); the doc reappears as absent->present,
-        // which detectCanvasEvents alone reports as NewDoc — but its mtime is old, so the gate drops it.
+    member _.``A pre-existing doc reappearing after restart cannot auto-display``() =
         let now = DateTimeOffset.UtcNow
         let prev = Map.empty
         let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
         let modified = Map.ofList [ "r/feat", Map.ofList [ "report.html", now.AddDays(-2.0) ] ]
 
-        let result = detectCanvasEvents now prev curr |> gateCanvasEventsByFreshness now modified
+        let result =
+            detectChangedCanvasDocs prev curr
+            |> List.filter (fun (key, filename) -> isCanvasDocFresh now modified key filename)
 
-        Assert.That(result, Is.Empty, "A pre-existing doc reappearing after restart must not show as published")
+        Assert.That(result, Is.Empty)
 
     [<Test>]
-    member _.``detect + gate still reports a genuinely fresh new doc``() =
+    member _.``A genuinely fresh new doc remains eligible for auto-display``() =
         let now = DateTimeOffset.UtcNow
         let prev = Map.empty
         let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
         let modified = Map.ofList [ "r/feat", Map.ofList [ "report.html", now.AddSeconds(-2.0) ] ]
 
-        let result = detectCanvasEvents now prev curr |> gateCanvasEventsByFreshness now modified
+        let result =
+            detectChangedCanvasDocs prev curr
+            |> List.filter (fun (key, filename) -> isCanvasDocFresh now modified key filename)
 
-        let evts = result["r/feat"]
-        Assert.That(evts[0].Kind, Is.EqualTo(NewDoc), "A truly recent publish still surfaces")
+        Assert.That(result, Is.EqualTo([ "r/feat", "report.html" ]))
 
     [<Test>]
     member _.``isCanvasDocFresh is true within the window and false outside it or when missing``() =
@@ -651,7 +570,7 @@ type AutoDisplayIdleLogicTests() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "old.html", "h1" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "old.html", "h1"; "new.html", "h2" ] ]
 
-        let result = detectChangedCanvasDocs DateTimeOffset.UtcNow prev curr
+        let result = detectChangedCanvasDocs prev curr
 
         Assert.That(result, Does.Contain(("r/feat", "new.html")))
         Assert.That(result.Length, Is.EqualTo(1), "Only the new doc should be detected")
@@ -660,7 +579,7 @@ type AutoDisplayIdleLogicTests() =
     member _.``detectChangedCanvasDocs returns empty when no hashes changed``() =
         let hashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ]
 
-        let result = detectChangedCanvasDocs DateTimeOffset.UtcNow hashes hashes
+        let result = detectChangedCanvasDocs hashes hashes
 
         Assert.That(result, Is.Empty)
 
@@ -669,7 +588,7 @@ type AutoDisplayIdleLogicTests() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h2" ] ]
 
-        let result = detectChangedCanvasDocs DateTimeOffset.UtcNow prev curr
+        let result = detectChangedCanvasDocs prev curr
 
         Assert.That(result, Does.Contain(("r/feat", "a.html")), "Updated hash should be detected as changed")
 
@@ -699,7 +618,7 @@ type AutoDisplayIdleLogicTests() =
                 Canvas.PreviousCanvasHashes = Map.empty; Canvas.CanvasPaneOpen = false }
 
         let currentHashes = canvasHashesByScopedKey repos
-        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0 // 120s since epoch — well past 60s idle threshold
         let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
@@ -722,7 +641,7 @@ type AutoDisplayIdleLogicTests() =
                 Canvas.PreviousCanvasHashes = previousHashes; Canvas.CanvasPaneOpen = false }
 
         let currentHashes = canvasHashesByScopedKey repos
-        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
         let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
@@ -745,7 +664,7 @@ type AutoDisplayIdleLogicTests() =
                 Activity.LastActivityTime = jsNow - 10_000.0 // 10s ago, well within 60s threshold
                 Canvas.PreviousCanvasHashes = Map.empty }
 
-        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs model.Canvas.PreviousCanvasHashes currentHashes
         let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
@@ -765,7 +684,7 @@ type AutoDisplayIdleLogicTests() =
                 Activity.LastActivityTime = 0.0
                 Canvas.PreviousCanvasHashes = currentHashes }
 
-        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
         let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
@@ -1017,7 +936,7 @@ type SystemViewAwarenessTests() =
         Assert.That(result["myrepo/feat"], Is.EqualTo([ "status.html" ]),
             "Only the AgentDoc should be unviewed; the SystemView doc is excluded")
 
-    // canvasHashesByScopedKey + detectCanvasEvents
+    // canvasHashesByScopedKey + detectChangedCanvasDocs
 
     [<Test>]
     member _.``canvasHashesByScopedKey excludes SystemView docs``() =
@@ -1042,58 +961,25 @@ type SystemViewAwarenessTests() =
             "A worktree with only a SystemView doc contributes no hashes")
 
     [<Test>]
-    member _.``detectCanvasEvents produces no event for a changed SystemView doc``() =
-        // currentHashes is built the production way (via canvasHashesByScopedKey), so the SystemView
-        // doc never enters the hash maps that detectCanvasEvents compares.
+    member _.``Change detection ignores a changed SystemView doc``() =
         let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeSystemDoc "beads.html" "b2" ] ] ]
         let previousHashes = Map.ofList [ "r/feat", Map.ofList [ "beads.html", "b1" ] ]
         let currentHashes = canvasHashesByScopedKey repos
 
-        let result = detectCanvasEvents DateTimeOffset.UtcNow previousHashes currentHashes
+        let result = detectChangedCanvasDocs previousHashes currentHashes
 
-        Assert.That(result, Is.Empty, "A SystemView hash change must not produce a canvas event")
+        Assert.That(result, Is.Empty, "A SystemView hash change must not trigger auto-display")
 
     [<Test>]
-    member _.``detectCanvasEvents reports only the AgentDoc when mixed with a SystemView doc``() =
+    member _.``Change detection reports only the AgentDoc when mixed with a SystemView doc``() =
         let repos =
             [ makeRepo "r" [ makeWorktree "r" "feat" [
                 makeDoc "status.html" "a1"
                 makeSystemDoc "beads.html" "b1" ] ] ]
         let currentHashes = canvasHashesByScopedKey repos
 
-        let result = detectCanvasEvents DateTimeOffset.UtcNow Map.empty currentHashes
-
-        let events = result["r/feat"]
-        Assert.That(events.Length, Is.EqualTo(1))
-        Assert.That(events[0].Filename, Is.EqualTo("status.html"),
-            "Only the AgentDoc should yield a NewDoc event")
-
-    [<Test>]
-    member _.``retainAgentDocEvents removes all existing SystemView events``() =
-        let timestamp = DateTimeOffset(2026, 7, 22, 12, 0, 0, TimeSpan.Zero)
-        let repos =
-            [ makeRepo "r" [ makeWorktree "r" "feat" [
-                makeDoc "status.html" "a1"
-                makeSystemDoc "beads.html" "b1"
-                makeSystemDoc "diff.html" "d1" ] ] ]
-        let existing =
-            Map.ofList [
-                "r/feat", [
-                    { Filename = "beads.html"; Timestamp = timestamp; Kind = NewDoc }
-                    { Filename = "diff.html"; Timestamp = timestamp; Kind = UpdatedDoc }
-                    { Filename = "status.html"; Timestamp = timestamp; Kind = UpdatedDoc }
-                ]
-            ]
-        let expected =
-            Map.ofList [
-                "r/feat", [
-                    { Filename = "status.html"; Timestamp = timestamp; Kind = UpdatedDoc }
-                ]
-            ]
-
-        let result = retainAgentDocEvents (canvasHashesByScopedKey repos) existing
-
-        Assert.That(result, Is.EqualTo(expected))
+        let result = detectChangedCanvasDocs Map.empty currentHashes
+        Assert.That(result, Is.EqualTo([ "r/feat", "status.html" ]))
 
     // seedLastViewedHashes
 

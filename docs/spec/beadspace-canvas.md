@@ -28,7 +28,10 @@ Add a beads issue dashboard to the canvas pane by integrating Beadspace (`camero
   `canvasSend` and selected-text actions remain. Interactions use the worktree activity, bridge-gap,
   and exact fallback policy in `docs/spec/canvas-interaction-routing.md`, never stored ownership.
 - **No DOM morph** — the idiomorph runtime and morph controller are also omitted. A morph would stomp the live, JS-rendered table back down to the empty template shell; the dashboard instead refreshes itself via its 30s `/beads-data` poll and the `refresh-beads` postMessage.
-- **Excluded from content-hash awareness** — `CanvasAwareness.awarenessDocs` filters `SystemView` docs out, so the beads file never contributes to unviewed badges, card notifications, seeded viewed-hashes, or idle auto-display. The file hash is stable while the data changes; beads "newness" is surfaced on the worktree card as `BeadsSummary` instead.
+- **Excluded from authored-document inventory and awareness** — `CanvasAwareness.agentDocs` filters
+  `SystemView` docs out, so the beads file never contributes to the card's canvas strip, unviewed
+  badges, seeded viewed-hashes, or idle auto-display. The file hash is stable while the data changes;
+  beads state is surfaced on the worktree card as `BeadsSummary` instead.
 - **Distinct tab affordance, no archive** — it renders as a far-left `.canvas-system-tab` entry (a "BD" glyph + total-issue-count badge) rather than a normal doc tab, and the archive button is hidden (the file is regenerated from the template, not user-owned).
 
 See `docs/spec/canvas-pane.md` for the generic pane behavior and the full `AgentDoc` vs `SystemView` rationale the two kinds share.

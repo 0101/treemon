@@ -21,6 +21,7 @@
     <Compile Include="TerminalPane.fs" />
     <Compile Include="CanvasPane.fs" />
     <Compile Include="CanvasAwareness.fs" />
+    <Compile Include="CanvasDocStrip.fs" />
     <Compile Include="CanvasState.fs" />
     <Compile Include="MascotState.fs" />
     <Compile Include="MascotView.fs" />
