@@ -15,7 +15,7 @@
 - Keep lifecycle control loopback-only, authenticated, versioned, and limited to health, list,
   start, close, and host-wide shutdown.
 - Route every prompted or automatic agent launch through the embedded host while retaining Windows
-  Terminal only for the card's explicit `>` / Enter action.
+  Terminal only for the card's click-only `>` action.
 - Apply a staged TerminalHost update only after the user clicks the plainly labelled toolbar action.
 - Acquire one global maintenance lock before snapshotting, reject every new embedded-terminal start
   route while locked, restart only currently hosted durable sessions, and omit terminals without an
@@ -71,7 +71,7 @@ a visible omission notice, and then sends the surviving frames instead of silent
 discontinuous output into the existing state.
 
 The terminal pane normally follows the currently focused worktree card. Clicking a card's embedded
-terminal action, or pressing `T` while that card is focused, explicitly targets that worktree
+terminal action, or pressing Enter or `t` while that card is focused, explicitly targets that worktree
 without changing the selected dashboard card or Canvas document. It opens the pane on the remembered
 terminal and moves browser focus into it when that worktree already has one, or starts, selects, and
 focuses a terminal when none exists; the next card selection restores normal focus-following. Its
@@ -146,10 +146,10 @@ unacknowledged "copied" status authoritative.
 
 ### Launch routing and command startup
 
-The card's `>` / Enter action remains the explicit native Windows Terminal choice. The always-visible
+The card's click-only `>` action is the explicit native Windows Terminal choice. The always-visible
 robot-head Agent action and focused-card `a` / `A` shortcut always start a fresh embedded terminal,
 submit exactly `copilot --yolo`, open the terminal pane, and select the exact returned terminal. The
-dedicated embedded-terminal action and `t` shortcut reuse that worktree's remembered embedded
+dedicated embedded-terminal action and Enter / `t` shortcuts reuse that worktree's remembered embedded
 terminal when one exists and otherwise start a plain embedded PowerShell terminal. The terminal
 pane's **New** action and Ctrl+N from its active terminal always start and focus another plain
 embedded terminal for that worktree.
@@ -703,5 +703,5 @@ and dynamically allocated non-production ports. Tests never bind production port
 - `docs/spec/session-status-push.md` — authoritative process-instance reporting, persistence,
   liveness, terminal origin, and monotonic closure; this spec owns shutdown policy and terminal
   teardown.
-- `docs/spec/native-session-management.md` — explicit card `>` / Enter Windows Terminal behavior.
+- `docs/spec/native-session-management.md` — click-only card `>` Windows Terminal behavior.
 - `docs/spec/worktree-monitor.md` — worktree lifecycle and dashboard integration.

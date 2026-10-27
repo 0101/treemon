@@ -363,7 +363,7 @@ let buildBadge (repoName: string) (build: BuildInfo) =
         ]
 
 let terminalButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
-    let title = if wt.HasActiveSession then "Focus session window (Enter)" else "Open terminal (Enter)"
+    let title = if wt.HasActiveSession then "Focus session window" else "Open terminal"
     Html.button [
         prop.className "terminal-btn"
         prop.title title
@@ -390,7 +390,7 @@ let embeddedTerminalIcon =
 let embeddedTerminalButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
     Html.button [
         prop.className "embedded-terminal-btn"
-        prop.title "Open or focus embedded terminal (T)"
+        prop.title "Open or focus embedded terminal (Enter / T)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); callbacks.OpenEmbeddedTerminal wt)
         prop.children [ embeddedTerminalIcon ]
