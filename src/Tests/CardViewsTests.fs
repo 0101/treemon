@@ -463,6 +463,49 @@ type CanvasDocStripRenderingTests() =
                     Assert.That(truncated, Is.True, "Long titles should ellipsize without hiding the age")
         }
 
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member this.``Focused outline remains continuous across the canvas strip``(compact: bool) =
+        task {
+            do! this.Navigate()
+            if compact then
+                do! this.Page.GetByRole(AriaRole.Button, PageGetByRoleOptions(Name = "Compact", Exact = true)).ClickAsync()
+
+            let card = cardByBranch this.Page "feature-active"
+            do! card.Locator(".branch-name").ClickAsync()
+            do! card.Locator(".canvas-card-strip").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! className = card.GetAttributeAsync("class")
+            Assert.That(className, Does.Contain("focused"))
+            let! screenshot = card.ScreenshotAsync()
+            let! interruptedPixels =
+                card.EvaluateAsync<int>(
+                    """async (card, image) => {
+                        const bytes = Uint8Array.from(atob(image), character => character.charCodeAt(0));
+                        const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+                        const canvas = document.createElement('canvas');
+                        canvas.width = bitmap.width;
+                        canvas.height = bitmap.height;
+                        const context = canvas.getContext('2d');
+                        context.drawImage(bitmap, 0, 0);
+                        const expected = getComputedStyle(card).outlineColor.match(/\d+/g).slice(0, 3).map(Number);
+                        const cardBounds = card.getBoundingClientRect();
+                        const stripBounds = card.querySelector('.canvas-card-strip').getBoundingClientRect();
+                        const top = Math.ceil(stripBounds.top - cardBounds.top) + 2;
+                        const bottom = Math.min(Math.floor(stripBounds.bottom - cardBounds.top) - 2, bitmap.height - 10);
+                        let interrupted = 0;
+                        for (let y = top; y < bottom; y++) {
+                            for (const x of [1, bitmap.width - 2]) {
+                                const pixel = context.getImageData(x, y, 1, 1).data;
+                                if (expected.some((value, index) => pixel[index] !== value)) interrupted++;
+                            }
+                        }
+                        bitmap.close();
+                        return interrupted;
+                    }""",
+                    Convert.ToBase64String(screenshot))
+            Assert.That(interruptedPixels, Is.Zero, "Both selection edges must stay visible through the strip")
+        }
+
     [<Test>]
     member this.``Document updates reorder the strip and empty inventory unmounts and restores it``() =
         task {
