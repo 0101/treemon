@@ -255,9 +255,6 @@ let removeWorktreeByPath (path: WorktreePath) (model: Model) =
                 else model.Canvas.TargetWorktree }
     reconcileDashboardVisibility updatedModel
 
-let terminalAction (wt: WorktreeStatus) =
-    if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
-
 let targetEmbeddedTerminal path model =
     { model with
         Workspace.ActivePane = WorkspaceLayout.Pane.Terminal
@@ -443,8 +440,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
         when WorktreeFocus.isEnabled model.FocusWindow
              && not (visibleFocusTargets (dashboardRepos model) |> List.contains focused) ->
         None
-    | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
-    | Card scopedKey, "t" -> findWorktree scopedKey model |> Option.map (_.Path >> OpenEmbeddedTerminal)
+    | Card scopedKey, ("Enter" | "t") -> findWorktree scopedKey model |> Option.map (_.Path >> OpenEmbeddedTerminal)
     | Card scopedKey, ("a" | "A") -> findWorktree scopedKey model |> Option.map (_.Path >> StartAgent)
     | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (_.Path >> ToggleAutoSync)
     | Card scopedKey, "r" -> findWorktree scopedKey model |> Option.bind (fun wt -> if canResumeSession wt then Some (ResumeSession wt.Path) else None)

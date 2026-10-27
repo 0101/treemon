@@ -41,8 +41,7 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 
 | Context | Key | Action |
 |---------|-----|--------|
-| Card | Enter | Open terminal / focus active session |
-| Card | t | Open or focus embedded terminal input |
+| Card | Enter / t | Open or focus embedded terminal input |
 | Card | a / A | Start a fresh embedded agent terminal running exactly `copilot --yolo` |
 | Card | s | Toggle auto-sync |
 | Card | r | Resume last session (when resumable) |
@@ -64,6 +63,7 @@ non-archived, reports comparison content, and has a scanned `diff.html` SystemVi
 key is a no-op. The Diff action tooltip advertises the binding as `Open worktree diff (D)`.
 
 Archive is intentionally mouse-only so an accidental letter key cannot archive a worktree.
+The external terminal's `>` button is click-only; no keyboard shortcut opens or focuses a native window.
 
 Focused card/header bindings live in `keyBinding`; global bindings live in the document keyboard
 subscription and the cross-origin iframe bridges.

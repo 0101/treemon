@@ -959,8 +959,8 @@ type DashboardTests() =
             Assert.That(count, Is.EqualTo(allCount), $"All .{btnClass} should be inside card headers")
         }
 
-    [<TestCase("terminal-btn", ">", "Focus session window (Enter)")>]
-    [<TestCase("embedded-terminal-btn", "", "Open or focus embedded terminal (T)")>]
+    [<TestCase("terminal-btn", ">", "Focus session window")>]
+    [<TestCase("embedded-terminal-btn", "", "Open or focus embedded terminal (Enter / T)")>]
     [<TestCase("delete-btn", "", "Remove worktree (Del)")>]
     member this.``Header button has correct text and title``(btnClass: string, expectedText: string, expectedTitle: string) =
         task {
@@ -3111,7 +3111,7 @@ type DashboardTests() =
 
             do! dashboard.FocusAsync()
             do! Assertions.Expect(terminalPane).ToBeHiddenAsync()
-            do! Assertions.Expect(nativeTerminal).ToHaveAttributeAsync("title", "Open terminal (Enter)")
+            do! Assertions.Expect(nativeTerminal).ToHaveAttributeAsync("title", "Open terminal")
             do! Assertions.Expect(embeddedTerminal).ToHaveCountAsync(1)
             do! Assertions.Expect(targetCard.Locator(".agent-btn")).ToHaveCountAsync(1)
 
@@ -3153,7 +3153,7 @@ type DashboardTests() =
                     "the discovered terminal should retain its authoritative worktree identity"
                 ))
 
-            do! Assertions.Expect(nativeTerminal).ToHaveAttributeAsync("title", "Open terminal (Enter)")
+            do! Assertions.Expect(nativeTerminal).ToHaveAttributeAsync("title", "Open terminal")
             do! Assertions.Expect(targetCard.Locator(".agent-btn")).ToHaveCountAsync(1)
             do! page.CloseAsync()
         }
