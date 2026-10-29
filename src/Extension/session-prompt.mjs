@@ -1,13 +1,7 @@
-import { isSystemViewFilename } from "./canvas-doc-kinds.mjs";
 import { isValidCanvasFilename } from "./canvas-filename.mjs";
 
 /** @typedef {"canvas" | "agent-prompt" | "startup-prompt"} SessionPromptKind */
 export const MAX_CANVAS_MESSAGE_CHARS = 64000;
-
-const CANVAS_EDIT_REMINDER =
-  "Keep this edit concise and in the canvas. Preserve the intended audience, reading length, and essential facts or caveats. " +
-  "Replace stale or repeated prose rather than appending a recap. Show requested explanations in <details open> with a short summary; leave unrelated sections alone. " +
-  "Use direct, concrete language and explain unfamiliar terms. For another audience, follow the canvas skill's audience.md. Use saved profiles only when explicitly selected by the user.";
 
 /**
  * @typedef SessionPrompt
@@ -60,8 +54,7 @@ export function promptForSession(body) {
 }
 
 /**
- * Validates a canvas message from either host and reinforces writing guidance for doc edits
- * in an envelope separate from the authored payload, without scheduling another turn.
+ * Validates a canvas message from either host without adding authoring instructions.
  *
  * @param {string} body
  * @param {unknown} source
@@ -87,17 +80,8 @@ export function promptForCanvasMessage(body, source) {
     throw new Error("payload too large");
   }
 
-  const isEdit =
-    (message.action === "expand-section" &&
-      typeof message.section === "string" && message.section.trim().length > 0) ||
-    (message.action === "canvas-selection" &&
-      typeof message.intent === "string" && ["explain", "remove", "comment"].includes(message.intent) &&
-      typeof message.request === "string" && message.request.trim().length > 0);
-  const remind =
-    isEdit && !isSystemViewFilename(identity.filename);
-  const envelope = remind
-    ? JSON.stringify({ source: identity, payload: message, authoringReminder: CANVAS_EDIT_REMINDER })
-    : JSON.stringify({ source: identity, payload: message });
+  const { authoringReminder: _legacyReminder, ...payload } = message;
+  const envelope = JSON.stringify({ source: identity, payload });
   const prompt = envelope.replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
 
   return { kind: "canvas", prompt: `[canvas] ${prompt}` };

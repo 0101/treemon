@@ -94,6 +94,38 @@ repository or the installed skill bundle. The user explicitly selects a saved pr
 without that selection, authoring uses the current brief and context, not automatic profile
 matching. Profiles distinguish confirmed knowledge from assumptions and never enter shared HTML.
 
+The main agent authors and maintains ordinary documents. Copilot also installs the explicitly
+invoked `canvas-designer` agent, pinned to GPT-6 Astra with required model selection, for valuable
+visual restructuring or complex creation. The canvas skill chooses create, improve, or read-only
+review; routine updates stay direct and related changes share one design pass rather than a
+review/fix loop. An improvement can approve an already effective canvas unchanged. Other hosts
+keep direct authoring. Both authors use the same `authoring.md` reference; rendered-review claims
+require current rendered evidence. The specialist omits broad repository/skill context; the main
+agent supplies relevant safety, privacy, and preservation constraints with the brief.
+Main-agent delegation is enabled in the profile; the skill's selective dispatch rules decide when
+to call it rather than disabling the delegation mechanism itself.
+
+The specialist writes drafts under `.agents/canvas-work/`, outside the canvas inventory. The main
+agent validates and publishes through a supported write tool, retaining the existing document
+identity and claiming ownership in monitored mode; replies never target the designer. Concurrent
+live changes must be reconciled before publication. Browser fallback stays on the main bridge
+without requiring an unavailable persisted claim. Agent discovery requires a fresh CLI session;
+missing specialist or model access is reported rather than silently attributed to Astra.
+The write tool still requires normal approval scoped to the draft; a denial is reported without
+adding tools or widening permissions. Interaction instructions use server-owned source coordinates;
+document-supplied identity remains quoted payload data.
+
+The canvas bridge checks successful `apply_patch`, `create`, and `edit` AgentDoc writes through a
+native post-tool hook. A rough source-text estimate flags more than 450 main-view words or a
+prose block longer than 70 words; disclosures (including open ones), code, comments, and non-prose
+markup are excluded. New or growing excess receives concise context alongside the successful tool
+result, at most once per document per submitted prompt and up to three documents per tool call.
+Unchanged or improving measurements stay quiet. The check works in both hosts without queuing a
+new session prompt; it is advisory, not rendered-layout scoring or enforcement. Read failures and
+unavailable hook registration are logged; there is no prompt-based fallback.
+If native hooks are rejected, the bridge retries ownership-tool registration without hooks before
+falling back to a plain join.
+
 ### Doc Lifecycle
 
 - Agents create or update contract-valid `.html` files in `.agents/canvas/`.
@@ -250,10 +282,9 @@ matching. Profiles distinguish confirmed knowledge from assumptions and never en
 - HTTP transport is `{kind:"canvas",prompt,source:{worktreePath,filename}}`, with source identity
   escaped through the shared JSON convention independently of authored payload. Both bridge
   endpoints validate canvas JSON and its 64,000 UTF-16-code-unit input limit, then send
-  `[canvas] {source,payload,authoringReminder?}` through `enqueueSend`. The authoritative filename
-  controls AgentDoc/SystemView reminder classification, never authored `doc` or `source` fields.
-  Recognized edit actions receive one fixed outer reminder; authored fields remain quoted data
-  nested under `payload`. SystemViews and non-edit actions receive no reminder.
+  `[canvas] {source,payload}` through `enqueueSend`. Interaction payloads do
+  not receive authoring instructions; the legacy `authoringReminder` field is discarded if supplied.
+  Readability guidance is conditional post-write tool context, not interaction context.
   Identical session prompts already queued but not started are coalesced; once `session.send`
   starts, the same prompt may be queued again.
 - When the reporting extension later publishes that `[canvas]` prompt as session activity, the
@@ -439,7 +470,7 @@ the diff. Each is promoted to its nearest block, deduplicated, and given the `ca
 | `src/Shared/Types.fs` | Shared canvas domain types (including `CanvasDocKind`), API methods, bridge liveness with effective SystemView targets, send results, workspace width, and the JSON document-identity/prompt builder used by both startup flows |
 | `src/Extension/canvas-filename-contract.json` | Authoritative cross-runtime canvas filename pattern |
 | `src/Extension/canvas-filename.mjs` | Extension-side loader and exact-match validator for the shared filename pattern |
-| `src/Extension/canvas-doc-kinds.mjs` | Shared extension-side SystemView classification for fallback rendering and edit reminders |
+| `src/Extension/canvas-doc-kinds.mjs` | Shared extension-side SystemView classification for fallback rendering and readability checks |
 | `src/Server/CanvasFilename.fs` | Server-side embedded-resource loader and exact-match validator |
 | `src/Server/CanvasDocKinds.fs` | Server classifier backed by the shared browser/server SystemView filename list |
 | `src/Client/CanvasSessionPrompt.fs` | Unowned AgentDoc startup prompt using the shared JSON document identity |
@@ -468,7 +499,9 @@ the diff. Each is promoted to its nearest block, deduplicated, and given the `ca
 | `src/Server/CanvasMorphScript.fs` | Morph controller injection: the embedded `canvas-morph.js` source plus the `canvas-updated` highlight style |
 | `src/Extension/canvas-morph.js` | Live-update controller — morphs body-only changes, reloads scripts and document-shell changes, and marks the blocks a morph changed |
 | `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, `injection-request.mjs`, `session-prompt.mjs`, `send-queue.mjs` | Session-addressed bridge registration with optional location hints, guarded prompt/shutdown endpoints, source-coordinate decoding, serialized send queue, heartbeat, and reconnect backoff |
-| `src/Extension/skill/SKILL.md` | Authoring contract for agent-created canvas docs |
+| `src/Extension/skill/SKILL.md` | Authoring dispatch, interaction handling, publication, and ownership |
+| `src/Extension/skill/authoring.md` | Shared communication, visual-design, and preservation contract |
+| `src/Extension/agents/canvas-designer.agent.md` | Optional Astra create/improve/review specialist installed for Copilot |
 | `src/Extension/skill/audience.md` | Optional recipient-focused writing workflow and private reusable audience profiles |
 
 ## Decisions
