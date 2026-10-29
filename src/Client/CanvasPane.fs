@@ -113,7 +113,7 @@ let private systemViewTab
         match doc.Filename.ToLowerInvariant() with
         | "beads.html" -> Html.text "BD", Some(string (beadsTotal wt.Beads)), "Beads issues"
         | "diff.html" -> diffIcon, None, "Worktree diff"
-        | _ -> Html.text (doc.Filename.Replace(".html", "")), None, doc.Filename
+        | _ -> Html.text (CanvasTab.labelText doc), None, doc.Filename
 
     Html.button [
         prop.className (
@@ -211,7 +211,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                                                         onClickDoc scopedKey doc.Filename)
                                                     prop.children [
                                                         livenessDotFor bridgeLiveness scopedKey doc
-                                                        Html.text (doc.Filename.Replace(".html", ""))
+                                                        Html.text (CanvasTab.labelText doc)
                                                     ]
                                                 ]
                                             )
@@ -245,11 +245,12 @@ type CanvasPaneCallbacks =
 /// the same reason as `CanvasPaneCallbacks`: the signature had been growing one positional param
 /// per feature (`docError` → `size` → `clipboardNotice`), which invited a silent argument
 /// transposition that would compile and only surface at runtime. Built by `CanvasView.fs` from
-/// `model.Canvas.*`, mirroring how `canvasCallbacks` is assembled. Deliberately a subset record
+/// the model clock and canvas state, mirroring how `canvasCallbacks` is assembled. A subset record
 /// rather than `CanvasState` itself: `CanvasPane.fs` compiles before `CanvasState.fs` in
 /// `Client.fsproj`, so that type isn't nameable here.
 type CanvasPaneState =
-    { IsOpen: bool
+    { Now: System.DateTimeOffset
+      IsOpen: bool
       WorkspaceMode: WorkspaceLayout.Mode
       SendState: CanvasSendState
       DocError: DocJsError option
@@ -271,7 +272,8 @@ type CanvasPaneAwareness =
       VisitedDocs: string list }
 
 let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (awareness: CanvasPaneAwareness) (callbacks: CanvasPaneCallbacks) =
-    let { IsOpen = isOpen
+    let { Now = now
+          IsOpen = isOpen
           WorkspaceMode = workspaceMode
           SendState = sendState
           DocError = docError
@@ -449,32 +451,26 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                     elif isPathCopying then "Copying canvas path…"
                     elif isCopied then "Path copied"
                     else $"Copy full path to {d.Filename}"
-                let cls =
-                    [ "canvas-tab"
-                      if isActive then "active"
-                      if isViewed && not isActive then "canvas-tab-viewed"
-                      if isLinked then "canvas-terminal-linked" ]
-                    |> String.concat " "
+                let tabState: CanvasTab.State =
+                    { IsActive = isActive
+                      IsViewed = isViewed
+                      IsTerminalLinked = isLinked }
                 Html.div [
                     prop.className "canvas-tab-shell"
                     prop.children [
                         Html.button [
-                            prop.className cls
-                            prop.onClick (fun _ -> selectDoc d.Filename)
+                            yield! CanvasTab.attributes [] tabState selectDoc d
                             prop.onDoubleClick (fun _ -> openDocInBrowserTab wt d)
                             prop.title (
                                 $"{d.Filename} — double-click to open in a browser tab (for full-page screenshots)"
                                 + terminalLinkTitleSuffix isLinked)
                             prop.children [
                                 livenessDotFor bridgeLiveness scopedKey d
-                                Html.text (d.Filename.Replace(".html", ""))
+                                CanvasTab.label [] d
                                 Html.span [
                                     prop.className "canvas-tab-meta"
                                     prop.children [
-                                        Html.span [
-                                            prop.className "canvas-tab-age"
-                                            prop.text (Components.relativeTimeCompact System.DateTimeOffset.Now d.LastModified)
-                                        ]
+                                        CanvasTab.age [] now d.LastModified
                                     ]
                                 ]
                             ]

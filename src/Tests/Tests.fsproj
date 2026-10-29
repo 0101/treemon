@@ -58,6 +58,7 @@
     <Compile Include="WorktreeSearchTests.fs" />
     <Compile Include="WorktreeFocusTests.fs" />
     <Compile Include="ComponentsTests.fs" />
+    <Compile Include="CanvasDocStripTests.fs" />
     <Compile Include="CardViewsTests.fs" />
     <Compile Include="AutoSyncClientTests.fs" />
     <Compile Include="EventProcessingTests.fs" />

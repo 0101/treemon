@@ -3,7 +3,7 @@ module ActivityUpdate
 // User-activity / idle-detection update-arm bodies plus the activity-detection subscription,
 // extracted from `App.fs`. Mirrors `CanvasUpdate.fs`: body extraction only — the root `update`
 // keeps the flat `match` and delegates to these functions (no sub-`Msg`/`Cmd.map` split). `Tick`
-// stays in the root arm because it also expires canvas events and drives the worktree/sync poll;
+// stays in the root arm because it drives the worktree/sync poll;
 // only its activity-recompute lifts here. Compiled after `AppTypes.fs` (which holds `Model`/`Msg`)
 // and before `App.fs`. See docs/spec/user-idle-detection.md.
 
@@ -14,8 +14,7 @@ open AppTypes
 
 /// `Tick` activity-recompute: derive the new `ActivityLevel` from the elapsed idle time and emit a
 /// presence report only when it actually changed. Returns the updated activity slice and that
-/// `Cmd`; the root `Tick` arm threads the slice into the model alongside its canvas-event expiry
-/// and poll fetches (the reason `Tick` does not delegate wholesale).
+/// `Cmd`; the root `Tick` arm threads the slice into the model alongside its poll fetches.
 let tickActivity (now: float) (activity: ActivityState.ActivityState) : ActivityState.ActivityState * Cmd<Msg> =
     let newLevel = ActivityState.computeActivityLevel activity.LastActivityTime now
 

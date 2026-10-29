@@ -22,7 +22,6 @@ type CanvasState =
       MountedAgentDocHashes: Map<string * string, string>
       LastViewedHashes: Map<string, Map<string, string>>
       PreviousCanvasHashes: Map<string, Map<string, string>>
-      CanvasEvents: Map<string, CanvasEvent list>
       CanvasSendState: CanvasSendState
       // Latest doc-scoped banner error, stamped with the doc it is attributed to. Two producers: a
       // doc-side JS error from a focused AgentDoc's iframe (its filename carried in the postMessage and
@@ -53,7 +52,6 @@ let empty : CanvasState =
       MountedAgentDocHashes = Map.empty
       LastViewedHashes = Map.empty
       PreviousCanvasHashes = Map.empty
-      CanvasEvents = Map.empty
       CanvasSendState = CanvasSendState.Idle
       DocError = None
       ClipboardNotice = None

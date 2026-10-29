@@ -28,6 +28,19 @@ let cardTitle (wt: WorktreeStatus) =
     if wt.Branch = WorktreeStatus.DetachedBranchName then WorktreePath.displayName wt.Path
     else wt.Branch
 
+let canvasIcon (className: string) =
+    Svg.svg [
+        svg.className className
+        svg.viewBox (0, 0, 297, 297)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.title "Canvas"
+            Svg.path [
+                svg.d "M247.5,188H241V43h6.5c5.523,0,10-4.478,10-10s-4.477-10-10-10h-89V10c0-5.523-4.477-10-10-10s-10,4.477-10,10v13h-89c-5.522,0-10,4.478-10,10s4.478,10,10,10H56v145h-6.5c-5.522,0-10,4.477-10,10s4.478,10,10,10h53.829l-30.114,75.283c-2.051,5.128,0.443,10.947,5.571,12.999c1.218,0.487,2.475,0.718,3.711,0.718c3.969,0,7.724-2.379,9.288-6.289l33.001-82.5c0.027-0.07,0.046-0.141,0.072-0.211H138.5v78.997c0,5.522,4.477,10,10,10s10-4.478,10-10V208h13.642c0.026,0.07,0.045,0.141,0.072,0.211l33.001,82.5c1.564,3.91,5.319,6.289,9.288,6.289c1.236,0,2.493-0.231,3.711-0.718c5.128-2.052,7.622-7.871,5.571-12.999L193.671,208H247.5c5.523,0,10-4.477,10-10S253.023,188,247.5,188z M76,43h145v145H76V43z"
+            ]
+        ]
+    ]
+
 let refreshIcon () =
     Svg.svg [
         svg.className "btn-icon"

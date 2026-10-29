@@ -576,9 +576,6 @@
         .event-status.running { background: #2e3452; color: #89b4fa; }
         .event-status.success { background: #1e3a2f; color: #a6e3a1; }
         .event-status.failed { background: #3b2030; color: #f38ba8; }
-        .canvas-event { cursor: pointer; color: #f9e2af; }
-        .canvas-event:hover { filter: brightness(1.3); }
-        .canvas-event .event-source { color: #f9e2af; }
 
         .commit-grid {
             display: inline-grid;
@@ -1283,7 +1280,9 @@
             line-height: 1.4; white-space: nowrap;
         }
         .canvas-tab:hover { background: #45475a; border-color: #585b70; }
-        .canvas-tab.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
+        .canvas-tab:not(.canvas-tab-viewed) { color: #fff; }
+        .canvas-tab.active, .canvas-card-overflow.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
+        .canvas-tab:focus-visible { outline: 2px solid #89b4fa; outline-offset: -2px; }
         .canvas-tab-viewed { opacity: 0.5; }
         .canvas-tab.canvas-terminal-linked:not(.active) {
             background: color-mix(in srgb, #a6e3a1 7%, #313244);
@@ -1301,11 +1300,29 @@
             width: 18px; height: 18px; margin-left: 6px; vertical-align: middle;
         }
         .canvas-tab-age {
-            position: absolute; inset: 0; display: grid; place-items: center;
             font-size: var(--fs-sm); color: #9399b2; font-variant-numeric: tabular-nums;
+            font-family: 'Consolas', 'Cascadia Mono', monospace;
+        }
+        .canvas-tab-meta .canvas-tab-age {
+            position: absolute; inset: 0; display: grid; place-items: center;
             transition: opacity 0.15s;
         }
         .canvas-tab.active .canvas-tab-age { color: #7f9bd6; }
+        .canvas-card-strip {
+            --canvas-card-gap: 2px;
+            --canvas-card-min-width: 96px;
+            align-items: center; gap: 6px; min-height: 0; padding-right: 14px;
+        }
+        .canvas-card-docs { display: flex; align-items: center; gap: var(--canvas-card-gap); flex: 1; min-width: 0; overflow: hidden; }
+        .canvas-card-doc { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; min-width: 0; max-width: 180px; }
+        .canvas-card-doc-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .canvas-card-doc-age { flex-shrink: 0; }
+        .canvas-card-overflow { display: inline-block; flex-shrink: 0; color: #a6adc8; font-family: 'Consolas', 'Cascadia Mono', monospace; font-size: var(--fs-sm); white-space: nowrap; }
+        .canvas-card-overflow.active { border: 1px solid currentColor; border-radius: 4px; padding: 2px 4px; }
+        .canvas-card-icon { width: 13px; height: 13px; flex-shrink: 0; color: #89dceb; }
+        .canvas-card-measures { position: absolute; width: 0; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
+        .canvas-card-measures .canvas-card-doc { width: max-content; }
+        .wt-card.compact .canvas-card-strip { margin: 6px -10px -6px; padding-right: 10px; }
         .canvas-tab-copy {
             position: absolute; top: 50%; right: 10px; transform: translateY(-50%);
             width: 18px; height: 18px; padding: 2px; box-sizing: border-box;

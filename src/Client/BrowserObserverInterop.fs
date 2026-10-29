@@ -24,6 +24,9 @@ let translatedY (element: Browser.Types.Element) : float = jsNative
 [<Emit("parseFloat(getComputedStyle($0).getPropertyValue($1))")>]
 let cssPixelValue (element: Browser.Types.Element) (propertyName: string) : float = jsNative
 
+[<Emit("Array.from($0.querySelectorAll($1), element => element.getBoundingClientRect().width)")>]
+let elementWidths (element: Browser.Types.Element) (selector: string) : float array = jsNative
+
 [<Emit("window.matchMedia($0)")>]
 let matchMedia (query: string) : obj = jsNative
 
