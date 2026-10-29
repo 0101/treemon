@@ -122,6 +122,8 @@ result, at most once per document per submitted prompt and up to three documents
 Unchanged or improving measurements stay quiet. The check works in both hosts without queuing a
 new session prompt; it is advisory, not rendered-layout scoring or enforcement. Read failures and
 unavailable hook registration are logged; there is no prompt-based fallback.
+If native hooks are rejected, the bridge retries ownership-tool registration without hooks before
+falling back to a plain join.
 
 ### Doc Lifecycle
 

@@ -20,6 +20,7 @@ import {
 import { createSendQueue } from "./send-queue.mjs";
 import { createShutdownHandler } from "./shutdown-endpoint.mjs";
 import { createCanvasReadabilityHooks } from "./canvas-readability.mjs";
+import { joinCanvasSession } from "./session-join.mjs";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
 const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
@@ -413,13 +414,11 @@ const takeOwnershipTool = {
 };
 
 const readabilityHooks = createCanvasReadabilityHooks({ worktreePath, readCanvasFile, log });
-let session;
-try {
-  session = await joinSession({ tools: [takeOwnershipTool], hooks: readabilityHooks });
-} catch (err) {
-  log(`joinSession with tools/hooks failed (${err?.message ?? err}); readability feedback unavailable, retrying without tools/hooks`);
-  session = await joinSession();
-}
+const session = await joinCanvasSession(
+  joinSession,
+  { tools: [takeOwnershipTool], hooks: readabilityHooks },
+  log,
+);
 // The pinned SDK currently exposes `sessionId`; keep the older `id` compatibility boundary
 // locally so each independently installed extension remains self-contained.
 const sessionWithLegacyId =

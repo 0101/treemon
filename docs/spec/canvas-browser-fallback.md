@@ -107,7 +107,8 @@ Separately, the native post-tool hook checks successful supported AgentDoc write
 source-text length and returns same-turn context when needed. This does not use `session.send`;
 interaction payloads also carry no authoring reminder. See `canvas-pane.md` (Authoring guidance)
 for the rough checks and notification limits. Hook-registration failure is logged explicitly
-before joining without tools/hooks; ownership observation and browser serving remain available.
+before retrying with the ownership tool and no hooks. A plain join is used only if tool registration
+also fails; ownership observation and browser serving remain available.
 
 ### Path Security
 
