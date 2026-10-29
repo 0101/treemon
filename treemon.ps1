@@ -1371,6 +1371,20 @@ function Install-CanvasSkill([string]$ConfigDirectory) {
     Write-Host "Canvas skill installed to $destination" -ForegroundColor Green
 }
 
+function Install-CanvasDesigner([string]$ConfigDirectory) {
+    if (-not (Test-Path -LiteralPath $ConfigDirectory -PathType Container)) { return }
+
+    $source = Join-Path $PSScriptRoot "src" "Extension" "agents" "canvas-designer.agent.md"
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Canvas designer agent not found at $source"
+    }
+
+    $destination = Join-Path $ConfigDirectory "agents"
+    New-Item -ItemType Directory -Path $destination -Force | Out-Null
+    Copy-Item -LiteralPath $source -Destination (Join-Path $destination "canvas-designer.agent.md") -Force
+    Write-Host "Canvas designer agent installed to $destination" -ForegroundColor Green
+}
+
 function Install-Extension {
     $src = Join-Path $PSScriptRoot "src" "Extension"
     $requiredFiles = @(
@@ -1383,6 +1397,7 @@ function Install-Extension {
     Install-CopilotExtension $src "canvas-bridge" "Canvas bridge extension" $requiredFiles
 
     Install-CanvasSkill (Get-CopilotConfigDirectory)
+    Install-CanvasDesigner (Get-CopilotConfigDirectory)
     Install-CanvasSkill (Join-Path $HOME ".claude")
 }
 

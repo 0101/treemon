@@ -39,12 +39,29 @@ try {
     $checkInstalledPrompt = @'
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { join, dirname } from "node:path";
 const { promptForCanvasMessage } = await import(pathToFileURL(process.argv[1]).href);
 const message = { action: "expand-section", section: "evidence", doc: "review.html" };
-const result = promptForCanvasMessage(JSON.stringify(message));
-assert.equal(typeof JSON.parse(result.prompt.slice("[canvas] ".length)).authoringReminder, "string");
-const systemView = JSON.stringify({ ...message, doc: "diff.html" });
-assert.equal(promptForCanvasMessage(systemView).prompt, `[canvas] ${systemView}`);
+const source = { worktreePath: process.cwd(), filename: "review.html" };
+const result = promptForCanvasMessage(JSON.stringify(message), source);
+assert.equal(result.prompt, `[canvas] ${JSON.stringify({ source, payload: message })}`);
+const systemSource = { ...source, filename: "diff.html" };
+assert.equal(
+  promptForCanvasMessage(JSON.stringify(message), systemSource).prompt,
+  `[canvas] ${JSON.stringify({ source: systemSource, payload: message })}`,
+);
+const { createCanvasReadabilityHooks } = await import(pathToFileURL(join(dirname(process.argv[1]), "canvas-readability.mjs")).href);
+const hooks = createCanvasReadabilityHooks({
+  worktreePath: process.cwd(),
+  readCanvasFile: async () => `<p>${"word ".repeat(71)}</p>`,
+  log: () => {},
+});
+const feedback = await hooks.onPostToolUse({
+  sessionId: "installed-check", workingDirectory: process.cwd(),
+  toolName: "create", toolArgs: { path: join(".agents", "canvas", "review.html") },
+  toolResult: { resultType: "success", textResultForLlm: "created" },
+});
+assert.match(feedback.additionalContext, /71 words/);
 '@
     node --input-type=module -e $checkInstalledPrompt $installedPrompt
     Assert-True ($LASTEXITCODE -eq 0) "Installed canvas bridge could not load its prompt and document-kind resources"
@@ -63,11 +80,13 @@ assert.equal(promptForCanvasMessage(systemView).prompt, `[canvas] ${systemView}`
             ) "Installed canvas skill resource differs from its source: $relativePath"
         }
 
-        $skillText = Get-Content -LiteralPath (Join-Path $skillDirectory "SKILL.md") -Raw
-        foreach ($link in [regex]::Matches($skillText, '\]\(([^)]+\.md)\)')) {
-            Assert-True (
-                (Test-Path -LiteralPath (Join-Path $skillDirectory $link.Groups[1].Value) -PathType Leaf)
-            ) "Installed canvas skill has a broken reference: $($link.Groups[1].Value)"
+        foreach ($reference in Get-ChildItem -LiteralPath $skillDirectory -Filter "*.md" -File) {
+            $referenceText = Get-Content -LiteralPath $reference.FullName -Raw
+            foreach ($link in [regex]::Matches($referenceText, '\]\(([^)]+\.md)\)')) {
+                Assert-True (
+                    (Test-Path -LiteralPath (Join-Path $reference.DirectoryName $link.Groups[1].Value) -PathType Leaf)
+                ) "Installed canvas skill has a broken reference: $($link.Groups[1].Value)"
+            }
         }
 
         $audienceReference = Join-Path $skillDirectory "audience.md"
@@ -81,10 +100,27 @@ assert.equal(promptForCanvasMessage(systemView).prompt, `[canvas] ${systemView}`
 
     $absentConfig = Join-Path $root "absent-agent"
     Install-CanvasSkill $absentConfig
+    Install-CanvasDesigner $absentConfig
     Assert-True (-not (Test-Path -LiteralPath $absentConfig)) "Skill installation created an absent agent's config"
+
+    $designerSource = Join-Path $repoRoot "src\Extension\agents\canvas-designer.agent.md"
+    $designerInstalled = Join-Path $env:COPILOT_HOME "agents\canvas-designer.agent.md"
+    Install-CanvasDesigner (Get-CopilotConfigDirectory)
+    Assert-True (
+        (Get-FileHash -LiteralPath $designerInstalled).Hash -eq (Get-FileHash -LiteralPath $designerSource).Hash
+    ) "Canvas designer was not installed under COPILOT_HOME"
+    Set-Content -LiteralPath $designerInstalled -Value "Outdated agent"
+    Install-CanvasDesigner (Get-CopilotConfigDirectory)
+    Assert-True (
+        (Get-FileHash -LiteralPath $designerInstalled).Hash -eq (Get-FileHash -LiteralPath $designerSource).Hash
+    ) "Reinstall left the canvas designer outdated"
+    Assert-True (
+        -not (Test-Path -LiteralPath (Join-Path $claudeHome "agents\canvas-designer.agent.md"))
+    ) "Canvas skill installation added a Copilot-only agent to the other host"
 
     Write-Host "PASS: Copilot extensions install under the active COPILOT_HOME"
     Write-Host "PASS: Canvas skill installs and updates its complete reference bundle for both agents"
+    Write-Host "PASS: Canvas designer installs and updates only in the active Copilot config"
 } finally {
     if ($hadCopilotHome) {
         $env:COPILOT_HOME = $previousCopilotHome

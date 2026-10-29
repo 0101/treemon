@@ -143,11 +143,11 @@ replace the captured source.
 
 After monitored-path, safe-filename, and payload validation, HTTP transport carries
 `{kind:"canvas",prompt:<authored JSON>,source:{worktreePath,filename}}`. The Node parser produces
-`[canvas] {source,payload,authoringReminder?}` for `session.send`, with escaped JSON data separate
+`[canvas] {source,payload}` for `session.send`, with escaped JSON data separate
 from authored payload. Browser fallback additionally binds each served document to an unguessable
 capability route, so same-origin authored script cannot claim a different filename as its source.
-The authoritative filename controls edit reminders. Footer formatting reads
-the nested payload while retaining the `[canvas]` glyph and historical flat-message formatting.
+No authoring reminder is injected. Footer formatting reads the nested payload while retaining
+the `[canvas]` glyph and historical flat-message formatting.
 
 ### Selection Metadata
 

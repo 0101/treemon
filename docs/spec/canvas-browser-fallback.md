@@ -9,7 +9,7 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 1. **Treemon mode (unchanged)**: Extension registers with Treemon, heartbeats; canvas docs display in the Treemon canvas pane as today.
 2. **Browser fallback mode**: When Treemon is unreachable **or** reports that the current directory is not monitored, the extension:
    - Serves contract-valid `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
-   - Does not post canvas-write notifications to the session, avoiding repeated or competing agent prompts while fallback mode is active.
+   - Does not enqueue canvas-write notification prompts. Conditional readability guidance accompanies a successful tool result instead.
    - Gives each served document an unguessable capability URL and receives interactions at that
      document's capability-bound message endpoint before forwarding them via `session.send()`.
      Source coordinates come from the startup worktree and the filename bound to that capability,
@@ -18,7 +18,7 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
    `window.parent.postMessage(...)` is its transport substrate. In a top-level fallback window, the
    transport shim intercepts self-posted messages and forwards them via HTTP. Zero agent-side
    changes.
-4. **Host-aware UX**: Browser fallback remains session-silent whether Treemon is unreachable or the directory is explicitly unmonitored.
+4. **Host-aware UX**: Browser fallback does not start new turns for file writes, whether Treemon is unreachable or the directory is explicitly unmonitored.
 
 ## Technical Approach
 
@@ -87,8 +87,7 @@ Browser-mode AgentDocs receive four scripts injected before `</head>`:
 
 ### Canvas-write detection (session events)
 
-The native runtime no longer supports SDK hook callbacks (`joinSession({ hooks })` fails the
-internal `session.resume`), so Canvas writes are observed via **session events**. The extension calls `joinSession()` and subscribes with
+Ownership and fallback serving observe canvas writes via **session events**. The extension subscribes with
 `session.on("tool.execution_start", …)` / `session.on("tool.execution_complete", …)`. The completion
 event carries neither the tool name nor its arguments, so supported canvas targets are captured from
 the **start** event (keyed by `toolCallId`) and acted on once the matching completion reports success.
@@ -101,8 +100,14 @@ folder. Successful durable declarations wake queues; save failure reports non-su
 the previous owner. No cross-worktree attribution or owner-schema migration occurs.
 
 `/inject` receives `{kind:"canvas",prompt,source:{worktreePath,filename}}`; browser fallback derives
-that same identity locally. Both yield `[canvas] {source,payload,authoringReminder?}` as escaped
-JSON data. Reminder classification uses the authoritative filename, not authored `doc` or `source`.
+that same identity locally. Both yield `[canvas] {source,payload}` as escaped JSON data, keeping
+document identity independent of authored fields.
+
+Separately, the native post-tool hook checks successful supported AgentDoc writes for excessive
+source-text length and returns same-turn context when needed. This does not use `session.send`;
+interaction payloads also carry no authoring reminder. See `canvas-pane.md` (Authoring guidance)
+for the rough checks and notification limits. Hook-registration failure is logged explicitly
+before joining without tools/hooks; ownership observation and browser serving remain available.
 
 ### Path Security
 
@@ -117,7 +122,7 @@ accepts only the bare filename rather than stripping a path down to its final se
 
 - **Event-driven, not file-watcher**: `session.on("tool.execution_*")` detects writes instead of
   `fs.watch`, avoiding OS-specific watcher behavior.
-- **No write notification**: Browser fallback serves canvas docs without injecting prompts into the session.
+- **No write notification turn**: Browser fallback serves docs without queuing write prompts; optional readability context stays with the successful tool result.
 - **Content polling over SSE**: 3s polling is simpler than SSE and adequate for agent file writes.
 - **Detect once at startup**: v1 does not switch modes mid-session. If Treemon starts later, it won't be detected until the extension restarts.
 
@@ -133,5 +138,6 @@ accepts only the bare filename rather than stripping a path down to its final se
 - `src/Extension/canvas-filename-contract.json` — canonical filename pattern shared with the server
 - `src/Extension/canvas-filename.mjs` — exact-match filename validation for serving and ownership
 - `src/Extension/canvas-ownership.mjs` — extracted session-event canvas-write watcher and apply-patch destination parsing
+- `src/Extension/canvas-readability.mjs` — basic prose-length estimates and bounded native post-tool feedback
 - `src/Server/CanvasDocServer.fs` — `canvasRegisterHandler` returns `{ registered, monitored }`; `isKnownWorktree` checks the scheduler's `KnownPaths`
 - `src/Extension/skill/SKILL.md` — minor update noting browser fallback

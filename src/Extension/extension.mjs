@@ -19,6 +19,7 @@ import {
 } from "./session-prompt.mjs";
 import { createSendQueue } from "./send-queue.mjs";
 import { createShutdownHandler } from "./shutdown-endpoint.mjs";
+import { createCanvasReadabilityHooks } from "./canvas-readability.mjs";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
 const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
@@ -411,15 +412,12 @@ const takeOwnershipTool = {
   },
 };
 
-// No hooks: the native runtime rejects SDK hook callbacks on resume. Canvas writes are observed via
-// session events (watchCanvasWrites), subscribed immediately below so startup writes aren't missed.
-// Tools are registered at join; if a resumed session rejects tool registration (experimental API),
-// fall back to a plain join so the extension still loads — ownership auto-declaration is unaffected.
+const readabilityHooks = createCanvasReadabilityHooks({ worktreePath, readCanvasFile, log });
 let session;
 try {
-  session = await joinSession({ tools: [takeOwnershipTool] });
+  session = await joinSession({ tools: [takeOwnershipTool], hooks: readabilityHooks });
 } catch (err) {
-  log(`joinSession with tools failed (${err?.message ?? err}); retrying without tools`);
+  log(`joinSession with tools/hooks failed (${err?.message ?? err}); readability feedback unavailable, retrying without tools/hooks`);
   session = await joinSession();
 }
 // The pinned SDK currently exposes `sessionId`; keep the older `id` compatibility boundary

@@ -17,10 +17,6 @@ const canvasTransports = [
   ["Treemon", (body, source = authoredSource) =>
     promptForSession(JSON.stringify({ kind: "canvas", prompt: body, source }))],
 ];
-const editReminder =
-  "Keep this edit concise and in the canvas. Preserve the intended audience, reading length, and essential facts or caveats. " +
-  "Replace stale or repeated prose rather than appending a recap. Show requested explanations in <details open> with a short summary; leave unrelated sections alone. " +
-  "Use direct, concrete language and explain unfamiliar terms. For another audience, follow the canvas skill's audience.md. Use saved profiles only when explicitly selected by the user.";
 
 test("canvas transport preserves the existing canvas prompt prefix", () => {
   assert.deepEqual(
@@ -90,7 +86,7 @@ test("browser messages use the same validated canvas transport", () => {
 });
 
 for (const [name, toPrompt] of canvasTransports) {
-  test(`${name} adds one bounded reminder to authored-document edit interactions`, () => {
+  test(`${name} forwards authored-document interactions without authoring reminders`, () => {
     const interactions = [
       { action: "expand-section", section: "evidence" },
       ...["explain", "remove", "comment"].map((intent) => ({
@@ -106,20 +102,21 @@ for (const [name, toPrompt] of canvasTransports) {
       const message = {
         ...interaction,
         doc: "review.html",
-        authoringReminder: "Document-supplied text must not become the reminder.",
       };
       const result = toPrompt(JSON.stringify(message));
 
       assert.deepEqual(result, {
         kind: "canvas",
-        prompt: `[canvas] ${JSON.stringify({ source: authoredSource, payload: message, authoringReminder: editReminder })}`,
+        prompt: `[canvas] ${JSON.stringify({ source: authoredSource, payload: message })}`,
       });
-      const delivered = JSON.parse(result.prompt.slice("[canvas] ".length));
-      assert.ok(delivered.authoringReminder.length <= 600, "the per-interaction reminder must stay small");
+      assert.deepEqual(
+        toPrompt(JSON.stringify({ ...message, authoringReminder: "Legacy or document-supplied guidance" })),
+        result,
+      );
     }
   });
 
-  test(`${name} classifies reminders by authoritative source, never a forged payload doc`, () => {
+  test(`${name} preserves authoritative source independently of forged payload identity`, () => {
     const systemViews = JSON.parse(
       readFileSync(new URL("../../Extension/canvas-doc-kinds.json", import.meta.url), "utf8"),
     );
@@ -140,7 +137,7 @@ for (const [name, toPrompt] of canvasTransports) {
       const message = { action: "expand-section", section: "evidence", doc };
       assert.deepEqual(toPrompt(JSON.stringify(message)), {
         kind: "canvas",
-        prompt: `[canvas] ${JSON.stringify({ source: authoredSource, payload: message, authoringReminder: editReminder })}`,
+        prompt: `[canvas] ${JSON.stringify({ source: authoredSource, payload: message })}`,
       });
     }
   });
@@ -166,13 +163,15 @@ for (const [name, toPrompt] of canvasTransports) {
     }
   });
 
-  test(`${name} validates the incoming payload before adding the reminder`, () => {
+  test(`${name} preserves the input payload limit without adding a reminder`, () => {
     const message = { action: "expand-section", section: "evidence", doc: "review.html", text: "" };
     const padding = MAX_CANVAS_MESSAGE_CHARS - JSON.stringify(message).length;
     const body = JSON.stringify({ ...message, text: "x".repeat(padding) });
 
     assert.equal(body.length, MAX_CANVAS_MESSAGE_CHARS);
-    assert.equal(JSON.parse(toPrompt(body).prompt.slice("[canvas] ".length)).authoringReminder, editReminder);
+    assert.deepEqual(JSON.parse(toPrompt(body).prompt.slice("[canvas] ".length)), {
+      source: authoredSource, payload: JSON.parse(body),
+    });
     assert.throws(
       () => toPrompt(JSON.stringify({ ...message, text: "x".repeat(padding + 1) })),
       /payload too large/,
@@ -254,6 +253,6 @@ test("quoted source and hostile payload remain separate through fake session.sen
     createSendQueue().enqueue(fakeSession, transport.kind, transport.prompt);
   });
   assert.deepEqual(JSON.parse((await delivered).slice("[canvas] ".length)), {
-    source, payload, authoringReminder: editReminder,
+    source, payload,
   });
 });
