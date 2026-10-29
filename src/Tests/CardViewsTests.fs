@@ -702,6 +702,7 @@ type CanvasDocStripRenderingTests() =
             let viewed = card.Locator(".canvas-card-docs > .canvas-tab-viewed[data-filename='some-canvas-doc.html']")
             let unseen = card.Locator(".canvas-card-docs > :not(.canvas-tab-viewed)[data-filename='some-canvas-doc.html']")
             do! viewed.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(viewed.Locator(".canvas-tab-title")).ToHaveCSSAsync("color", "rgb(186, 194, 222)")
 
             let setDocuments docs =
                 task {
@@ -728,6 +729,8 @@ type CanvasDocStripRenderingTests() =
                     else document)
             do! setDocuments (changed "unseen-1")
             do! unseen.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            do! Assertions.Expect(first.Locator(".canvas-tab-title")).ToHaveCSSAsync("color", "rgb(255, 255, 255)")
+            do! Assertions.Expect(first.Locator(".canvas-tab-age")).ToHaveCSSAsync("color", "rgb(147, 153, 178)")
             let! unseenOpacity = first.EvaluateAsync<string>("element => getComputedStyle(element).opacity")
             let! otherViewed = card.Locator(".canvas-card-docs > .canvas-tab-viewed[data-filename='another-canvas-doc.html']").CountAsync()
             Assert.Multiple(fun () ->
@@ -752,6 +755,14 @@ type CanvasDocStripRenderingTests() =
             do! unseen.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! changedOpacity = first.EvaluateAsync<string>("element => getComputedStyle(element).opacity")
             Assert.That(changedOpacity, Is.EqualTo("1"), "A later content change should restore the highlight")
+
+            do! card.Locator(".canvas-card-docs > [data-filename='another-canvas-doc.html']").ClickAsync()
+            let paneUnseen =
+                this.Page.Locator(".canvas-pane .canvas-tab:not(.active):not(.canvas-tab-viewed)[data-filename='some-canvas-doc.html']")
+            do! Assertions.Expect(paneUnseen.Locator(".canvas-tab-title")).ToHaveCSSAsync("color", "rgb(255, 255, 255)")
+            do!
+                Assertions.Expect(this.Page.Locator(".canvas-pane .canvas-tab.active .canvas-tab-title"))
+                    .ToHaveCSSAsync("color", "rgb(137, 180, 250)")
         }
 
     [<Test>]
