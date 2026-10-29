@@ -477,16 +477,19 @@ The terminal-page `postMessage` vocabulary lives in
 project or runtime dependency on `Shared.dll`; dashboard-only shared types therefore cannot change
 the host bundle.
 
-`global.json` selects the exact .NET SDK `10.0.401` with roll-forward disabled, and both CI jobs
-install the SDK from that repository policy. An SDK change is therefore deliberate and changes the
-published host bundle when its compiler or bundled dependencies produce different bytes.
+`global.json` requests .NET SDK `10.0.401`, preferring that exact version and allowing only newer
+installed patches in the same `10.0.4xx` feature band when it is absent; prereleases are excluded.
+Both CI jobs install the requested version. Patch fallback can change compiler or SDK-bundled
+dependency bytes without a policy edit, so identical source alone does not guarantee identical
+TerminalHost bundles across different resolved SDKs.
 
 Deployment fingerprints the complete non-PDB TerminalHost bundle. Release host and layout builds
 map source and artifact directories to stable paths, and the Server's initial host/layout project
 references use the same compiler settings as its nested host publish. The host's exhaustive data
-plane message match also avoids embedding a worktree-local compiler exception path. Identical source
-therefore produces the same bundle across worktrees without repository revision or build-location
-metadata; any changed host assembly or runtime file still changes the fingerprint. An equal live
+plane message match also avoids embedding a worktree-local compiler exception path. With the same
+resolved SDK and dependency inputs, identical source produces the same bundle across worktrees
+without repository revision or build-location metadata; any changed host assembly or runtime file
+still changes the fingerprint. An equal live
 fingerprint skips staging, while a different fingerprint is copied and verified in one
 digest-derived version directory.
 
@@ -635,9 +638,10 @@ and dynamically allocated non-production ports. Tests never bind production port
 - **Shared source over a Shared runtime dependency:** the terminal-page literals are linked into both
   assemblies from one source file. The client API stays stable, protocol edits rebuild the host, and
   unrelated dashboard shared-model edits cannot add `Shared.dll` or stage a host update.
-- **Exact SDK over feature-band roll-forward:** the repository and CI use SDK `10.0.401` from
-  `global.json`. Toolchain changes require an explicit policy edit and remain covered by the full
-  bundle fingerprint.
+- **Patch-only fallback over feature-band roll-forward:** newer servicing patches remain usable
+  when the requested SDK is absent, without changing feature bands. Reproducible bundles require
+  matching resolved SDKs and dependencies; the full-bundle fingerprint still detects any resulting
+  byte changes.
 - **Native-only card session state:** embedded terminals do not change `HasActiveSession`; coding-tool
   activity remains the agent indicator.
 - **Cleanup sequencing before host-wide replacement:** delete/archive retains its canonical-path
@@ -653,7 +657,7 @@ and dynamically allocated non-production ports. Tests never bind production port
 | `src/TerminalHostLayout/Layout.fs` | Shared state/staging paths, version-directory grammar, executable names, and required host bundle members |
 | `src/Shared/TerminalPageMessage.fs` | Single source of truth for terminal-page messages, compiled into both Shared and TerminalHost without a runtime assembly dependency |
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
-| `global.json` and `.github/workflows/ci.yml` | Exact repository SDK policy and CI installation from that policy |
+| `global.json` and `.github/workflows/ci.yml` | Repository SDK patch-fallback policy and CI installation from that policy |
 | `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, authenticated control client, staged-executable selection, and the one-pass update sequence |
 | `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, cleanup reservation, command-capable start, and authoritative snapshot reconciliation |
