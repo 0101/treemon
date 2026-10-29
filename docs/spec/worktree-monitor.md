@@ -144,16 +144,11 @@ launches and deploy/restart require an external PowerShell window; see `docs/spe
 - PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
 - Event log (up to the last 2 events), diff/auto-sync/terminal/delete actions
-- Authored canvas documents appear in an edge-to-edge strip immediately above the console, using
-  the canvas pane's tab styling. Each preview shows its filename without `.html`, followed by its
-  compact modification age. Documents sort newest-first with filename ties; the newest prefix
-  fits one line, truncating only titles, followed by `+X` hidden docs and a canvas glyph.
-  SystemViews do not count, and an empty authored inventory hides the strip. Compact cards place
-  it below their details. Unviewed or content-changed docs remain at full contrast; viewed previews
-  use the canvas pane's dimmed tab styling and shared content-hash read state. Activating a tab
-  opens the pane on that exact document. The currently visible document uses the pane's active
-  treatment without dimming; if it is hidden among older docs, `+X` carries that highlight instead,
-  preserving newest-first order. Closing the pane clears the card's active treatment.
+- Authored canvas documents appear in an edge-to-edge, persistent one-line strip above the full
+  card's console or below compact-card details. Newest-first tabs open exact documents and share
+  the pane's white unread, dimmed viewed, and active styling; `+X` counts overflow. SystemViews are
+  excluded and an empty strip is hidden. `docs/spec/canvas-pane.md` (Worktree-Card Documents) owns
+  ordering, fitting, and awareness behavior.
 - Always-visible robot-head Agent action starts a fresh embedded terminal for the worktree, submits exactly `copilot --yolo`, and selects the returned terminal in the terminal pane
 - Green left border on cards with active terminal sessions
 - Contextual action buttons: fix PR comments, fix failed builds, and create PRs
@@ -481,9 +476,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Generic `SessionBridge` under canvas routing: session registration, liveness, queueing, and prompt forwarding are shared infrastructure; `CanvasBridge` retains only document ownership and canvas-specific message semantics.
 - New session fallback: wait briefly for a selected session's bridge registration, then launch a new prompted session only when neither a live bridge nor pending startup can receive the prompt; delivery failures to known live bridges stay queued for that session rather than creating parallel agents.
 - Patch-only SDK fallback over feature-band roll-forward: tolerate newer servicing patches when
-  the requested SDK is absent without changing feature bands. TerminalHost bundle reproducibility
-  requires matching resolved SDKs and dependencies; the full-bundle fingerprint detects patch-driven
-  output changes.
+  the requested SDK is absent without changing feature bands.
 - net10.0 with Fable pinned to 5.0.0: Fable 4.x deadlocks when the compiled project targets net10.0, so the client needs Fable 5 (which in turn requires Feliz 3 — the Feliz 2 compiler plugin targets the Fable 4 AST). Later Fable 5 releases each break the client: 5.1.0 made F# reflection report `option` as a union, which `Fable.SimpleJson` classifies before its option case, so every `option` field in a remoting response fails to deserialize; 5.5.0 does the same for `list` and additionally rejects `Fable.Remoting.MsgPack`'s `inline private` helpers with a check stricter than `fsc`'s own. 5.0.0 predates all three. Revisit when `Fable.SimpleJson` and `Fable.Remoting` publish fixes.
 - Windows Terminal per-window tracking via HWND is retained only for the explicit native card
   action; tabs are not independently addressable, so one tracked window per worktree remains the

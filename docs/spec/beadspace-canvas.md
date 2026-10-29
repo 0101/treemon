@@ -2,12 +2,13 @@
 
 ## Goals
 
-Add a beads issue dashboard to the canvas pane by integrating Beadspace (`cameronsjo/beadspace`) — a single-file vanilla HTML/CSS/JS dashboard. The dashboard shows a per-worktree sortable/filterable issues table with a click-to-expand detail panel for viewing descriptions, labels, and dependency counts.
+- Expose each worktree's beads issues in a sortable, filterable canvas table with expandable details.
+- Keep generated content current without discarding the user's browsing state.
 
 ## Expected Behavior
 
-- Any worktree with `.beads/beads.db` **and at least one beads issue** gets a `beads.html` canvas page auto-provisioned. Worktrees with an empty database (zero issues) do not get a dashboard.
-- If a previously-provisioned `beads.html` exists but the database now has zero issues, the dashboard is removed (file deleted) so it doesn't show an empty page.
+- Each scheduled Beads refresh provisions `beads.html` when the worktree's exported status summary
+  contains issues, and removes an existing page when that summary is empty.
 - The page renders one always-visible sortable and filterable issues table. It has no separate
   dashboard view or top navigation bar.
 - Each status **filter chip shows a count badge** of issues in that status (hidden when the count is zero); the `All` chip shows no count.
@@ -38,27 +39,31 @@ See `docs/spec/canvas-pane.md` for the generic pane behavior and the full `Agent
 
 ## Technical Approach
 
-### Beadspace Template Customization
+### Generated Template
 
-Fork `cameronsjo/beadspace:index.html` (MIT, vanilla JS) and apply:
-- **Strip the dashboard view and top nav bar** (`tm-canvas48-dsh`) — only the "All Issues" table view remains, always visible.
-- **Dark-only theme** — remove Google Fonts and the light-theme media query; remap the CSS variables to Catppuccin Mocha (the canvas pane is always dark), keeping the semantic status/priority/type colors.
-- **Poll a same-origin endpoint** instead of `issues.json` — fetch the `beads-data` URL (derived from `window.location.pathname`) every 30s, and reload on a `refresh-beads` postMessage.
-- **Add an issue detail panel** — clicking a row expands full description, labels, priority/type badges, and dependency counts.
-- **Provide selection source context** — selections within an issue row add the Beads task ID as structured `sourceContext`, keeping task identity separate from the user request and selected text.
+The self-contained template adapts the MIT-licensed `cameronsjo/beadspace` issues table to
+Catppuccin Mocha, without external fonts, a light theme, or a separate dashboard/navigation view.
+It derives its same-origin `beads-data` URL from the document location. Selections within an issue
+row add the Beads task ID as structured `sourceContext`, separate from the user request and text.
 
 ### Same-Origin Data Endpoint
 
-`GET /{encodedWorktreePath}/beads-data` on the canvas doc server (port 5002) runs `bd list --json` against the worktree's `.beads/beads.db` and returns the issue array as `application/json` (`Cache-Control: no-cache`). It validates the worktree is known (the same `isKnownWorktree` check as HTML serving; no path validation is needed for this virtual endpoint). The template consumes the `bd` issue shape, not the GitHub Issues format.
+`GET /{encodedWorktreePath}/beads-data` on the canvas doc server (port 5002) runs `bd list --json`
+against the worktree's `.beads/beads.db` and returns the issue array as `application/json`
+(`Cache-Control: no-cache`). The route uses the same normalized known-worktree lookup as document
+serving. The template consumes the `bd` issue shape, not the GitHub Issues format.
 
 ### Auto-Provisioning
 
-In the refresh scheduler, when scanning worktrees:
-- If `.beads/beads.db` exists AND has at least one issue → ensure `.agents/canvas/beads.html` matches the current template: write it when absent, and rewrite it when the on-disk content differs from `BeadspaceTemplate.html` (so template fixes reach existing worktrees on the next refresh after a deploy)
-- If `.beads/beads.db` has zero issues AND `.agents/canvas/beads.html` exists → delete `beads.html`
-- Template is the `BeadspaceTemplate.html` file, embedded into the Server assembly as a resource and read once at startup by the `BeadspaceTemplate.fs` module (exposed as the `BeadspaceTemplate.html` value) — one definition shared by the runtime and the E2E tests
-- Creates `.agents/canvas/` directory if needed
-- `beads.html` is a generated view kept in sync with the template — it is not meant to be user-customized
+`RefreshScheduler` passes the summary from `BeadsStatus.getBeadsData` to `BeadspaceProvisioner`
+after each Beads refresh. That summary comes from `.beads/issues.jsonl`, not a live database query;
+missing, empty, or unreadable export data produces zero counts. Provisioning therefore follows the
+export's freshness, while the page's data endpoint reads the live database independently.
+
+A nonzero summary ensures `.agents/canvas/beads.html` matches the embedded template, creating the
+directory and writing only when content differs. Zero counts remove an existing page.
+`BeadspaceTemplate.fs` loads the embedded HTML once; browser tests read the same source file.
+The generated page is not user-customizable because subsequent refreshes restore the template.
 
 ### Incremental Data Refresh
 
@@ -70,11 +75,12 @@ The template distinguishes the initial render from subsequent polls:
 
 | File | Purpose |
 |------|---------|
-| `src/Server/BeadsStatus.fs` | `getBeadsIssueList` (full issue JSON) and `getBeadsSummary` (status counts) |
-| `src/Server/Program.fs` | `beads-data` route on CanvasDocServer (port 5002) |
+| `src/Server/BeadsStatus.fs` | Live issue JSON and exported summary/planning data |
+| `src/Server/CanvasDocServer.fs` | Known-worktree `beads-data` route |
 | `src/Server/BeadspaceTemplate.html` | Beadspace template — single source of truth (embedded resource; also read from disk by the E2E tests) |
 | `src/Server/BeadspaceTemplate.fs` | Reads the embedded `BeadspaceTemplate.html` resource at startup, exposing it as the `html` value |
-| `src/Server/RefreshScheduler.fs` | Auto-provision logic on worktree scan |
+| `src/Server/BeadspaceProvisioner.fs` | Template synchronization and empty-summary removal |
+| `src/Server/RefreshScheduler.fs` | Beads refresh and provisioning orchestration |
 
 ## Related Specs
 

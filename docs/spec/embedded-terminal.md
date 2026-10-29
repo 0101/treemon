@@ -477,11 +477,9 @@ The terminal-page `postMessage` vocabulary lives in
 project or runtime dependency on `Shared.dll`; dashboard-only shared types therefore cannot change
 the host bundle.
 
-`global.json` requests .NET SDK `10.0.401`, preferring that exact version and allowing only newer
-installed patches in the same `10.0.4xx` feature band when it is absent; prereleases are excluded.
-Both CI jobs install the requested version. Patch fallback can change compiler or SDK-bundled
-dependency bytes without a policy edit, so identical source alone does not guarantee identical
-TerminalHost bundles across different resolved SDKs.
+The SDK selection policy lives in `docs/spec/worktree-monitor.md` (Build Toolchain). Its patch
+fallback can change compiler or SDK-bundled dependency bytes, so identical source alone does not
+guarantee identical TerminalHost bundles across different resolved SDKs.
 
 Deployment fingerprints the complete non-PDB TerminalHost bundle. Release host and layout builds
 map source and artifact directories to stable paths, and the Server's initial host/layout project
@@ -489,8 +487,8 @@ references use the same compiler settings as its nested host publish. The host's
 plane message match also avoids embedding a worktree-local compiler exception path. With the same
 resolved SDK and dependency inputs, identical source produces the same bundle across worktrees
 without repository revision or build-location metadata; any changed host assembly or runtime file
-still changes the fingerprint. An equal live
-fingerprint skips staging, while a different fingerprint is copied and verified in one
+still changes the fingerprint. An equal live fingerprint skips staging, while a different
+fingerprint is copied and verified in one
 digest-derived version directory.
 
 The replay buffer is raw and capped at 1 MiB in memory. Terminal bytes, prompts, environment
@@ -638,10 +636,6 @@ and dynamically allocated non-production ports. Tests never bind production port
 - **Shared source over a Shared runtime dependency:** the terminal-page literals are linked into both
   assemblies from one source file. The client API stays stable, protocol edits rebuild the host, and
   unrelated dashboard shared-model edits cannot add `Shared.dll` or stage a host update.
-- **Patch-only fallback over feature-band roll-forward:** newer servicing patches remain usable
-  when the requested SDK is absent, without changing feature bands. Reproducible bundles require
-  matching resolved SDKs and dependencies; the full-bundle fingerprint still detects any resulting
-  byte changes.
 - **Native-only card session state:** embedded terminals do not change `HasActiveSession`; coding-tool
   activity remains the agent indicator.
 - **Cleanup sequencing before host-wide replacement:** delete/archive retains its canonical-path
