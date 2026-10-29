@@ -11,6 +11,7 @@
     <Compile Include="WorktreeFocus.fs" />
     <Compile Include="CanvasTypes.fs" />
     <Compile Include="Components.fs" />
+    <Compile Include="CanvasTab.fs" />
     <Compile Include="ModalOverlay.fs" />
     <Compile Include="WorktreeSearch.fs" />
     <Compile Include="CreateWorktreeModal.fs" />
@@ -21,6 +22,7 @@
     <Compile Include="TerminalPane.fs" />
     <Compile Include="CanvasPane.fs" />
     <Compile Include="CanvasAwareness.fs" />
+    <Compile Include="CanvasDocStrip.fs" />
     <Compile Include="CanvasState.fs" />
     <Compile Include="MascotState.fs" />
     <Compile Include="MascotView.fs" />

@@ -770,20 +770,10 @@ let update msg model =
                 |> filterDeletedPaths model.DeletedPaths
             let currentCanvasHashes = canvasHashesByScopedKey repos
             let currentCanvasModified = canvasModifiedByScopedKey repos
-            let existingCanvasEvents =
-                retainAgentDocEvents currentCanvasHashes model.Canvas.CanvasEvents
-            let canvasEvents =
-                if isFirstLoad then existingCanvasEvents
-                else
-                    let newEvents =
-                        detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
-                        |> gateCanvasEventsByFreshness now currentCanvasModified
-                    mergeCanvasEvents existingCanvasEvents newEvents
-                    |> expireCanvasEvents now
             let changedDocs =
                 if isFirstLoad then []
                 else
-                    detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                    detectChangedCanvasDocs model.Canvas.PreviousCanvasHashes currentCanvasHashes
                     |> List.filter (fun (scopedKey, filename) -> isCanvasDocFresh now currentCanvasModified scopedKey filename)
             let nowMs = now.ToUnixTimeMilliseconds() |> float
             let isIdle = nowMs - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
@@ -841,7 +831,6 @@ let update msg model =
                 Canvas.CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
                 Canvas.WorkspaceWidth = if isFirstLoad then response.WorkspaceWidth else model.Canvas.WorkspaceWidth
                 Canvas.PreviousCanvasHashes = currentCanvasHashes
-                Canvas.CanvasEvents = canvasEvents
                 Canvas.CanvasSendState = canvasSendState }
             |> reconcileDashboardVisibility
             |> (fun m ->
@@ -1270,11 +1259,10 @@ let update msg model =
             completed, Cmd.none
 
     | Tick now ->
-        // Tick stays in the root update because it also expires canvas events and drives the
+        // Tick stays in the root update because it drives the
         // worktree/card-event poll; only the activity-recompute delegates to ActivityUpdate.
         let activity, reportCmd = ActivityUpdate.tickActivity now model.Activity
         let nowDto = System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)
-        let expiredEvents = expireCanvasEvents nowDto model.Canvas.CanvasEvents
 
         // A queued canvas message is honestly pending, not failed: it is delivered to the
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
@@ -1321,7 +1309,7 @@ let update msg model =
                 { model with EmbeddedTerminalPollInFlight = true },
                 fetchEmbeddedTerminals worktreeApi
 
-        { model with Now = nowDto; Activity = activity; Canvas.CanvasEvents = expiredEvents }
+        { model with Now = nowDto; Activity = activity }
         |> reconcileDashboardVisibility,
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd; terminalCmd ]
 
@@ -2255,14 +2243,15 @@ let view model dispatch =
         |> String.concat " "
 
     let cardProps: CardViewProps =
-        { EditorName = model.EditorName
+        { Now = model.Now
+          LastViewedHashes = model.Canvas.LastViewedHashes
+          EditorName = model.EditorName
           IsCompact = model.IsCompact
           FocusedElement = model.FocusedElement
           BranchEvents = model.BranchEvents
           ActionCooldowns = model.ActionCooldowns
           AutoSyncPending = model.AutoSyncPending
-          CanvasEvents = model.Canvas.CanvasEvents
-          CanvasPaneOpen = canvasPaneOpen }
+          ActiveCanvasDoc = if canvasPaneOpen then CanvasUpdate.activeVisibleDoc model else None }
 
     let cardCallbacks: CardCallbacks =
         { FocusCard = fun key -> dispatch (SetFocus (Some (Card key)))

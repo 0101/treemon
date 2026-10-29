@@ -4,7 +4,7 @@
 
 - Rich visual channel for agents to present interactive HTML documents to users
 - Per-worktree doc management with tabs, archive, and overview-driven discovery
-- Awareness so users notice new or updated docs through badges, auto-display, and card notifications
+- Awareness so users notice new or updated docs through badges, auto-display, and card document strips
 - Per-doc liveness so users can see which docs still have a live author session
 - Per-doc message routing so interactions reach the document's assigned target session
 - Restart-safe rendering from disk so docs survive session, app, and machine restarts
@@ -50,7 +50,8 @@ The session-document machinery exists for an interactive document authored and o
 | `canvasSend` + selected-text Explain / Remove / Comment actions | yes | yes |
 | Interaction-session routing | explicitly assigned author | resolved per interaction from live session activity |
 | DOM morph (idiomorph runtime + controller + signal) | yes | no |
-| Content-hash awareness (unviewed badge, auto-display, card notification) | yes | no — beads "newness" lives on the card as `BeadsSummary` |
+| Content-hash awareness (unviewed badge, auto-display) | yes | no — beads "newness" lives on the card as `BeadsSummary` |
+| Worktree-card document strip | yes | no |
 | Archive button | yes | no (server-regenerated, not user-owned) |
 | Share button | yes | no (server-generated, not shareable) |
 
@@ -150,8 +151,11 @@ falling back to a plain join.
 - Selecting a tab marks that doc viewed. When its effective session matches a terminal in the
   targeted worktree, selection also selects that terminal without opening, revealing, or focusing
   the Terminal pane.
-- Viewed but inactive tabs render at 0.5 opacity, preserving the original whole-tab treatment. The
-  active tab stays full opacity.
+- Unviewed filenames use pure white (`#fff`); active blue and terminal-linked green take precedence,
+  while ages stay muted. Viewed but inactive tabs render at 0.5 opacity. The active tab stays full
+  opacity. Pane tabs and worktree-card tabs share state-class resolution, filename labels, compact
+  ages, selection-button behavior, and the same CSS; copy overlays, liveness, terminal links, and
+  standalone-browser double-click controls remain pane-specific.
 - The archive button moves the active doc to `.agents/canvas/archive/`. It is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-regenerated, not user-owned, so it has no archive button.
 - The share button publishes the active doc to an unguessable, auto-expiring authenticated-viewer URL and copies a rich titled link to the clipboard. Like archive, it is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-generated, not shareable, so it has no share button. Clipboard success uses the dismissible `ClipboardNotice` channel (green), independent of the send `Waiting` and delivery-`Failed` banners: a successful publish shows `Shared — link copied` (or `Shared — link ready, copy it manually: <url>` when the async clipboard write is rejected), while a *failed* publish reuses the existing red `CanvasSendState.Failed` error banner. Success and failure are mutually exclusive — each result arm clears the other channel — so a red + green stack never renders. Share cannot start while a path copy is pending, and path copy cannot start until Share has completed its publish and clipboard phases. See `docs/spec/canvas-sharing.md` for the full publish/viewer/clipboard flow.
 
@@ -172,15 +176,42 @@ falling back to a plain join.
 - A doc is unviewed when its current `contentHash` differs from the last viewed hash, or no viewed hash exists.
 - The Canvas header button shows the total unviewed doc count across all worktrees and hides the badge when the count is 0.
 - When the pane is open, selecting a doc or showing the active visible doc marks it viewed.
-- If any doc changes while the user has been idle for at least 60 seconds, Treemon opens the pane, focuses the changed worktree, and selects the most recently modified changed doc.
-- **Select-the-worktree surfacing (active-user path).** The idle auto-display above never hijacks the view while the user is interacting. Instead, when focus *transitions onto* a worktree card that has one or more unviewed docs, that card's active doc is retargeted to its **most recently modified unviewed `AgentDoc`** — so selecting a worktree that just published/updated a doc surfaces *that* doc rather than the sticky last-open selection. Every "select the worktree" entry point (card click via `SetFocus`, keyboard arrow/Home/End navigation, and the Canvas Overview card) sets focus through the single `CanvasUpdate.applyFocus (retarget: bool) newFocus model` chokepoint, which applies the focus and performs the retarget in one place. Guards: (a) only on a genuine focus transition, except that re-selecting a card also replaces a sticky `diff.html` with another available doc; (b) only `AgentDoc` files count as newly published; (c) when nothing is unviewed the sticky last-open selection is kept unless it is `diff.html` and another doc exists. The doc is marked viewed only when the pane is open (it is actually shown); when the pane is closed the active doc is set silently so it is the one shown when the pane is next opened. "Unviewed" here is the durable `LastViewedHashes` signal, so it survives the 24-hour expiry of transient canvas notifications. The **idle auto-display** path sets focus with `retarget = false` (the `SetFocusNoRetarget` message) and selects its own target doc explicitly, so it never re-enters the active-user retarget (which would otherwise mark the wrong doc viewed before the intended one is shown).
-- Worktree cards show yellow canvas notifications for new or updated docs. Notifications expire after
-  24 hours, deduplicate by filename, render alongside the activity/title and user/assistant footer
-  lines, and click through to the relevant worktree or doc.
-- **Freshness gate (restart-phantom suppression).** Canvas events and the idle auto-display target are gated by each doc's real file `LastModified` within a short freshness window (`canvasEventFreshnessMs`, 5 min), applied in `gateCanvasEventsByFreshness`/`isCanvasDocFresh` (`CanvasAwareness.fs`). Because `detectCanvasEvents` fires on content-hash *presence* deltas between polls, a pre-existing doc that merely reappears after an incomplete snapshot — notably the empty-`CanvasDocs` window right after a server restart — would otherwise be misreported as "just published"; gating on the real mtime drops those phantoms and restamps each surviving event's timestamp with the file's true modified time. This freshness window is deliberately separate from `canvasEventExpiryMs` (now 24 h), which governs only how long an already-shown notification lingers.
-- `SystemView` docs are excluded from content-hash awareness at the source (the `awarenessDocs` filter in `CanvasAwareness.fs`): they never contribute to unviewed counts, card notifications, seeded viewed-hashes, or the idle auto-display target. The beads file hash is stable while its data changes, so it would never signal real newness — and it would morph-signal spuriously on a template/deploy edit. Beads "newness" is surfaced on the worktree card as `BeadsSummary` instead.
-- Viewed tabs dim to 0.5 opacity so unviewed docs stand out.
+- In Desktop mode, a doc change after at least 60 seconds of user inactivity opens the pane,
+  focuses the changed worktree, and selects the most recently modified changed AgentDoc. It does
+  not interrupt a document already visible in the pane or change the active One-pane tab.
+- Selecting a different worktree by card, keyboard, or Canvas Overview surfaces its most recently
+  modified unviewed AgentDoc. Otherwise the previous selection remains, except that selecting or
+  reselecting a worktree replaces a sticky `diff.html` with another available doc. Hidden-pane
+  selection does not mark a doc viewed. Explicit document selection and idle auto-display retain
+  their own targets rather than applying this retargeting a second time.
+- **Freshness gate (restart-phantom suppression).** The idle auto-display target requires a real
+  file `LastModified` within five minutes (`isCanvasDocFresh` in `CanvasAwareness.fs`). A pre-existing
+  doc that reappears after an incomplete restart snapshot therefore cannot steal focus. The card
+  strip is inventory, not a notification, and has no freshness window or expiry.
+- `SystemView` docs are excluded by the shared `agentDocs` filter in `CanvasAwareness.fs`: they
+  never contribute to the card strip, unviewed counts, seeded viewed-hashes, or idle auto-display.
+  Their stable file hashes cannot represent changes to their underlying data.
 - The Canvas Overview highlights unviewed docs by rendering them pure white (`#fff`, normal weight); viewed docs keep the muted `#6c7086`. The highlighted set is exactly `unviewedDocsByScopedKey` — the same signal the Canvas badge counts — so the overview highlight and the badge count can never disagree, and `SystemView` docs are excluded at the source. This unread text color is orthogonal to the per-doc green liveness dot (session-alive), which occupies a separate visual channel (leading dot).
+
+### Worktree-Card Documents
+
+- Full cards show a persistent one-line document strip immediately above the console; compact cards
+  place it below their details. It contains every active-inventory AgentDoc, including viewed,
+  unowned, and offline-author docs, excludes SystemViews and archived docs, and hides when empty.
+- Tabs show the filename without its final `.html` suffix and a compact modification age. They sort
+  by modification time descending, then filename. A newest-first prefix fits the available width;
+  titles ellipsize without shrinking ages, and the final tab uses the remaining space. `+X` shows
+  the exact hidden count before a canvas glyph. Tooltips expose full names and hidden documents.
+- Read styling uses the pane's durable content-hash comparison, with no age expiry: timestamp-only
+  changes stay viewed, while changed content becomes unviewed with white filename text. The actually
+  visible pane document is active and undimmed in its own card, independently of dashboard focus.
+  If hidden in the newest-first prefix's overflow, `+X` carries its active treatment and identifies
+  it in the tooltip. Hiding the pane removes that treatment; older active documents are never pinned
+  or reordered.
+- Activating a tab by mouse or native Enter/Space opens that exact document through the shared
+  reveal/read transition without triggering dashboard terminal shortcuts. Rendering the strip or
+  focusing a card with the pane hidden does not mark anything viewed. Publish/update notifications
+  do not enter the console; normal activity, user/assistant messages, and other events remain.
 
 ### Liveness and Session Routing
 
@@ -263,7 +294,7 @@ falling back to a plain join.
   payload while still handling historical flat `[canvas]` messages. The resulting dashboard field is
   `UserFooterMessage { Glyph; Text; Timestamp }`; activity titles use the same text projection so
   duplicate footer lines remain suppressible.
-- Client send state is modeled as `CanvasSendState = Idle | Waiting of scopedKey: string | Failed of message: string`. The `Waiting` case carries the target worktree's `scopedKey` rather than a timestamp, so the banner is cleared only by that worktree's delivery (see Message Queue and the `CanvasSendState` decision).
+- Client send state is modeled as `CanvasSendState = Idle | Waiting of scopedKey: string | Failed of message: string`. The `Waiting` case identifies the target worktree so unrelated document changes cannot clear its banner (see Message Queue).
 
 ### Message Queue
 
@@ -277,7 +308,10 @@ falling back to a plain join.
   are targeted to the exact launched terminal via current activity-origin joins, never the next
   arbitrary registration. See `docs/spec/canvas-interaction-routing.md`.
 - While queued, the client shows a `Waiting for session…` banner instead of an immediate error.
-- The banner clears to `Idle` only when the target worktree's session actually delivers (never flipped to `Failed` by a wall-clock timer). The user may dismiss it manually, and the server may silently expire the message after its TTL.
+- A fresh AgentDoc content change observed in the target worktree clears the banner to `Idle`.
+  This is a response signal, not a transport-delivery acknowledgement; unrelated worktree changes
+  cannot clear it. There is no wall-clock failure transition. The user may dismiss the banner
+  manually, and the server may silently expire the message after its TTL.
 
 ### Bridge Protocol
 
@@ -329,15 +363,16 @@ falling back to a plain join.
 
 ### DOM Morph and State Persistence
 
-Three layers of state preservation:
+State preservation uses these layers:
 
-**Level 1 — In-page data refresh (shipped):**
-- Per-template incremental DOM updates. Beadspace template shipped with stat-in-place, tbody-only table refresh, and scroll/nav/filter/panel preservation.
+**Level 1 — In-page data refresh:**
+- Self-refreshing SystemViews preserve their own state. Beadspace updates its table body and filter
+  counts while retaining scroll position, search, sorting, filters, and expanded issue details.
 
 **Level 2 — Auto-display guard:**
 - When the canvas pane is open and showing a doc, the auto-display idle trigger (60s idle + changed doc) must not steal focus to a different worktree.
 - Auto-display may still fire when the pane is closed or showing the overview.
-- Without this guard, the iframe unmounts when focus switches, destroying all JS state. On switch-back the iframe remounts fresh, resetting nav tabs (e.g., beadspace "All Issues" jumps to "Dashboard").
+- A worktree switch unmounts its canvas iframes, so suppressing that switch preserves in-page state.
 
 **Level 3 — Canvas-wide live update (general case):**
 - On `contentHash` change, an AgentDoc without authored browser-processed scripts morphs in place (via injected idiomorph), so scroll position and focused-element identity stay intact. Immediately before the morph, the controller snapshots user-edited `<input>`/`<textarea>` values and dirty `checked` state on checkbox/radio inputs (current value or checked state differs from the authored default) and restores them afterward, including the active field's selection. Untouched fields still receive the new authored value or checked state, removed or retyped controls are not recreated, and restoration happens after mutation capture so user edits are not highlighted as an agent edit. The client sends a `content-updated` postMessage on hash change and keeps the iframe `src` stable for this static-document path.
@@ -353,8 +388,7 @@ the morph marks what it changed. Script-backed updates reload and receive no cha
 `src/Extension/canvas-morph.js` wraps `Idiomorph.morph` in a `MutationObserver`;
 because idiomorph writes a node only when its value actually differs, the resulting records *are*
 the diff. Each is promoted to its nearest block, deduplicated, and given the `canvas-updated` class
-(yellow `#f9e2af` at `.22`, the same colour worktree-card canvas notifications and the diff viewer's
-changed rows already use).
+(yellow `#f9e2af` at `.22`, the same colour the diff viewer's changed rows use).
 
 - **No expiry.** Idiomorph reconciles every matched element's attributes against the file on the
   next morph, which strips the class by itself — so the highlight lasts exactly until the next edit
@@ -410,11 +444,23 @@ changed rows already use).
 
 ## Technical Approach
 
-- The client is Elmish/Fable. It polls `DashboardResponse`, stores canvas UI state locally, and routes iframe messages through Elmish before calling Remoting.
+- The client is Elmish/Fable. `AppTypes` defines the shared model/messages; `App` owns one root
+  update and delegates canvas transitions to `CanvasUpdate`. `CanvasState` owns pure selection,
+  iframe residency, and loaded-hash reconciliation; `CanvasView` composes pane state and callbacks.
+  Poll responses and iframe messages enter through Elmish, and application effects use commands.
 - The server keeps `CanvasDoc list` in scheduler state beside git, PR, and coding-tool data. `CanvasScanner` computes hashes and `CanvasWatchers` pushes filesystem changes into the same mailbox.
 - `Program.fs` hosts the main app/API on port 5000 and the canvas doc server on port 5002. `SessionBridge` owns generic live registration, queueing, forwarding, and liveness; `CanvasBridge` owns canvas document routing and ownership semantics.
 - Security relies on separate origin plus `postMessage`: docs cannot call privileged app endpoints directly, and the parent validates sender origin before forwarding anything.
-- Canvas awareness helpers stay pure: `detectCanvasEvents` and `expireCanvasEvents` take `now` as an argument instead of capturing the clock internally.
+- Canvas awareness and document ordering/fitting stay pure. Clock values come from the model;
+  strip width measurements use a component-local ResizeObserver, update only local layout state,
+  and disconnect on unmount.
+- `CanvasTab` owns shared tab attributes, active/read/terminal-linked class policy, filename labels,
+  and compact age markup. Both hosts compose their own layout and controls around it; card clicks
+  dispatch the existing `OpenCanvasDoc` action rather than implementing a second navigation flow.
+  Overflow measurements include the selected `+X` treatment when its hidden group contains the
+  open document.
+- Worktree selection uses `CanvasUpdate.applyFocus`; explicit document selection, pane reopen, and
+  archive fallback share the reveal/read/synchronization transition.
 - The Elmish `update` reads no wall-clock; time enters only via message payloads (e.g. a `Tick` carrying `now`), keeping `update` a pure function of `(model, msg)`.
 
 ## Key Files
@@ -428,14 +474,16 @@ changed rows already use).
 | `src/Server/CanvasFilename.fs` | Server-side embedded-resource loader and exact-match validator |
 | `src/Server/CanvasDocKinds.fs` | Server classifier backed by the shared browser/server SystemView filename list |
 | `src/Client/CanvasSessionPrompt.fs` | Unowned AgentDoc startup prompt using the shared JSON document identity |
-| `src/Client/App.fs` | Elmish `init`/`update` logic and the top-level `view` wiring (the `Model`/`Msg` types and shared plumbing live in `AppTypes.fs`; the canvas model slice in `CanvasState.fs`; the canvas `update`-arm bodies in `CanvasUpdate.fs`; the canvas pane view wiring in `CanvasView.fs` — each canvas arm here is a one-line delegation) |
-| `src/Client/AppTypes.fs` | Foundation module: the Elmish `Model` + `Msg` types plus shared plumbing (`worktreeApi` lazy proxy, `findWorktree`, `saveCollapsedReposCmd`) used by both `App.fs` and the canvas update arms. Compiled after `CanvasState.fs` and before `CanvasUpdate.fs`/`App.fs` so canvas update logic can be lifted out of `App.fs` without a cyclic reference. Type relocation only — `update` stays a single function in `App.fs`. |
-| `src/Client/CanvasUpdate.fs` | Canvas `update`-arm bodies extracted from `App.fs` (Toggle/SetWorkspaceWidth/Select/Open/Archive(+Result)/CopyPath(+Result+Reset)/Share(+Result)/ClipboardWriteResult/DismissClipboardNotice/Navigate/MessageReceived/SendResult/Dismiss/LaunchCanvasSession/Morph*), effective-session terminal selection, the shared canvas helpers (`activeVisibleDoc`, `reconcileMountedDocs`, `syncVisibleDocCmd`, `applyFocus`), and the `messageListener` subscription glue. App.fs delegates one arm → one function. Compiled after `AppTypes.fs` and before `App.fs`. Body extraction only — `update` stays one function (no sub-`Msg`/`Cmd.map`). |
-| `src/Client/CanvasState.fs` | Canvas pane model slice — the `CanvasState` record (compiled before `App.fs`, nested as `Model.Canvas`) plus pure active-doc, rendered-iframe, mounted-hash reconciliation, and LRU helpers |
-| `src/Client/CanvasView.fs` | Canvas pane view wiring extracted from `App.fs`'s `view`: `focusedWorktreeCanvasDoc` plus the block that builds `CanvasPaneState` + `CanvasPaneCallbacks`, links effective sessions to terminal selection, and renders `CanvasPane.view`. Compiled after `CanvasUpdate.fs`, before `App.fs`. |
+| `src/Client/App.fs` | Root Elmish update, polling, subscriptions, and top-level view wiring |
+| `src/Client/AppTypes.fs` | Application model/messages and shared command plumbing |
+| `src/Client/CanvasUpdate.fs` | Canvas transitions, reveal/read synchronization, effective-session terminal selection, and iframe-message subscription |
+| `src/Client/CanvasState.fs` | Canvas model slice, active-doc selection, rendered-iframe hashes, and visited-document LRU |
+| `src/Client/CanvasView.fs` | Pane state/callback composition and effective-session terminal links |
 | `src/Client/CanvasPane.fs` | Pane layout, overview, tab bar, effective-session terminal links, liveness dot, iframe, banners, and message listener |
 | `src/Client/Navigation.fs` | `CanvasSendState` DU |
-| `src/Client/CanvasAwareness.fs` | Pure helpers for doc awareness: recording/seeding viewed hashes (`markDocViewed`, `seedLastViewedHashes`), unviewed detection (`unviewedDocsByScopedKey`, `mostRecentUnviewedDoc`), canvas events, auto-display |
+| `src/Client/CanvasAwareness.fs` | AgentDoc eligibility, viewed hashes, unread detection, content-hash changes, and fresh idle auto-display |
+| `src/Client/CanvasDocStrip.fs` | Authored-document card strip with newest-first ordering, title/age previews, and local responsive fitting |
+| `src/Client/CanvasTab.fs` | Shared canvas tab presentation and native selection-button behavior for pane and card hosts |
 | `src/Client/index.html` | Canvas layout, badge, tab, banner, liveness, and overview styling |
 | `src/Server/RefreshScheduler.fs` | Canvas scanning, content hashing, watcher lifecycle, scheduler state updates |
 | `src/Server/WorktreeApi.fs` | Canvas config persistence, archive endpoint, send routing, bridge-liveness API wiring |
@@ -471,13 +519,13 @@ changed rows already use).
 - **Split bridge registry** — `SessionBridge.sessionRegistry` and `pollRegistry` are separate so iframe heartbeats cannot clobber session-backed routing.
 - **Injected heartbeat script** — authored documents report poll liveness without gaining authority
   to consume session-addressed queues.
-- **`CanvasSendState` DU** — send state is `Idle`, `Waiting of scopedKey`, or `Failed of message`, avoiding illegal combinations of optional fields. `Waiting` carries **only** the target worktree's `scopedKey` (`WorktreePath.value`, the same key space as `agentChangedDocs`); the earlier `queuedAt` timestamp and the wall-clock failure timer were removed (Finding C-02) because a queued message lives in the server-side queue and is delivered when its *target* session registers, so `Waiting` is cleared on delivery (`clearWaitingOnDelivery`) and is never reported as a failure on a timer. `CanvasSendResult` likewise dropped its `now` argument, removing two `Date.now()` reads from the send command and keeping `update` wall-clock-free.
-- **Kind-split routing** — an AgentDoc persists its author `sessionId` and only AgentDocs expose it for liveness UI; a SystemView stores nothing and resolves its target per interaction from live session activity.
-- **Two canvas doc kinds** — `CanvasDoc.Kind` (`AgentDoc | SystemView`, classified by filename in `CanvasScanner`) gates authored-document machinery. A `SystemView` opts out of author liveness, Start-session, morph, content-hash awareness, and archiving, but participates in generic selected-text interactions through resolved routing. It gets a distinct far-left `.canvas-system-tab` affordance instead of a normal doc tab.
+- **Scoped waiting state** — `CanvasSendState` distinguishes idle, queued, and failed outcomes.
+  Waiting retains the target worktree rather than a timer: delayed delivery is not a failure, and
+  only that worktree's fresh authored-document change supplies the automatic response signal.
+- **Kind controls lifecycle and routing** — authored ownership is durable, while generated views
+  resolve sessions from current activity. Generated views retain generic interactions without
+  acquiring an artificial author or authored-document lifecycle.
 - **Loaded-hash iframe synchronization** — `CanvasState.MountedAgentDocHashes` maps each actually rendered AgentDoc iframe to the content hash it has loaded. `DataLoaded` reconciles that map against the current rendered set while preserving loaded hashes for surviving iframe keys; fresh mounts receive current hashes. A visible loaded/current mismatch emits a document-scoped morph, while hidden and collapsed-pane mismatches wait for the shared reveal transition. Successful matching completion advances only that iframe's loaded hash to the hash of the raw bytes the refetch actually served. This handles delayed polls, worktree remounts, pane closure, archive fallback, and content reverts without conflating visit history with DOM residency.
-- **`Model`+`Msg` lifted into `AppTypes.fs`** — the Elmish `Model` and `Msg` types, plus the shared plumbing the canvas update arms need (`worktreeApi`, `findWorktree`, `saveCollapsedReposCmd`), live in `src/Client/AppTypes.fs` (compiled after `CanvasState.fs`, before `CanvasUpdate.fs`/`App.fs`). This is a pure type/value relocation that creates a compile-order seam: the canvas update arms are extracted into `CanvasUpdate.fs` (compiled between `AppTypes.fs` and `App.fs`) without a cyclic reference, while `update` remains a single function in `App.fs` (no sub-`Msg`/`Cmd.map` split). Consumers that previously reached these via `open App` (three test files) add `open AppTypes`; nothing references them by `App.`-qualified name (the activity helper once at `App.computeActivityLevel` now lives in `ActivityState.fs`).
-- **Canvas `update` arms extracted into `CanvasUpdate.fs`** — the canvas `update`-arm bodies (`ToggleCanvasPane`, `SetWorkspaceWidth`, `SelectCanvasDoc`, `OpenCanvasDoc`, `ArchiveCanvasDoc`, `ArchiveCanvasDocResult`, `CopyCanvasDocPath`, `CanvasDocPathCopyResult`, `ClearCanvasDocPathCopied`, `ShareCanvasDoc`, `ShareCanvasDocResult`, `ClipboardWriteResult`, `DismissClipboardNotice`, `NavigateCanvasDoc`, `CanvasMessageReceived`, `CanvasSendResult`, `DismissCanvasMessageError`, `LaunchCanvasSession`, `MorphActiveDoc`, `MorphComplete`), the active-doc/reveal/mounted-hash helpers, and the `messageListener` subscription glue live in `src/Client/CanvasUpdate.fs` (compiled after `AppTypes.fs`, before `App.fs`). Each canvas arm in `App.fs` delegates to this module while `update` remains one function over the flat `Msg` (no sub-`Msg`/`Cmd.map` split).
-- **Canvas model slice as a nested record** — canvas state is a nested `Canvas: CanvasState.CanvasState` record on `App.Model`. `CanvasState.fs` owns pure active-document selection, visited-LRU, rendered-AgentDoc, and loaded-hash reconciliation functions over explicit model slices; `CanvasUpdate.fs` owns the `Model`/`Msg` transitions that compose them.
 - **Exact-equality duplicate coalescing** — the extension queue compares the prepared prompts exactly on transport kind and session prompt text. It adds no revision metadata or further content normalization, and a payload stops being pending the moment it is handed to `session.send` (`createSendQueue`, key deleted before the call so a rejected send leaves nothing stale). Suppression therefore only ever removes a message that would repeat an undelivered one. The server queue does not coalesce: auto-sync's durable accepted record already prevents a repeat prompt at the source.
 - **Copied paths preserve the worktree separator** — the tab copy action builds the full
   `.agents/canvas/<filename>` disk path with the separator already used by the absolute worktree
