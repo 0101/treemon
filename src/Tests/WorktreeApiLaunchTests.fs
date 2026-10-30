@@ -590,6 +590,45 @@ type WorktreeApiLaunchTests() =
             assertTerminalCommandAccepted agentCommand
             assertTerminalCommandAccepted resumeCommand)
 
+    [<TestCase("model&rem")>]
+    [<TestCase("model%PATH%")>]
+    [<TestCase("model\"with-quote")>]
+    member _.``prompted API methods reject unsafe models before terminal startup``(model: string) =
+        withTempDir "treemon-unsafe-launch-model" (fun root ->
+            let path = PathUtils.toWorktreePath root
+            let calls = ConcurrentQueue<string>()
+            let dependencies: TerminalLaunch.PromptedAgentDependencies =
+                { StartCommand =
+                    fun _ command ->
+                        calls.Enqueue command
+                        async.Return(Error "Unexpected terminal startup")
+                  CloseTerminal =
+                    fun _ ->
+                        calls.Enqueue "close"
+                        async.Return(Ok EmbeddedTerminalSnapshot.empty)
+                  Timeout = TimeSpan.FromSeconds 5.0 }
+            let terminalLaunch =
+                promptedLaunchOnly (TerminalLaunch.startPromptedAgentWith dependencies)
+            let api = createApi root path None terminalLaunch
+            let session =
+                api.launchSession { Path = path; Prompt = "Initial task"; Model = Some model }
+                |> runAsync
+            let actions =
+                [ FixPr "https://example.test/pr/42"
+                  FixBuild "https://example.test/build/42"
+                  CreatePr ]
+                |> List.map (fun action ->
+                    api.launchAction { Path = path; Action = action; Model = Some model })
+                |> Async.Sequential
+                |> runAsync
+            let expected: Result<EmbeddedTerminalStartResult, PromptedLaunchError> =
+                Error PromptedLaunchError.InvalidModelId
+
+            Assert.Multiple(fun () ->
+                Assert.That(session, Is.EqualTo expected)
+                actions |> Array.iter (fun result -> Assert.That(result, Is.EqualTo expected))
+                Assert.That(calls, Is.Empty)))
+
     [<Test>]
     member _.``prompted API methods preserve structured startup cleanup failure``() =
         withTempDir "treemon-typed-launch-failure" (fun root ->

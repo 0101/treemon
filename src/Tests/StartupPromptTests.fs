@@ -6,6 +6,7 @@ open System.IO
 open System.Net
 open System.Text.Json
 open System.Threading.Tasks
+open FsToolkit.ErrorHandling
 open NUnit.Framework
 open Shared
 open Server
@@ -877,6 +878,7 @@ type StartupCommandTransportTests() =
 
     [<TestCase("")>]
     [<TestCase("gpt-6.1-sol")>]
+    [<TestCase("provider/GPT_6.1-sol:preview+1")>]
     member _.``CMD launcher receives fresh startup flags and optional model without a session selector``(model: string) =
         withTempDir "treemon-startup argv owner's fixture" (fun root ->
             let selectedModel = if model = "" then None else Some model
@@ -884,8 +886,10 @@ type StartupCommandTransportTests() =
             let shimPath = Path.Combine(root, "copilot.cmd")
             let recordingPath = Path.Combine(root, "argv.jsonl")
             let command =
-                CodingToolCli.build None (CodingToolCli.NewSession selectedModel)
-                |> _.AsShellString
+                selectedModel
+                |> Option.traverseResult CodingToolCli.ModelId.create
+                |> Result.map (fun model -> (CodingToolCli.build None (CodingToolCli.NewSession model)).AsShellString)
+                |> Result.defaultWith (PromptedLaunchError.message >> invalidOp)
 
             File.WriteAllText(
                 shimPath,

@@ -102,6 +102,7 @@ All commands accept `--port` (default: 5000, env: `TREEMON_PORT`). You can also 
 Any `tm launch` action accepts `--model <model-id>` to select the Copilot model for that launch,
 for example `tm launch --path C:\code\my-project --prompt-file task.md --model gpt-6.1-sol`.
 Omitting it leaves Copilot's model selection unchanged.
+Model IDs must be nonempty and contain only ASCII letters, digits, `.`, `_`, `-`, `/`, `:`, or `+`.
 
 ## Stack
 

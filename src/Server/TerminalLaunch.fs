@@ -3,6 +3,7 @@ module Server.TerminalLaunch
 open System
 open System.Text.Json
 open System.Threading
+open FsToolkit.ErrorHandling
 open Shared
 open Server.SessionActivity
 
@@ -16,7 +17,7 @@ type internal PromptedAgentDependencies =
       Timeout: TimeSpan }
 
 let internal startPromptedAgentWith dependencies provider model worktreePath prompt =
-    let operation = async {
+    let operation model = async {
         let command =
             CodingToolCli.build provider (CodingToolCli.NewSession model)
 
@@ -62,13 +63,14 @@ let internal startPromptedAgentWith dependencies provider model worktreePath pro
     }
 
     let guarded =
-        async {
+        asyncResult {
+            let! model = model |> Option.traverseResult CodingToolCli.ModelId.create
             try
-                return! operation
+                return! operation model
             with ex ->
                 let path = JsonSerializer.Serialize(WorktreePath.value worktreePath)
                 Log.logException "TerminalLaunch" $"Prompted launch failed for worktree={path}" ex
-                return Error PromptedLaunchError.Unexpected
+                return! Error PromptedLaunchError.Unexpected
         }
 
     async {

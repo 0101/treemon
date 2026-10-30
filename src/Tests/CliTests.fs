@@ -86,6 +86,20 @@ type LaunchCommandTests() =
                 Is.EqualTo([ "Error: Could not start the embedded terminal. Check the server log for details." ])))
 
     [<Test>]
+    member _.``invalid model errors explain the accepted syntax and fail the command``() =
+        let output = System.Collections.Concurrent.ConcurrentQueue<string>()
+        let errors = System.Collections.Concurrent.ConcurrentQueue<string>()
+        let exitCode =
+            writeLaunchResult output.Enqueue errors.Enqueue (Error PromptedLaunchError.InvalidModelId)
+
+        Assert.Multiple(fun () ->
+            Assert.That(exitCode, Is.EqualTo 1)
+            Assert.That(output, Is.Empty)
+            Assert.That(
+                errors.ToArray(),
+                Is.EqualTo [| "Error: Invalid Copilot model ID. Use only ASCII letters, digits, '.', '_', '-', '/', ':', or '+'." |]))
+
+    [<Test>]
     member _.``typed startup cleanup failure renders a complete CLI error``() =
         let output = System.Collections.Concurrent.ConcurrentQueue<string>()
         let errors = System.Collections.Concurrent.ConcurrentQueue<string>()

@@ -32,13 +32,33 @@ type BuildNewSessionCommandTests() =
         let result = (build None (NewSession None)).AsShellString
         Assert.That(result, Is.EqualTo("copilot --experimental --yolo"))
 
-    [<TestCase("gpt-6.1-sol", "gpt-6.1-sol")>]
-    [<TestCase("model's-name", "model''s-name")>]
-    [<TestCase("$(Write-Output injected); --continue", "$(Write-Output injected); --continue")>]
-    member _.``New session passes the model as one quoted argument``(model: string, escaped: string) =
-        let result = (build None (NewSession(Some model))).AsShellString
+    [<TestCase("gpt-6.1-sol")>]
+    [<TestCase("provider/GPT_6.1-sol:preview+1")>]
+    member _.``New session passes a shell-safe model as one quoted argument``(model: string) =
+        let result =
+            ModelId.create model
+            |> Result.map (fun model -> (build None (NewSession(Some model))).AsShellString)
 
-        Assert.That(result, Is.EqualTo($"copilot --experimental --yolo --model='{escaped}'"))
+        Assert.That(
+            result,
+            Is.EqualTo(Ok $"copilot --experimental --yolo --model='{model}'" : Result<string, PromptedLaunchError>))
+
+    [<TestCase(null)>]
+    [<TestCase("")>]
+    [<TestCase(" ")>]
+    [<TestCase("model&rem")>]
+    [<TestCase("model%PATH%")>]
+    [<TestCase("model\"with-quote")>]
+    [<TestCase("model's-name")>]
+    [<TestCase("model!NAME!")>]
+    [<TestCase("model^name|other>file")>]
+    [<TestCase("$(Write-Output ignored); --continue")>]
+    [<TestCase("model\nname")>]
+    [<TestCase("m\u00f8del")>]
+    member _.``Model identifiers reject empty values and shell syntax``(model: string) =
+        Assert.That(
+            ModelId.create model,
+            Is.EqualTo(Error PromptedLaunchError.InvalidModelId : Result<ModelId, PromptedLaunchError>))
 
 [<TestFixture>]
 [<Category("Unit")>]

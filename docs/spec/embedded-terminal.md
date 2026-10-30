@@ -189,9 +189,12 @@ status continues to show whether an embedded agent is working.
 
 Fresh prompted launches run `copilot --experimental --yolo`, letting Copilot create its own durable
 session ID. Every `tm launch` action accepts an optional `--model <model-id>`, carried through its
-shared launch request and passed as a single quoted Copilot `--model` argument. Model names are
-validated by Copilot rather than a Treemon-maintained list. Omitting the option preserves Copilot's
-model selection; dashboard and automatic launches do not override it.
+shared launch request and passed as a single quoted Copilot `--model` argument. Before any terminal
+startup, the shared prompted-launch boundary requires a nonempty ID containing only ASCII letters,
+digits, `.`, `_`, `-`, `/`, `:`, or `+`, so PowerShell and Windows CMD both treat it as data.
+Unsafe IDs return a typed invalid-model error without starting a terminal. Copilot validates model
+availability rather than a Treemon-maintained list. Omitting the option preserves Copilot's model
+selection; dashboard and automatic launches do not override it.
 Treemon reserves the complete initial instruction before launch, then binds delivery
 to the exact returned terminal. That terminal's registered extension receives the `startup-prompt`
 over the bridge and submits the original text through `session.send`. Prompt text never passes
@@ -205,9 +208,9 @@ its own five-minute cap; it does not consume the acceptance deadline. Timeout or
 the reserved prompt, closes only the newly created terminal
 through exact-session cleanup, and returns an explicit error; incomplete cleanup is also reported.
 Prompted-launch API results preserve unknown-worktree, unavailable-mode, unavailable-canvas-document,
-terminal-start, startup-timeout/rejection, and cleanup-failure cases in a shared error union. Unexpected failures
-are logged with operation context and return a generic case; the dashboard and CLI render the
-user-facing text. Backend failure details remain in the server log, while incomplete cleanup
+invalid-model, terminal-start, startup-timeout/rejection, and cleanup-failure cases in a shared error
+union. Unexpected failures are logged with operation context and return a generic case; the dashboard
+and CLI render the user-facing text. Backend failure details remain in the server log, while incomplete cleanup
 retains the exact new terminal ID in its typed result. Automatic Canvas startup carries the same
 typed failure in its send result.
 Acceptance and cleanup continue if the requesting browser disconnects. The transport does not

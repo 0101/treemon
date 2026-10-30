@@ -172,6 +172,7 @@ type PromptedLaunchErrorSerializationTests() =
         [ PromptedLaunchError.UnknownWorktree(WorktreePath @"Q:\owner's repo")
           PromptedLaunchError.Unavailable "fixture mode"
           PromptedLaunchError.CanvasDocUnavailable
+          PromptedLaunchError.InvalidModelId
           PromptedLaunchError.TerminalStartFailed
           PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut
           PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected
