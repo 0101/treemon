@@ -125,6 +125,7 @@ let launchCmd =
             fixPr: string option,
             fixBuild: string option,
             createPr: bool,
+            model: string option,
             port: int option
         ) =
         withPort port (fun port ->
@@ -155,11 +156,11 @@ let launchCmd =
                         | Ok() ->
                             runLaunchApi
                                 port
-                                (fun api -> api.launchSession { Path = wtPath; Prompt = metaPrompt })
+                                (fun api -> api.launchSession { Path = wtPath; Prompt = metaPrompt; Model = model })
                 | Choice2Of2 action ->
                     runLaunchApi
                         port
-                        (fun api -> api.launchAction { Path = wtPath; Action = action })
+                        (fun api -> api.launchAction { Path = wtPath; Action = action; Model = model })
             | _ ->
                 eprintfn "Error: Provide exactly one of: --prompt-file, --fix-pr, --fix-build, or --create-pr"
                 1)
@@ -173,6 +174,7 @@ let launchCmd =
             optionMaybe<string> "--fix-pr" |> desc "Fix PR comments (provide PR URL)",
             optionMaybe<string> "--fix-build" |> desc "Fix failed build (provide build URL)",
             option<bool> "--create-pr" |> def false |> desc "Create a pull request",
+            optionMaybe<string> "--model" |> desc "Copilot model (default: Copilot's configured model)",
             optionMaybe<int> "--port" |> desc "Server port (default: 5000, env: TREEMON_PORT)"
         )
 

@@ -99,6 +99,11 @@ tm categories                                                # report what the r
 
 All commands accept `--port` (default: 5000, env: `TREEMON_PORT`). You can also run `.\tm.ps1` directly from the repo root without installing.
 
+Any `tm launch` action accepts `--model <model-id>` to select the Copilot model for that launch,
+for example `tm launch --path C:\code\my-project --prompt-file task.md --model gpt-6.1-sol`.
+Omitting it leaves Copilot's model selection unchanged.
+Model IDs must be nonempty and contain only ASCII letters, digits, `.`, `_`, `-`, `/`, `:`, or `+`.
+
 ## Stack
 
 F# on both sides — [Saturn](https://saturnframework.org) server, [Fable](https://fable.io) + [Elmish](https://elmish.github.io) client, [Fable.Remoting](https://github.com/Zaid-Ajaj/Fable.Remoting) for type-safe RPC, [Vite](https://vitejs.dev) for dev tooling. Supports multiple root directories with auto-detected PR providers (Azure DevOps, GitHub).

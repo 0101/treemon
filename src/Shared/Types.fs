@@ -259,6 +259,7 @@ type PromptedLaunchError =
     | UnknownWorktree of WorktreePath
     | Unavailable of mode: string
     | CanvasDocUnavailable
+    | InvalidModelId
     | TerminalStartFailed
     | StartupFailed of StartupPromptFailure
     | StartupCleanupFailed of StartupPromptFailure * terminalId: EmbeddedTerminalId
@@ -280,6 +281,8 @@ module PromptedLaunchError =
             $"Session management is not available in {mode}"
         | PromptedLaunchError.CanvasDocUnavailable ->
             "The canvas document is unavailable. Refresh the dashboard and try again."
+        | PromptedLaunchError.InvalidModelId ->
+            "Invalid Copilot model ID. Use only ASCII letters, digits, '.', '_', '-', '/', ':', or '+'."
         | PromptedLaunchError.TerminalStartFailed ->
             "Could not start the embedded terminal. Check the server log for details."
         | PromptedLaunchError.StartupFailed failure -> startupMessage failure
@@ -461,11 +464,13 @@ type ActionKind =
 
 type ActionRequest =
     { Path: WorktreePath
-      Action: ActionKind }
+      Action: ActionKind
+      Model: string option }
 
 type LaunchRequest =
     { Path: WorktreePath
-      Prompt: string }
+      Prompt: string
+      Model: string option }
 
 type CreateWorktreeRequest =
     { RepoId: string

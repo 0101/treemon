@@ -35,12 +35,12 @@
     <Compile Include="WorktreeDiffApi.fs" />
     <Compile Include="JsonHelpers.fs" />
     <Compile Include="UserMessageFormatting.fs" />
+    <Compile Include="SqliteStorage.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />
     <Compile Include="LifecycleDiagnostics.fs" />
     <Compile Include="SessionActivityProtocol.fs" />
-    <Compile Include="SqliteStorage.fs" />
     <Compile Include="OverviewSnapshotBoundary.fs" />
     <Compile Include="OverviewSnapshotStore.fs" />
     <Compile Include="SessionActivityStoreSchema.fs" />

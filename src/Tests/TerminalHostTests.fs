@@ -2179,7 +2179,7 @@ type TerminalHostProxyTests() =
             let command =
                 Server.CodingToolCli.build
                     None
-                    Server.CodingToolCli.NewSession
+                    (Server.CodingToolCli.NewSession None)
                 |> _.AsShellString
 
             let result = submitTerminalCommand plane command

@@ -7,8 +7,9 @@
 
 ## Expected Behavior
 
-- Each scheduled Beads refresh provisions `beads.html` when the worktree's exported status summary
-  contains issues, and removes an existing page when that summary is empty.
+- Each successful scheduled Beads refresh provisions `beads.html` when the
+  worktree's status summary contains issues, and removes an existing page when
+  that summary is empty. Failed storage reads leave the previous page intact.
 - The page renders one always-visible sortable and filterable issues table. It has no separate
   dashboard view or top navigation bar.
 - Each status **filter chip shows a count badge** of issues in that status (hidden when the count is zero); the `All` chip shows no count.
@@ -55,10 +56,20 @@ serving. The template consumes the `bd` issue shape, not the GitHub Issues forma
 
 ### Auto-Provisioning
 
-`RefreshScheduler` passes the summary from `BeadsStatus.getBeadsData` to `BeadspaceProvisioner`
-after each Beads refresh. That summary comes from `.beads/issues.jsonl`, not a live database query;
-missing, empty, or unreadable export data produces zero counts. Provisioning therefore follows the
-export's freshness, while the page's data endpoint reads the live database independently.
+`RefreshScheduler` passes the summary from `BeadsStatus.getBeadsData` to
+`BeadspaceProvisioner` after each successful Beads refresh. The summary and
+Overview planning counts share one read-only snapshot of `.beads/beads.db` when
+present, regardless of export presence or age. JSONL-only worktrees without a
+database use `.beads/issues.jsonl`. See
+[Beads Overview Band](beads-overview-band.md#technical-approach) for source
+selection, status counting, parent-edge semantics, and failure handling.
+
+Provisioning does not depend on an export or a CLI invocation. A database error
+fails the refresh without clearing counts, deleting the page, or using stale
+export data. An empty authoritative store (or no store) produces zero counts.
+The page's data endpoint continues to read the live database independently;
+JSONL-only support here covers summary, planning, and provisioning, not that
+database-backed detail endpoint.
 
 A nonzero summary ensures `.agents/canvas/beads.html` matches the embedded template, creating the
 directory and writing only when content differs. Zero counts remove an existing page.
@@ -75,7 +86,7 @@ The template distinguishes the initial render from subsequent polls:
 
 | File | Purpose |
 |------|---------|
-| `src/Server/BeadsStatus.fs` | Live issue JSON and exported summary/planning data |
+| `src/Server/BeadsStatus.fs` | Live issue JSON and database-first summary/planning snapshots |
 | `src/Server/CanvasDocServer.fs` | Known-worktree `beads-data` route |
 | `src/Server/BeadspaceTemplate.html` | Beadspace template — single source of truth (embedded resource; also read from disk by the E2E tests) |
 | `src/Server/BeadspaceTemplate.fs` | Reads the embedded `BeadspaceTemplate.html` resource at startup, exposing it as the `html` value |
