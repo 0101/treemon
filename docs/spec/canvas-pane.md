@@ -73,6 +73,12 @@ Every served document receives a zero-specificity dark typographic base, design 
 focus reclaim), and the selected-text
 Explain/Remove/Comment runtime. Authored rules always override the base theme.
 
+The base uses 15px/1.55 system body text and yellow (`#f9e2af`) Manrope headings at weight 500.
+Its Airy spacing separates sections from subsections, with responsive 16-32px horizontal gutters
+and one 800px content column. `--heading-font` and `--heading-color` let documents override heading
+defaults. Manrope's Latin WOFF2 face and complete OFL notice are bundled in the injected CSS rather
+than fetched from Google or another font server; non-Latin text can use the fallback stack.
+
 AgentDocs additionally receive author heartbeat, `canvasExpand`, JavaScript error reporting, and
 in-place morphing. A doc-side error is attributed to the emitting worktree and filename and appears
 as a dismissible banner only while that document is focused. Static shared exports receive the base
@@ -490,6 +496,7 @@ the diff. Each is promoted to its nearest block, deduplicated, and given the `ca
 | `src/Server/SessionBridge.fs` | Generic session registry, poll registry, queueing, liveness, and prompt forwarding |
 | `src/Server/CanvasBridge.fs` | Canvas document-owner routing and canvas-specific queue/drain policy over `SessionBridge` |
 | `src/Server/CanvasExport.fs` | Pure canvas HTML transforms: shared theme, head injection, static export, title resolution, and authored document-shell hashing |
+| `src/Server/Assets/fonts/manrope-500.css` | Embedded Manrope font data and full OFL notice shared by live documents and static exports |
 | `src/Server/CanvasDocServer.fs` | Live canvas HTTP routes plus per-kind runtime, content-hash, and shell-hash injection |
 | `src/Server/BeadspaceTemplate.fs` | Reads the embedded `BeadspaceTemplate.html` resource at startup for auto-provisioning |
 | `src/Server/BeadspaceTemplate.html` | Beadspace dashboard HTML — single source of truth (embedded into the Server assembly) |

@@ -24,7 +24,7 @@ let private resetWrapMarker = ":where(body)"  // reset selectors are :where()-wr
 let private resetDarkBgMarker = "#1e1e2e"      // the dark background the reset paints on a plain doc
 // The base also steers plain docs toward typography over boxes (grounded, not invented):
 let private resetTokenMarker = "--text-muted:#9399b2"          // app design tokens, via :where(:root)
-let private resetTypeScaleMarker = ":where(h1){font-size:1.85rem"  // serif heading scale
+let private resetTypeScaleMarker = ":where(h1){font-size:1.85rem"
 let private resetPageWidthMarker = "--page-max:800px"           // ~800px single column; text + figures share one width
 
 // Element-name selectors that, if they appeared *bare* (name directly followed by `{`), would carry
@@ -146,7 +146,7 @@ type BuildInjectionTests() =
     [<Test>]
     member _.``the base reset bakes in design tokens, a type scale, and a single-column page``() =
         // Beyond dark colours the base steers plain docs toward typography over boxes: a :where(:root)
-        // token palette (so docs stop reinventing one), a serif heading scale (h1 1.85rem / h2 1.35rem
+        // token palette (so docs stop reinventing one), a heading scale (h1 1.85rem / h2 1.35rem
         // / h3 1.12rem — hierarchy from size, not borders), and a ~800px single-column page so text and figures share one width.
         [ SystemView; AgentDoc ]
         |> List.iter (fun kind ->

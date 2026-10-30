@@ -93,6 +93,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="Assets\fonts\manrope-500.css">
+      <LogicalName>Manrope.css</LogicalName>
+    </EmbeddedResource>
     <!-- Single source of truth for the Beadspace dashboard HTML. Embedded so the
          runtime (BeadspaceTemplate.fs) reads the same definition the E2E tests load
          from disk; the two cannot drift. -->

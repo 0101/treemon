@@ -36,6 +36,95 @@ let private injectLive (kind: CanvasDocKind) (filename: string) (docHtml: string
             hasBodyScript
     docHtml |> injectAtHead injection, contentHash
 
+[<TestFixture>]
+[<Category("E2E")>]
+[<Category("Canvas")>]
+type CanvasDefaultTypographyTests() =
+    inherit PageTest()
+
+    [<Test>]
+    member this.``live and exported documents render bundled yellow Manrope with airy spacing offline``() =
+        task {
+            do! this.Page.RouteAsync("**/*", fun route -> route.AbortAsync())
+            do! this.Page.SetViewportSizeAsync(440, 900)
+            let doc =
+                """<!doctype html><html><head><title>Typography</title></head><body>
+                <h1>Document title</h1><p>Body text stays in the system font.</p>
+                <h2>Section</h2><p>Section evidence.</p>
+                <h3>Subsection</h3><p>Supporting detail.</p>
+                <h4>Detail heading</h4><p>Supporting detail.</p>
+                <h5>Nested heading</h5><p>Supporting detail.</p>
+                <h6>Deep heading</h6><p>Supporting detail.</p>
+                </body></html>"""
+            let variants =
+                [ "AgentDoc", injectInto AgentDoc "typography.html" doc
+                  "SystemView", injectInto SystemView "typography.html" doc
+                  "Export", Server.CanvasExport.buildStaticHtml doc ]
+
+            for name, html in variants do
+                do! this.Page.SetContentAsync(html)
+                let! fontLoaded =
+                    this.Page.EvaluateAsync<bool>(
+                        """async () => {
+                            const faces = await document.fonts.load('500 22px Manrope');
+                            return faces.length > 0 && faces.every(face => face.status === 'loaded');
+                        }""")
+                Assert.That(fontLoaded, Is.True, $"{name}: Manrope must load without network access")
+                let! headings =
+                    this.Page.Locator("h1,h2,h3,h4,h5,h6").EvaluateAllAsync<string[][]>(
+                        """nodes => nodes.map(node => {
+                            const style = getComputedStyle(node);
+                            return [style.fontWeight, style.color, style.fontFamily.split(',')[0]];
+                        })""")
+                Assert.That(
+                    headings,
+                    Is.EqualTo(Array.create 6 [| "500"; "rgb(249, 226, 175)"; "Manrope" |]),
+                    $"{name}: every heading level uses the selected font, weight and color"
+                )
+                let! spacing =
+                    this.Page.EvaluateAsync<float[]>(
+                        """() => [
+                            parseFloat(getComputedStyle(document.body).paddingTop),
+                            parseFloat(getComputedStyle(document.body).paddingLeft),
+                            parseFloat(getComputedStyle(document.querySelector('h2')).marginTop),
+                            parseFloat(getComputedStyle(document.querySelector('h3')).marginTop),
+                            parseFloat(getComputedStyle(document.querySelector('p')).marginBottom)
+                        ]""")
+                Assert.That(
+                    spacing,
+                    Is.EqualTo([| 32.; 17.6; 40.; 24.; 16. |]).Within(0.01),
+                    $"{name}: responsive gutters and section/subsection rhythm match Airy"
+                )
+
+            do! this.Page.SetViewportSizeAsync(1000, 900)
+            let! wideGutter =
+                this.Page.EvaluateAsync<float>("() => parseFloat(getComputedStyle(document.body).paddingLeft)")
+            Assert.That(wideGutter, Is.EqualTo(32.), "wide panes cap their horizontal gutters")
+        }
+
+    [<Test>]
+    member this.``authored heading tokens and element rules override the new defaults``() =
+        task {
+            let doc =
+                """<!doctype html><html><head><style>
+                :root { --heading-font: Georgia,serif; --heading-color: rgb(166,227,161); }
+                body { padding: 0; }
+                h2 { color: rgb(137,180,250); font-weight: 700; margin-top: 3px; }
+                </style></head><body><h1>Custom title</h1><h2>Custom section</h2></body></html>"""
+            do! this.Page.SetContentAsync(Server.CanvasExport.buildStaticHtml doc)
+            let! titleColor = this.Page.Locator("h1").EvaluateAsync<string>("node => getComputedStyle(node).color")
+            let! titleFamily = this.Page.Locator("h1").EvaluateAsync<string>("node => getComputedStyle(node).fontFamily")
+            let! section =
+                this.Page.Locator("h2").EvaluateAsync<string[]>(
+                    "node => { const style = getComputedStyle(node); return [style.color, style.fontWeight, style.marginTop]; }")
+            let! padding = this.Page.Locator("body").EvaluateAsync<string>("node => getComputedStyle(node).padding")
+            Assert.Multiple(fun () ->
+                Assert.That(titleColor, Is.EqualTo("rgb(166, 227, 161)"))
+                Assert.That(titleFamily, Does.Contain("Georgia"))
+                Assert.That(section, Is.EqualTo([| "rgb(137, 180, 250)"; "700"; "3px" |]))
+                Assert.That(padding, Is.EqualTo("0px")))
+        }
+
 // ============================================================================
 // Base-theme/cascade behavior plus isolated AgentDoc live-update behavior.
 //
@@ -95,12 +184,12 @@ type CanvasInjectionThemeE2ETests() =
             let! pMaxWidth = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.getElementById('p')).maxWidth")
             let! h1Family = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.querySelector('h1')).fontFamily")
             let! h1Weight = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.querySelector('h1')).fontWeight")
-            // 15px / line-height 1.55 base + serif headings at weight 500 (h1 = 1.85rem = 29.6px) + a
+            // 15px / line-height 1.55 base + Manrope headings at weight 500 (h1 = 1.85rem = 29.6px) + a
             // ~800px single-column page (text fills the width), so a plain doc reads via type and whitespace rather than boxes.
             Assert.That(bodyFont, Is.EqualTo("15px"), $"body should default to a readable 15px (was {bodyFont})")
             Assert.That(bodyLine, Is.EqualTo("23.25px"), $"body line-height should be 1.55x = 23.25px (was {bodyLine})")
             Assert.That(h1Font, Is.EqualTo("29.6px"), $"h1 should be 1.85rem = 29.6px from the type scale (was {h1Font})")
-            Assert.That(h1Family.ToLower(), Does.Contain("serif"), $"headings should use the serif stack (was {h1Family})")
+            Assert.That(h1Family.ToLower(), Does.Contain("manrope"), $"headings should use Manrope (was {h1Family})")
             Assert.That(h1Weight, Is.EqualTo("500"), $"headings should not be bold — weight 500 (was {h1Weight})")
             Assert.That(bodyMaxWidth, Is.EqualTo("800px"), $"the page should cap at the ~800px single column (was {bodyMaxWidth})")
             Assert.That(pMaxWidth, Is.EqualTo("none"), $"paragraphs should fill the column, not carry a separate measure cap (was {pMaxWidth})")
@@ -139,7 +228,7 @@ type CanvasInjectionThemeE2ETests() =
             Assert.That(bg, Is.EqualTo("rgb(30, 30, 46)"), $"SystemView body must stay var(--bg-deep) #1e1e2e (was {bg})")
 
             // The body box reset must survive too: the template zeroes padding on its `body` selector
-            // directly, so the injected zero-specificity :where(body){padding:2rem 2.25rem} (which would win the
+            // directly, so the injected zero-specificity body padding (which would win the
             // source-order tiebreak against the universal *{padding:0}) can't add a gap.
             let! padding = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).padding")
             Assert.That(padding, Is.EqualTo("0px"), $"SystemView body padding must stay 0 under the reset (was {padding})")

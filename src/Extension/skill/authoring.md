@@ -16,21 +16,25 @@ Give the eye a reading path: conclusion first, related information grouped toget
 detail visibly quieter. Use whitespace between groups, short labelled passages, and selective
 emphasis. A warning, a result, and background information should not all look equally important.
 
-Use semantic color to distinguish actions, status, or risk, not to decorate every heading. Prefer a
-quiet table for a real comparison and a small SVG for a relationship that otherwise takes effort
-to understand. Do not force a diagram, a card grid, or a colored box when type and spacing suffice.
+The base uses yellow for document headings. Reserve additional semantic colors for actions, status,
+or risk rather than assigning a different color to every section. Prefer a quiet table for a real
+comparison and a small SVG for a relationship that otherwise takes effort to understand. Do not
+force a diagram, a card grid, or a colored box when type and spacing suffice.
 Keep essential caveats visible rather than making the page look shorter by hiding them.
 
 ## Injected foundation
 
-Treemon supplies a dark typographic base: system body font at 15px / 1.55, serif headings, quiet
-tables, themed controls, and a single 800px content column (`--page-max`). Author little CSS; reuse
+Treemon supplies a dark typographic base: system body font at 15px / 1.55, yellow Manrope headings at
+weight 500, quiet tables, themed controls, and a single 800px content column (`--page-max`).
+The Airy rhythm uses 40px before h2, 24px before h3-h6, 16px between prose blocks, and responsive
+16-32px horizontal gutters at the default root size. The Latin font and full OFL notice are bundled
+in the theme, including static exports; other scripts can fall back. Author little CSS; reuse
 the base and these tokens rather than importing a stylesheet, font, or other external dependency:
 
 - Surfaces: `--bg-deep`, `--bg-surface`, `--bg-elevated`, `--border`, `--border-bright`.
 - Text: `--text-primary`, `--text-secondary`, `--text-muted`.
 - Meaning: `--accent`, `--accent-bright`, `--status-wip`, `--status-blocked`, `--status-closed`.
-- Headings: `--serif`.
+- Headings: `--heading-font`, `--heading-color`.
 
 Raise `--page-max` only when the document needs more room; a genuine dashboard can remove the body
 width cap. Keep text and figures aligned rather than giving each a different reading width.
