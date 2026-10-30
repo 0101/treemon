@@ -101,6 +101,13 @@ let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredI
 let private withTerminalOrigin terminalSessionId (stored: StoredInstance) =
     { stored with TerminalSessionId = Some terminalSessionId }
 
+let private processIdentity processId startTicks =
+    ProcessIdentity.create processId startTicks
+    |> Result.defaultWith invalidOp
+
+let private withProcessIdentity processIdentity (stored: StoredInstance) =
+    { stored with ProcessIdentity = processIdentity }
+
 let private withUsage
     (usage: ContextUsage)
     usageAt
@@ -236,6 +243,135 @@ type ContextUsagePersistenceTests() =
                 Assert.That(persisted, Is.EqualTo usageSnapshot)
                 Assert.That(loaded, Is.EqualTo usageSnapshot)
                 Assert.That(loaded.LastSeen, Is.EqualTo initial.LastSeen)))
+
+    [<Test>]
+    member _.``presence context inheritance is session and worktree scoped``() =
+        withStore (fun store ->
+            let usage =
+                { CurrentTokens = 150000
+                  TokenLimit = 200000 }
+
+            let usageAt = ts "2026-03-01T10:00:10Z"
+
+            let source =
+                storedOf
+                    "shared-session"
+                    "C:/wt/a"
+                    { emptyStatus with
+                        Skill = Some "source-skill"
+                        Title = Some(msg "Source title" "2026-03-01T10:00:00Z") }
+                    "2026-03-01T10:00:00Z"
+                    "2026-03-01T10:00:00Z"
+                |> withProcessIdentity (processIdentity 5101 6101L)
+                |> withUsage usage usageAt (ts "2026-03-01T10:00:00Z")
+
+            let candidate processId sessionId worktreePath =
+                storedOf
+                    sessionId
+                    worktreePath
+                    emptyStatus
+                    "2026-03-01T10:01:00Z"
+                    "2026-03-01T10:01:00Z"
+                |> withProcessIdentity
+                    (processIdentity
+                        processId
+                        (int64 processId + 1000L))
+
+            seedInstance store source
+            let matchingCandidate =
+                candidate 5102 "shared-session" "C:/wt/a"
+
+            seedInstance store matchingCandidate
+
+            let matching =
+                matchingCandidate
+                |> store.EstablishInstance
+
+            let otherWorktree =
+                candidate 5103 "shared-session" "C:/wt/b"
+                |> store.EstablishInstance
+
+            let otherSession =
+                candidate 5104 "other-session" "C:/wt/a"
+                |> store.EstablishInstance
+
+            Assert.Multiple(fun () ->
+                Assert.That(matching.Status.ContextUsage, Is.EqualTo(Some usage))
+                Assert.That(matching.ContextUsageAt, Is.EqualTo(Some usageAt))
+                Assert.That(matching.Status.Skill, Is.EqualTo None)
+                Assert.That(matching.Status.Title, Is.EqualTo None)
+                Assert.That(otherWorktree.Status.ContextUsage, Is.EqualTo None)
+                Assert.That(otherWorktree.ContextUsageAt, Is.EqualTo None)
+                Assert.That(otherSession.Status.ContextUsage, Is.EqualTo None)
+                Assert.That(otherSession.ContextUsageAt, Is.EqualTo None)))
+
+    [<Test>]
+    member _.``session supersession inherits the target session context``() =
+        withStore (fun store ->
+            let currentProcessIdentity =
+                processIdentity 5202 6202L
+
+            let contextAt = ts "2026-03-01T10:00:00Z"
+            let supersededAt = ts "2026-03-01T10:01:00Z"
+
+            let historicalTarget =
+                storedOf
+                    "target-session"
+                    "C:/wt/a"
+                    emptyStatus
+                    "2026-03-01T10:00:00Z"
+                    "2026-03-01T10:00:00Z"
+                |> withProcessIdentity
+                    (processIdentity 5201 6201L)
+                |> withUsage
+                    { CurrentTokens = 170000
+                      TokenLimit = 200000 }
+                    contextAt
+                    contextAt
+
+            let current =
+                storedOf
+                    "current-session"
+                    "C:/wt/a"
+                    emptyStatus
+                    "2026-03-01T10:00:30Z"
+                    "2026-03-01T10:00:30Z"
+                |> withProcessIdentity currentProcessIdentity
+
+            let target =
+                storedOf
+                    "target-session"
+                    "C:/wt/a"
+                    emptyStatus
+                    "2026-03-01T10:01:00Z"
+                    "2026-03-01T10:01:00Z"
+                |> withProcessIdentity currentProcessIdentity
+
+            seedInstance store historicalTarget
+            seedInstance store current
+
+            let established =
+                store.SupersedeInstance(
+                    current,
+                    target,
+                    supersededAt
+                )
+
+            let closedCurrent =
+                store.InstancesBySession(SessionId "current-session")
+                |> List.exactlyOne
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    established.Status.ContextUsage,
+                    Is.EqualTo(
+                        Some
+                            { CurrentTokens = 170000
+                              TokenLimit = 200000 }
+                    )
+                )
+                Assert.That(established.ContextUsageAt, Is.EqualTo(Some contextAt))
+                Assert.That(closedCurrent.ClosedAt, Is.EqualTo(Some supersededAt))))
 
 [<TestFixture>]
 [<Category("Unit")>]

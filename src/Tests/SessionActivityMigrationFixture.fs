@@ -72,7 +72,7 @@ ORDER BY name;
     use reader = command.ExecuteReader()
     readStrings reader
 
-/// The retained pre-upgrade resume identity of one session: worktree and activity clock only.
+/// The retained pre-upgrade resume identity of one session.
 let resumeIdentity path sessionId =
     use connection = openConnection path
     use command = connection.CreateCommand()
@@ -87,6 +87,23 @@ WHERE session_id = $sessionId;
 
     if reader.Read() then
         Some(reader.GetString 0, reader.GetString 1)
+    else
+        None
+
+let resumeContext path sessionId =
+    use connection = openConnection path
+    use command = connection.CreateCommand()
+    command.CommandText <-
+        """
+SELECT context_current_tokens, context_token_limit, context_usage_at
+FROM resume_sessions
+WHERE session_id = $sessionId;
+"""
+    command.Parameters.AddWithValue("$sessionId", (sessionId: string)) |> ignore
+    use reader = command.ExecuteReader()
+
+    if reader.Read() && not (reader.IsDBNull 0) then
+        Some(reader.GetInt32 0, reader.GetInt32 1, reader.GetString 2)
     else
         None
 
@@ -134,14 +151,17 @@ CREATE TABLE activity_events (
 
 INSERT INTO session_status
     (session_id, worktree_path, provider, status, current_skill,
-     last_user_msg, title_text, updated_at, last_seen)
+     last_user_msg, title_text, updated_at, last_seen,
+     context_current_tokens, context_token_limit, context_usage_at)
 VALUES
     ('legacy-session', 'C:/wt/legacy', 'copilot_cli', 'waiting_for_user', 'review',
      'please review', 'Review storage',
-     '2026-09-01T10:04:00.0000000+00:00', '2026-09-04T10:04:00.0000000+00:00'),
+     '2026-09-01T10:04:00.0000000+00:00', '2026-09-04T10:04:00.0000000+00:00',
+     89085, 922000, '2026-09-01T10:03:30.0000000+00:00'),
     ('older-legacy-session', 'C:/wt/legacy', 'copilot_cli', 'idle', NULL,
      NULL, NULL,
-     '2026-08-30T09:00:00.0000000+00:00', '2026-08-30T09:00:00.0000000+00:00');
+     '2026-08-30T09:00:00.0000000+00:00', '2026-08-30T09:00:00.0000000+00:00',
+     NULL, NULL, NULL);
 
 INSERT INTO activity_events
     (event_id, session_id, worktree_path, provider, kind, status, skill, ts)
