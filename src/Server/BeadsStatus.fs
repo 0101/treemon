@@ -3,10 +3,11 @@ module Server.BeadsStatus
 open System
 open System.IO
 open System.Text.Json
+open Microsoft.Data.Sqlite
 open Shared
 
 /// Lightweight projection of a beads issue — only the fields the planning classifier needs.
-/// Produced by the JSONL parser (see the JSONL data-source task); IssueType and Status mirror
+/// Produced by the database reader or JSONL parser; IssueType and Status mirror
 /// beads' raw schema strings (e.g. "task"/"feature", "open"/"in_progress"/"blocked"/"closed").
 /// ParentId MUST be resolved from a parent-child dependency edge ONLY (issue_id = child,
 /// depends_on_id = parent) — never from a `blocks` edge. Keeping beads-schema knowledge here
@@ -138,26 +139,64 @@ let getBeadsIssueList (dbPath: string) =
             return "[]"
     }
 
-/// Reads .beads/issues.jsonl and derives BOTH the card summary (all issue types by status) and the
-/// feature-free Overview task projection from a SINGLE parse — no `bd` spawn, no SQLite dependency.
-/// Missing OR empty file => (zero, zero), never an exception.
-///
-/// FRESHNESS: issues.jsonl is beads' canonical JSONL export, auto-flushed after CRUD, so it can
-/// lag the live beads.db by up to the flush interval. We read it as-is and accept that lag
-/// deliberately: adding a `bd export` refresh here would reintroduce the per-refresh process spawn
-/// this parse exists to remove. If guaranteed freshness is ever required, export before reading.
+let private readDatabase (dbPath: string) : PlanningIssue list =
+    use connection =
+        new SqliteConnection(
+            SqliteConnectionStringBuilder(
+                DataSource = dbPath,
+                Mode = SqliteOpenMode.ReadOnly,
+                Pooling = false
+            ).ConnectionString
+        )
+
+    connection.Open()
+    use command = connection.CreateCommand()
+    // One statement keeps issues and their directed parent edges in the same committed snapshot.
+    command.CommandText <-
+        """
+SELECT i.id, i.issue_type, i.status,
+       (SELECT d.depends_on_id
+        FROM dependencies d
+        WHERE d.issue_id = i.id AND d.type = 'parent-child' COLLATE NOCASE
+        ORDER BY d.depends_on_id
+        LIMIT 1)
+FROM issues i;
+"""
+    use reader = command.ExecuteReader()
+
+    SqliteStorage.readRows reader (fun row ->
+        { Id = row.GetString(0)
+          IssueType = row.GetString(1)
+          Status = row.GetString(2)
+          ParentId = if row.IsDBNull(3) then None else Some(row.GetString(3)) }) []
+
+let private sourceExists (path: string) =
+    // File.Exists also hides access errors, which must not select a stale export.
+    try
+        File.GetAttributes(path) |> ignore
+        true
+    with
+    | :? FileNotFoundException
+    | :? DirectoryNotFoundException -> false
+
+/// Read the live database when present, otherwise the JSONL-only store, deriving both projections
+/// from one snapshot without spawning bd. Read failures propagate to the scheduler so it retains
+/// the previous counts and page rather than publishing empty or stale export data.
 let getBeadsData (worktreePath: string) : Async<BeadsSummary * BeadsPlanning> =
     async {
+        let dbPath = Path.Combine(worktreePath, ".beads", "beads.db")
         let jsonlPath = Path.Combine(worktreePath, ".beads", "issues.jsonl")
 
-        if File.Exists(jsonlPath) then
-            try
-                let! content = File.ReadAllTextAsync(jsonlPath) |> Async.AwaitTask
-                let issues = parseIssues content
-                return summarize issues, Planning.classify issues
-            with ex ->
-                Log.log "Beads" $"Failed to read {jsonlPath}: {ex.Message}"
-                return BeadsSummary.zero, BeadsPlanning.zero
-        else
-            return BeadsSummary.zero, BeadsPlanning.zero
+        let! issues =
+            async {
+                if sourceExists dbPath then
+                    return readDatabase dbPath
+                elif sourceExists jsonlPath then
+                    let! content = File.ReadAllTextAsync(jsonlPath) |> Async.AwaitTask
+                    return parseIssues content
+                else
+                    return []
+            }
+
+        return summarize issues, Planning.classify issues
     }
