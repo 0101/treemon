@@ -40,6 +40,12 @@ type StaticExportInjectionTests() =
                     "a published copy must carry the base theme so a doc that leaned on it renders on-theme")
         Assert.That(html, Does.Contain(themeTokenMarker),
                     "the theme's design tokens must be present so var(--…) references resolve standalone")
+        Assert.That(html, Does.Contain("data:font/woff2;base64,"),
+                    "the shared copy must not depend on an external font server")
+        Assert.That(html, Does.Contain("Copyright 2018 The Manrope Project Authors"),
+                    "the bundled font's copyright notice must travel with the shared copy")
+        Assert.That(html, Does.Contain("SIL OPEN FONT LICENSE Version 1.1"),
+                    "the bundled font's license must travel with the shared copy")
 
     [<Test>]
     member _.``buildStaticHtml re-injects a no-op window.canvasSend``() =
