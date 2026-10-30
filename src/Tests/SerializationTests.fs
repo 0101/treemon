@@ -65,31 +65,33 @@ type WrapperTypeSerializationTests() =
               Timestamp = DateTimeOffset(2026, 7, 22, 12, 0, 0, TimeSpan.Zero) }
         Assert.That(roundTrip original, Is.EqualTo(original))
 
-    [<Test>]
-    member _.``LaunchRequest with WorktreePath survives JSON round-trip``() =
+    [<TestCase("")>]
+    [<TestCase("gpt-6.1-sol")>]
+    member _.``LaunchRequest preserves its optional model across JSON round-trip``(model: string) =
         let original =
             { Path = WorktreePath @"Q:\code\test"
-              Prompt = "run tests" }
+              Prompt = "run tests"
+              Model = if model = "" then None else Some model }
 
         let result = roundTrip original
-        Assert.That(result.Path, Is.EqualTo(original.Path))
-        Assert.That(result.Prompt, Is.EqualTo(original.Prompt))
+        Assert.That(result, Is.EqualTo original)
 
     [<Test>]
     member _.``ActionRequest with FixPr survives JSON round-trip``() =
         let original: ActionRequest =
             { Path = WorktreePath @"Q:\code\test"
-              Action = FixPr "https://dev.azure.com/org/proj/_git/repo/pullrequest/42" }
+              Action = FixPr "https://dev.azure.com/org/proj/_git/repo/pullrequest/42"
+              Model = Some "gpt-6.1-sol" }
 
         let result = roundTrip original
-        Assert.That(result.Path, Is.EqualTo(original.Path))
-        Assert.That(result.Action, Is.EqualTo(original.Action))
+        Assert.That(result, Is.EqualTo original)
 
     [<Test>]
     member _.``ActionRequest with FixBuild survives JSON round-trip``() =
         let original: ActionRequest =
             { Path = WorktreePath @"Q:\code\test"
-              Action = FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123" }
+              Action = FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123"
+              Model = None }
 
         let result = roundTrip original
         Assert.That(result.Action, Is.EqualTo(original.Action))
@@ -98,7 +100,8 @@ type WrapperTypeSerializationTests() =
     member _.``ActionRequest with CreatePr survives JSON round-trip``() =
         let original: ActionRequest =
             { Path = WorktreePath @"Q:\code\test"
-              Action = CreatePr }
+              Action = CreatePr
+              Model = None }
 
         let result = roundTrip original
         Assert.That(result.Action, Is.EqualTo(original.Action))
@@ -107,7 +110,8 @@ type WrapperTypeSerializationTests() =
     member _.``Canvas action preserves its document identity and unowned startup prompt``() =
         let original: ActionRequest =
             { Path = WorktreePath @"Q:\code\test"
-              Action = CanvasSession("review.html", "Take over the unowned document") }
+              Action = CanvasSession("review.html", "Take over the unowned document")
+              Model = None }
 
         Assert.That(roundTrip original, Is.EqualTo original)
 
@@ -168,6 +172,7 @@ type PromptedLaunchErrorSerializationTests() =
         [ PromptedLaunchError.UnknownWorktree(WorktreePath @"Q:\owner's repo")
           PromptedLaunchError.Unavailable "fixture mode"
           PromptedLaunchError.CanvasDocUnavailable
+          PromptedLaunchError.InvalidModelId
           PromptedLaunchError.TerminalStartFailed
           PromptedLaunchError.StartupFailed StartupPromptFailure.TimedOut
           PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected

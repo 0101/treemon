@@ -29,7 +29,7 @@ type private LaunchCall =
     | OpenNativeTerminal of WorktreePath
     | StartEmbeddedTerminal of WorktreePath
     | StartEmbeddedCommand of WorktreePath * string
-    | StartPromptedAgent of CodingToolProvider option * WorktreePath * string
+    | StartPromptedAgent of CodingToolProvider option * string option * WorktreePath * string
 
 let private assertTerminalCommandAccepted command =
     Assert.That(
@@ -203,7 +203,7 @@ type CanvasOwnerLaunchTests() =
             let calls = ConcurrentQueue<string>()
             let launchedId = "33333333333333333333333333333333"
             let terminalLaunch =
-                { promptedLaunchOnly (fun _ _ _ -> async.Return(Error PromptedLaunchError.Unexpected)) with
+                { promptedLaunchOnly (fun _ _ _ _ -> async.Return(Error PromptedLaunchError.Unexpected)) with
                     StartEmbeddedCommand =
                         fun requestedPath command ->
                             calls.Enqueue command
@@ -212,7 +212,8 @@ type CanvasOwnerLaunchTests() =
             let result =
                 api.launchAction
                     { Path = path
-                      Action = CanvasSession(filename, "Do not start a replacement conversation") }
+                      Action = CanvasSession(filename, "Do not start a replacement conversation")
+                      Model = None }
                 |> runAsync
             let expectedCommand =
                 (build None (Resume(Some(SessionId.value owner)))).AsShellString
@@ -233,8 +234,8 @@ type CanvasOwnerLaunchTests() =
                 "assign document owner"
             let calls = ConcurrentQueue<LaunchCall>()
             let terminalLaunch =
-                { promptedLaunchOnly (fun provider requestedPath prompt ->
-                    calls.Enqueue(LaunchCall.StartPromptedAgent(provider, requestedPath, prompt))
+                { promptedLaunchOnly (fun provider model requestedPath prompt ->
+                    calls.Enqueue(LaunchCall.StartPromptedAgent(provider, model, requestedPath, prompt))
                     async.Return(Error PromptedLaunchError.Unexpected)) with
                     StartEmbeddedCommand =
                         fun requestedPath command ->
@@ -243,7 +244,7 @@ type CanvasOwnerLaunchTests() =
             let api = createApi root path None terminalLaunch
             let result =
                 api.launchAction
-                    { Path = path; Action = CanvasSession(filename, "Replacement prompt") }
+                    { Path = path; Action = CanvasSession(filename, "Replacement prompt"); Model = None }
                 |> runAsync
             let expected: Result<EmbeddedTerminalStartResult, PromptedLaunchError> =
                 Error PromptedLaunchError.TerminalStartFailed
@@ -272,8 +273,8 @@ type CanvasOwnerLaunchTests() =
             |> List.iter (fun name -> File.WriteAllText(Path.Combine(directory, name), "<h1>System view</h1>"))
             let calls = ConcurrentQueue<LaunchCall>()
             let terminalLaunch =
-                { promptedLaunchOnly (fun provider requestedPath prompt ->
-                    calls.Enqueue(LaunchCall.StartPromptedAgent(provider, requestedPath, prompt))
+                { promptedLaunchOnly (fun provider model requestedPath prompt ->
+                    calls.Enqueue(LaunchCall.StartPromptedAgent(provider, model, requestedPath, prompt))
                     async.Return(Error PromptedLaunchError.Unexpected)) with
                     StartEmbeddedCommand =
                         fun requestedPath command ->
@@ -282,7 +283,7 @@ type CanvasOwnerLaunchTests() =
             let api = createApi root path None terminalLaunch
             let result =
                 api.launchAction
-                    { Path = path; Action = CanvasSession(filename, "Replacement prompt") }
+                    { Path = path; Action = CanvasSession(filename, "Replacement prompt"); Model = None }
                 |> runAsync
             let expected: Result<EmbeddedTerminalStartResult, PromptedLaunchError> =
                 Error PromptedLaunchError.CanvasDocUnavailable
@@ -434,9 +435,11 @@ type WorktreeApiLaunchTests() =
 
         Assert.That(result, Is.EqualTo None)
 
-    [<Test>]
-    member _.``Worktree API selects typed launch operations and preserves exact embedded results``() =
+    [<TestCase("")>]
+    [<TestCase("gpt-6.1-sol")>]
+    member _.``Worktree API selects typed launch operations and preserves model and exact embedded results``(model: string) =
         withTempDir "treemon-worktree-api-launch" (fun root ->
+            let selectedModel = if model = "" then None else Some model
             let path =
                 root
                 |> Path.GetFullPath
@@ -512,10 +515,10 @@ type WorktreeApiLaunchTests() =
                                 | _ -> Error "Unexpected embedded command"
                         }
                   StartPromptedAgent =
-                    fun provider requestedPath prompt ->
+                    fun provider model requestedPath prompt ->
                         async {
                             calls.Enqueue(
-                                LaunchCall.StartPromptedAgent(provider, requestedPath, prompt))
+                                LaunchCall.StartPromptedAgent(provider, model, requestedPath, prompt))
 
                             return
                                 match prompt with
@@ -548,17 +551,20 @@ type WorktreeApiLaunchTests() =
             let launched =
                 api.launchSession
                     { Path = path
-                      Prompt = launchPrompt }
+                      Prompt = launchPrompt
+                      Model = selectedModel }
                 |> runAsync
             let actionLaunched =
                 api.launchAction
                     { Path = path
-                      Action = action }
+                      Action = action
+                      Model = selectedModel }
                 |> runAsync
             let canvasLaunched =
                 api.launchAction
                     { Path = path
-                      Action = CanvasSession(canvasFilename, canvasPrompt) }
+                      Action = CanvasSession(canvasFilename, canvasPrompt)
+                      Model = None }
                 |> runAsync
             let resumed = api.resumeSession path |> runAsync
 
@@ -574,15 +580,54 @@ type WorktreeApiLaunchTests() =
                     [| LaunchCall.OpenNativeTerminal path
                        LaunchCall.StartEmbeddedTerminal path
                        LaunchCall.StartEmbeddedCommand(path, agentCommand)
-                       LaunchCall.StartPromptedAgent(None, path, launchPrompt)
-                       LaunchCall.StartPromptedAgent(None, path, actionPrompt)
-                       LaunchCall.StartPromptedAgent(None, path, canvasPrompt)
+                       LaunchCall.StartPromptedAgent(None, selectedModel, path, launchPrompt)
+                       LaunchCall.StartPromptedAgent(None, selectedModel, path, actionPrompt)
+                       LaunchCall.StartPromptedAgent(None, None, path, canvasPrompt)
                        LaunchCall.StartEmbeddedCommand(path, resumeCommand) |]
                 )
             )
 
             assertTerminalCommandAccepted agentCommand
             assertTerminalCommandAccepted resumeCommand)
+
+    [<TestCase("model&rem")>]
+    [<TestCase("model%PATH%")>]
+    [<TestCase("model\"with-quote")>]
+    member _.``prompted API methods reject unsafe models before terminal startup``(model: string) =
+        withTempDir "treemon-unsafe-launch-model" (fun root ->
+            let path = PathUtils.toWorktreePath root
+            let calls = ConcurrentQueue<string>()
+            let dependencies: TerminalLaunch.PromptedAgentDependencies =
+                { StartCommand =
+                    fun _ command ->
+                        calls.Enqueue command
+                        async.Return(Error "Unexpected terminal startup")
+                  CloseTerminal =
+                    fun _ ->
+                        calls.Enqueue "close"
+                        async.Return(Ok EmbeddedTerminalSnapshot.empty)
+                  Timeout = TimeSpan.FromSeconds 5.0 }
+            let terminalLaunch =
+                promptedLaunchOnly (TerminalLaunch.startPromptedAgentWith dependencies)
+            let api = createApi root path None terminalLaunch
+            let session =
+                api.launchSession { Path = path; Prompt = "Initial task"; Model = Some model }
+                |> runAsync
+            let actions =
+                [ FixPr "https://example.test/pr/42"
+                  FixBuild "https://example.test/build/42"
+                  CreatePr ]
+                |> List.map (fun action ->
+                    api.launchAction { Path = path; Action = action; Model = Some model })
+                |> Async.Sequential
+                |> runAsync
+            let expected: Result<EmbeddedTerminalStartResult, PromptedLaunchError> =
+                Error PromptedLaunchError.InvalidModelId
+
+            Assert.Multiple(fun () ->
+                Assert.That(session, Is.EqualTo expected)
+                actions |> Array.iter (fun result -> Assert.That(result, Is.EqualTo expected))
+                Assert.That(calls, Is.Empty)))
 
     [<Test>]
     member _.``prompted API methods preserve structured startup cleanup failure``() =
@@ -593,11 +638,11 @@ type WorktreeApiLaunchTests() =
                     StartupPromptFailure.TimedOut,
                     EmbeddedTerminalId "00000000000000000000000000000001")
             let terminalLaunch =
-                promptedLaunchOnly (fun _ _ _ -> async.Return(Error expected))
+                promptedLaunchOnly (fun _ _ _ _ -> async.Return(Error expected))
             let api, _ = createApiWithState root path None terminalLaunch
 
-            let session = api.launchSession { Path = path; Prompt = "Initial task" } |> runAsync
-            let action = api.launchAction { Path = path; Action = CreatePr } |> runAsync
+            let session = api.launchSession { Path = path; Prompt = "Initial task"; Model = None } |> runAsync
+            let action = api.launchAction { Path = path; Action = CreatePr; Model = None } |> runAsync
             let expectedResult: Result<EmbeddedTerminalStartResult, PromptedLaunchError> = Error expected
 
             Assert.Multiple(fun () ->
@@ -612,12 +657,12 @@ type WorktreeApiLaunchTests() =
             let calls = ConcurrentQueue<WorktreePath>()
             let terminalLaunch =
                 promptedLaunchOnly
-                    (fun _ path _ ->
+                    (fun _ _ path _ ->
                         calls.Enqueue path
                         async.Return(Error PromptedLaunchError.Unexpected))
             let api, _ = createApiWithState root known None terminalLaunch
-            let session = api.launchSession { Path = unknown; Prompt = "Initial task" } |> runAsync
-            let action = api.launchAction { Path = unknown; Action = CreatePr } |> runAsync
+            let session = api.launchSession { Path = unknown; Prompt = "Initial task"; Model = None } |> runAsync
+            let action = api.launchAction { Path = unknown; Action = CreatePr; Model = None } |> runAsync
             let expectedResult: Result<EmbeddedTerminalStartResult, PromptedLaunchError> =
                 Error(PromptedLaunchError.UnknownWorktree unknown)
 
@@ -641,7 +686,7 @@ type WorktreeApiLaunchTests() =
                 "record deleted worktree"
 
             let unavailable =
-                promptedLaunchOnly (fun _ _ _ -> async { return Error PromptedLaunchError.TerminalStartFailed })
+                promptedLaunchOnly (fun _ _ _ _ -> async { return Error PromptedLaunchError.TerminalStartFailed })
             let api, _ =
                 createApiWithState
                     root
@@ -688,7 +733,7 @@ type WorktreeApiLaunchTests() =
 
             let terminalLaunch =
                 promptedLaunchOnly
-                    (fun _ requestedPath prompt ->
+                    (fun _ _ requestedPath prompt ->
                         async {
                             let markerExists =
                                 File.Exists(
@@ -785,7 +830,7 @@ type WorktreeApiLaunchTests() =
 
             let terminalLaunch =
                 promptedLaunchOnly
-                    (fun _ requestedPath prompt ->
+                    (fun _ _ requestedPath prompt ->
                         async {
                             calls.Enqueue((requestedPath, prompt))
 
@@ -825,7 +870,7 @@ type WorktreeApiLaunchTests() =
             let expected = PromptedLaunchError.StartupFailed StartupPromptFailure.Rejected
             let terminalLaunch =
                 promptedLaunchOnly
-                    (fun _ path _ ->
+                    (fun _ _ path _ ->
                         calls.Enqueue path
                         async.Return(Error expected))
             let api, _ = createApiWithState root path None terminalLaunch
@@ -860,7 +905,7 @@ type WorktreeApiLaunchTests() =
                 let recoveredIdentity = collisionResistantProcessIdentityForSessionId recoveredSessionId
                 let recoveredTerminal = EmbeddedTerminalId "77777777777777777777777777777777"
                 let terminalLaunch =
-                    promptedLaunchOnly (fun _ requestedPath _ ->
+                    promptedLaunchOnly (fun _ _ requestedPath _ ->
                         async {
                             calls.Enqueue requestedPath
 
@@ -953,7 +998,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let launches = ConcurrentQueue<WorktreePath>()
             let terminalLaunch =
                 promptedLaunchOnly
-                    (fun _ requestedPath _ ->
+                    (fun _ _ requestedPath _ ->
                         async {
                             launches.Enqueue requestedPath
                             return Ok(startResult requestedPath (EmbeddedTerminalId.value terminalId))
@@ -1012,7 +1057,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let mutable attempts = 0
             let terminalLaunch =
                 promptedLaunchOnly
-                    (fun _ requestedPath _ ->
+                    (fun _ _ requestedPath _ ->
                         async {
                             attempts <- attempts + 1
                             if attempts = 1 then return Error PromptedLaunchError.TerminalStartFailed
@@ -1054,7 +1099,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
                     do! graceRelease.Task |> Async.AwaitTask
                 }
             let operations =
-                promptedLaunchOnly (fun _ _ _ -> failwith "A reachable busy bridge must not launch")
+                promptedLaunchOnly (fun _ _ _ _ -> failwith "A reachable busy bridge must not launch")
             let api, agent = createApiWithStateUsing delay CanvasBridge.beginPendingLaunch root path None operations
             agent.Post(UpdateSessionInstance(activity, now))
             use listener = new HttpListener()
@@ -1120,7 +1165,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let launches = ConcurrentQueue<WorktreePath>()
             let operations =
                 promptedLaunchOnly
-                    (fun _ requestedPath _ ->
+                    (fun _ _ requestedPath _ ->
                       async {
                           launches.Enqueue requestedPath
                           entered.TrySetResult() |> ignore
@@ -1174,7 +1219,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let launches = ConcurrentQueue<WorktreePath>()
             let operations =
                 promptedLaunchOnly
-                    (fun _ requestedPath _ ->
+                    (fun _ _ requestedPath _ ->
                       async {
                           launches.Enqueue requestedPath
                           entered.TrySetResult() |> ignore
@@ -1266,7 +1311,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let launches = ConcurrentQueue<WorktreePath>()
             let operations =
                 promptedLaunchOnly
-                    (fun _ requestedPath _ ->
+                    (fun _ _ requestedPath _ ->
                       async {
                           launches.Enqueue requestedPath
                           if launches.Count = 1 then
@@ -1394,7 +1439,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let launches = ConcurrentQueue<WorktreePath>()
             let operations =
                 promptedLaunchOnly
-                    (fun _ requestedPath _ ->
+                    (fun _ _ requestedPath _ ->
                       async {
                           launches.Enqueue requestedPath
                           let terminal = if launches.Count = 1 then firstTerminal else nextTerminal
@@ -1435,7 +1480,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
             let launches = ConcurrentQueue<WorktreePath>()
             let operations =
                 promptedLaunchOnly
-                    (fun _ requestedPath _ ->
+                    (fun _ _ requestedPath _ ->
                       async {
                           launches.Enqueue requestedPath
                           return Error PromptedLaunchError.TerminalStartFailed
@@ -1490,7 +1535,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
                         do! followerRelease.Task |> Async.AwaitTask
                 }
             let operations =
-                promptedLaunchOnly (fun _ _ _ -> failwith "Each selected recipient recovers its own bridge")
+                promptedLaunchOnly (fun _ _ _ _ -> failwith "Each selected recipient recovers its own bridge")
             let api, agent = createApiWithStateUsing delay CanvasBridge.beginPendingLaunch root path None operations
             let now = DateTimeOffset.UtcNow
             let originActivity = liveSession now path (EmbeddedTerminalId(Guid.NewGuid().ToString "N")) originator
@@ -1554,7 +1599,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
         withTempDir "treemon-canvas-invalid-source" (fun root ->
             let path = PathUtils.toWorktreePath root
             let operations =
-                promptedLaunchOnly (fun _ _ _ -> failwith "Invalid source must not launch a terminal")
+                promptedLaunchOnly (fun _ _ _ _ -> failwith "Invalid source must not launch a terminal")
             let api = createApi root path None operations
             let requestedPath = if source = "known" then path else WorktreePath source
             let result =
@@ -1567,7 +1612,7 @@ type WorktreeApiCanvasRoutingIntegrationTests() =
         withTempDir "treemon-canvas-invalid-payload" (fun root ->
             let path = PathUtils.toWorktreePath root
             let operations =
-                promptedLaunchOnly (fun _ _ _ -> failwith "Invalid payload must not launch a terminal")
+                promptedLaunchOnly (fun _ _ _ _ -> failwith "Invalid payload must not launch a terminal")
             let api = createApi root path None operations
             let oversized =
                 "{\"action\":\"comment\",\"text\":\""

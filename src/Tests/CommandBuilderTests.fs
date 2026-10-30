@@ -24,13 +24,41 @@ type BuildNewSessionCommandTests() =
 
     [<Test>]
     member _.``New session starts without a caller supplied identity or shell prompt``() =
-        let result = (build (Some CodingToolProvider.CopilotCli) NewSession).AsShellString
+        let result = (build (Some CodingToolProvider.CopilotCli) (NewSession None)).AsShellString
         Assert.That(result, Is.EqualTo("copilot --experimental --yolo"))
 
     [<Test>]
     member _.``None provider falls back to the default``() =
-        let result = (build None NewSession).AsShellString
+        let result = (build None (NewSession None)).AsShellString
         Assert.That(result, Is.EqualTo("copilot --experimental --yolo"))
+
+    [<TestCase("gpt-6.1-sol")>]
+    [<TestCase("provider/GPT_6.1-sol:preview+1")>]
+    member _.``New session passes a shell-safe model as one quoted argument``(model: string) =
+        let result =
+            ModelId.create model
+            |> Result.map (fun model -> (build None (NewSession(Some model))).AsShellString)
+
+        Assert.That(
+            result,
+            Is.EqualTo(Ok $"copilot --experimental --yolo --model='{model}'" : Result<string, PromptedLaunchError>))
+
+    [<TestCase(null)>]
+    [<TestCase("")>]
+    [<TestCase(" ")>]
+    [<TestCase("model&rem")>]
+    [<TestCase("model%PATH%")>]
+    [<TestCase("model\"with-quote")>]
+    [<TestCase("model's-name")>]
+    [<TestCase("model!NAME!")>]
+    [<TestCase("model^name|other>file")>]
+    [<TestCase("$(Write-Output ignored); --continue")>]
+    [<TestCase("model\nname")>]
+    [<TestCase("m\u00f8del")>]
+    member _.``Model identifiers reject empty values and shell syntax``(model: string) =
+        Assert.That(
+            ModelId.create model,
+            Is.EqualTo(Error PromptedLaunchError.InvalidModelId : Result<ModelId, PromptedLaunchError>))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -75,7 +103,7 @@ type PermissionFlagInvariantTests() =
     static member InvariantCases : obj array seq =
         seq {
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box Start |]
-            yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box NewSession |]
+            yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (NewSession None) |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Resume (Some "abc")) |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Resume None) |]
         }
@@ -93,7 +121,7 @@ type ExtensionDiscoveryFlagInvariantTests() =
 
     static member InvocationCases : obj array seq =
         seq {
-            yield [| box NewSession |]
+            yield [| box (NewSession None) |]
             yield [| box (Resume (Some "abc")) |]
             yield [| box (Resume None) |]
             yield [| box (NonInteractive "hello") |]

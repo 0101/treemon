@@ -1253,7 +1253,7 @@ let private verifyForcedDeliveryFailure
                 let command =
                     CodingToolCli.build
                         None
-                        CodingToolCli.NewSession
+                        (CodingToolCli.NewSession None)
 
                 let! result =
                     EmbeddedTerminal.startWithCommand
@@ -1498,7 +1498,8 @@ let private runScenario client fixture server api port =
                         let! result =
                             api.launchSession
                                 { Path = WorktreePath fixture.RoutesWorktree
-                                  Prompt = directPrompt }
+                                  Prompt = directPrompt
+                                  Model = None }
 
                         return
                             Some(
@@ -1619,7 +1620,8 @@ let private runScenario client fixture server api port =
                         let! result =
                             api.launchAction
                                 { Path = WorktreePath fixture.RoutesWorktree
-                                  Action = action }
+                                  Action = action
+                                  Model = None }
 
                         return
                             Some(
@@ -1704,7 +1706,8 @@ let private runScenario client fixture server api port =
                         let! result =
                             api.launchAction
                                 { Path = WorktreePath fixture.CanvasWorktree
-                                  Action = CanvasSession(canvasFilename, canvasPrompt) }
+                                  Action = CanvasSession(canvasFilename, canvasPrompt)
+                                  Model = None }
 
                         return
                             Some(

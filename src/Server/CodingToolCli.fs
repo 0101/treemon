@@ -1,10 +1,25 @@
 module Server.CodingToolCli
 
+open System
 open Shared
+
+/// A nonempty model identifier safe through both PowerShell and Windows CMD.
+type ModelId = private ModelId of string
+
+module ModelId =
+    let create (value: string) : Result<ModelId, PromptedLaunchError> =
+        if
+            not (String.IsNullOrEmpty value)
+            && (value |> Seq.forall (fun character ->
+                Char.IsAsciiLetterOrDigit character || "._-/:+".Contains character))
+        then
+            Ok(ModelId value)
+        else
+            Error PromptedLaunchError.InvalidModelId
 
 type InvocationMode =
     | Start
-    | NewSession
+    | NewSession of model: ModelId option
     | Resume of sessionId: string option
     | NonInteractive of prompt: string
 
@@ -28,9 +43,14 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
     | CodingToolProvider.CopilotCli, Start ->
         { Executable = "copilot"
           Args = "--yolo" }
-    | CodingToolProvider.CopilotCli, NewSession ->
+    | CodingToolProvider.CopilotCli, NewSession model ->
+        let modelArgument =
+            model
+            |> Option.map (fun (ModelId value) -> $" --model={quoted value}")
+            |> Option.defaultValue ""
+
         { Executable = "copilot"
-          Args = withExtensionDiscovery "--yolo" }
+          Args = withExtensionDiscovery $"--yolo{modelArgument}" }
     | CodingToolProvider.CopilotCli, Resume (Some id) ->
         { Executable = "copilot"
           Args = withExtensionDiscovery $"--yolo --session-id={quoted id}" }

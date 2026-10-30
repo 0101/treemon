@@ -3,6 +3,7 @@ module Server.TerminalLaunch
 open System
 open System.Text.Json
 open System.Threading
+open FsToolkit.ErrorHandling
 open Shared
 open Server.SessionActivity
 
@@ -15,10 +16,10 @@ type internal PromptedAgentDependencies =
         EmbeddedTerminalId -> Async<Result<EmbeddedTerminalSnapshot, string>>
       Timeout: TimeSpan }
 
-let internal startPromptedAgentWith dependencies provider worktreePath prompt =
-    let operation = async {
+let internal startPromptedAgentWith dependencies provider model worktreePath prompt =
+    let operation model = async {
         let command =
-            CodingToolCli.build provider CodingToolCli.NewSession
+            CodingToolCli.build provider (CodingToolCli.NewSession model)
 
         let! attempt =
             SessionBridge.startWithPrompt
@@ -62,13 +63,14 @@ let internal startPromptedAgentWith dependencies provider worktreePath prompt =
     }
 
     let guarded =
-        async {
+        asyncResult {
+            let! model = model |> Option.traverseResult CodingToolCli.ModelId.create
             try
-                return! operation
+                return! operation model
             with ex ->
                 let path = JsonSerializer.Serialize(WorktreePath.value worktreePath)
                 Log.logException "TerminalLaunch" $"Prompted launch failed for worktree={path}" ex
-                return Error PromptedLaunchError.Unexpected
+                return! Error PromptedLaunchError.Unexpected
         }
 
     async {
@@ -87,6 +89,7 @@ type internal Operations =
         Async<Result<EmbeddedTerminalStartResult, string>>
       StartPromptedAgent:
         CodingToolProvider option ->
+        string option ->
         WorktreePath ->
         string ->
         Async<Result<EmbeddedTerminalStartResult, PromptedLaunchError>> }
@@ -102,5 +105,5 @@ let internal create sessionAgent embeddedTerminal prepareSessionClose : Operatio
       StartEmbeddedTerminal = EmbeddedTerminal.start embeddedTerminal
       StartEmbeddedCommand = prompted.StartCommand
       StartPromptedAgent =
-        fun provider path prompt ->
-            startPromptedAgentWith prompted provider path prompt }
+        fun provider model path prompt ->
+            startPromptedAgentWith prompted provider model path prompt }

@@ -1,9 +1,14 @@
 module Tests.CliTests
 
 open System
+open System.IO
+open System.Text
+open Newtonsoft.Json
 open NUnit.Framework
 open Shared
 open Cli.Program
+open Tests.BridgeFixture
+open Tests.TestUtils
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -81,6 +86,20 @@ type LaunchCommandTests() =
                 Is.EqualTo([ "Error: Could not start the embedded terminal. Check the server log for details." ])))
 
     [<Test>]
+    member _.``invalid model errors explain the accepted syntax and fail the command``() =
+        let output = System.Collections.Concurrent.ConcurrentQueue<string>()
+        let errors = System.Collections.Concurrent.ConcurrentQueue<string>()
+        let exitCode =
+            writeLaunchResult output.Enqueue errors.Enqueue (Error PromptedLaunchError.InvalidModelId)
+
+        Assert.Multiple(fun () ->
+            Assert.That(exitCode, Is.EqualTo 1)
+            Assert.That(output, Is.Empty)
+            Assert.That(
+                errors.ToArray(),
+                Is.EqualTo [| "Error: Invalid Copilot model ID. Use only ASCII letters, digits, '.', '_', '-', '/', ':', or '+'." |]))
+
+    [<Test>]
     member _.``typed startup cleanup failure renders a complete CLI error``() =
         let output = System.Collections.Concurrent.ConcurrentQueue<string>()
         let errors = System.Collections.Concurrent.ConcurrentQueue<string>()
@@ -115,6 +134,84 @@ type LaunchCommandTests() =
             Assert.That(exitCode, Is.EqualTo(1))
             Assert.That(output, Is.Empty)
             Assert.That(errors.ToArray(), Is.EqualTo([| "Error: Unknown worktree path: repopath[31m" |])))
+
+[<TestFixture>]
+[<Category("Integration")>]
+[<Category("Fast")>]
+[<NonParallelizable>]
+type LaunchModelRequestTests() =
+
+    [<TestCase("--prompt-file", "")>]
+    [<TestCase("--prompt-file", "gpt-6.1-sol")>]
+    [<TestCase("--fix-pr", "")>]
+    [<TestCase("--fix-pr", "gpt-6.1-sol")>]
+    [<TestCase("--fix-build", "")>]
+    [<TestCase("--fix-build", "gpt-6.1-sol")>]
+    [<TestCase("--create-pr", "")>]
+    [<TestCase("--create-pr", "gpt-6.1-sol")>]
+    member _.``launch sends the optional model with each action``(action: string, model: string) =
+        withTempDir "treemon-cli-model" (fun root ->
+            withBridges 1 (fun bridges ->
+                let listener, url = List.exactlyOne bridges
+                let port = Uri(url).Port
+                listener.Prefixes.Add($"http://localhost:{port}/")
+                let promptFile = Path.Combine(root, "task.md")
+                File.WriteAllText(promptFile, "Implement the task")
+                let selectedModel = if model = "" then None else Some model
+                let converter = Fable.Remoting.Json.FableJsonConverter()
+                let response: Result<EmbeddedTerminalStartResult, PromptedLaunchError> =
+                    Ok
+                        { Snapshot = EmbeddedTerminalSnapshot.empty
+                          TerminalId = EmbeddedTerminalId "00000000000000000000000000000001" }
+                let incoming =
+                    async {
+                        let! context =
+                            listener.GetContextAsync().WaitAsync(TimeSpan.FromSeconds 5.0)
+                            |> Async.AwaitTask
+                        use reader = new StreamReader(context.Request.InputStream)
+                        let body = reader.ReadToEnd()
+                        let bytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(response, converter))
+                        context.Response.ContentType <- "application/json"
+                        context.Response.ContentLength64 <- int64 bytes.Length
+                        do! context.Response.OutputStream.WriteAsync(bytes).AsTask() |> Async.AwaitTask
+                        context.Response.Close()
+                        return context.Request.Url.AbsolutePath, body
+                    }
+                    |> Async.StartAsTask
+                let arguments =
+                    [ "launch"; "--path"; root; action
+                      match action with
+                      | "--prompt-file" -> promptFile
+                      | "--fix-pr"
+                      | "--fix-build" -> "https://example.test/task/42"
+                      | _ -> ()
+                      "--port"; string port
+                      if model <> "" then
+                          "--model"
+                          model ]
+                    |> List.toArray
+                let exitCode = main arguments
+                let route, body = incoming.GetAwaiter().GetResult()
+                let path = WorktreePath(Path.GetFullPath root)
+
+                Assert.That(exitCode, Is.Zero)
+                if action = "--prompt-file" then
+                    let request = JsonConvert.DeserializeObject<LaunchRequest[]>(body, converter) |> Array.exactlyOne
+                    Assert.Multiple(fun () ->
+                        Assert.That(route, Is.EqualTo "/IWorktreeApi/launchSession")
+                        Assert.That(request, Is.EqualTo { Path = path; Prompt = metaPrompt; Model = selectedModel })
+                        Assert.That(File.ReadAllText(Path.Combine(root, ".agents", "prompt.md")), Is.EqualTo "Implement the task"))
+                else
+                    let request = JsonConvert.DeserializeObject<ActionRequest[]>(body, converter) |> Array.exactlyOne
+                    let expectedAction =
+                        match action with
+                        | "--fix-pr" -> FixPr "https://example.test/task/42"
+                        | "--fix-build" -> FixBuild "https://example.test/task/42"
+                        | _ -> CreatePr
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(route, Is.EqualTo "/IWorktreeApi/launchAction")
+                        Assert.That(request, Is.EqualTo { Path = path; Action = expectedAction; Model = selectedModel }))))
 
 [<TestFixture>]
 [<Category("Unit")>]
