@@ -103,6 +103,38 @@ type CanvasDefaultTypographyTests() =
         }
 
     [<Test>]
+    member this.``authored and nested heading emphasis stays visible with the bundled font``() =
+        task {
+            do! this.Page.RouteAsync("**/*", fun route -> route.AbortAsync())
+            let doc =
+                """<!doctype html><html><head><style>
+                h2 { width: 360px; height: 40px; margin: 0; }
+                </style></head><body>
+                <h2>Authored emphasis</h2>
+                <h2 style="font-weight:700">Authored emphasis</h2>
+                <h2 style="font-style:italic">Authored emphasis</h2>
+                <h2><strong>Authored emphasis</strong></h2>
+                <h2><em>Authored emphasis</em></h2>
+                </body></html>"""
+            let variants =
+                [ "AgentDoc", injectInto AgentDoc "emphasis.html" doc
+                  "SystemView", injectInto SystemView "emphasis.html" doc
+                  "Export", Server.CanvasExport.buildStaticHtml doc ]
+
+            for name, html in variants do
+                do! this.Page.SetContentAsync(html)
+                let! fontLoaded =
+                    this.Page.EvaluateAsync<bool>(
+                        "async () => { const faces = await document.fonts.load('500 22px Manrope'); return faces.length > 0; }")
+                Assert.That(fontLoaded, Is.True, $"{name}: the bundled face must be loaded")
+                let headings = this.Page.Locator("h2")
+                let! plain = headings.First.ScreenshotAsync()
+                for index, emphasis in [ 1, "authored bold"; 2, "authored italic"; 3, "strong"; 4, "em" ] do
+                    let! emphasized = headings.Nth(index).ScreenshotAsync()
+                    Assert.That((emphasized = plain), Is.False, $"{name}: {emphasis} must visibly change the heading")
+        }
+
+    [<Test>]
     member this.``authored heading tokens and element rules override the new defaults``() =
         task {
             let doc =
