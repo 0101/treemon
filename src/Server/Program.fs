@@ -669,7 +669,7 @@ let main args =
 
                 let schedulerServices: RefreshScheduler.SchedulerServices =
                     { StartPromptedAgent =
-                        terminalLaunch.StartPromptedAgent
+                        fun provider -> terminalLaunch.StartPromptedAgent provider None
                       ActivityStore = Some store
                       MergedPrStore = mergedStore
                       AutoSyncStore = autoSyncStore }

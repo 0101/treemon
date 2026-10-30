@@ -784,7 +784,7 @@ let internal worktreeApiWithLaunchUsing
     let autoSyncDependencies =
         RefreshScheduler.autoSyncDependencies
             agent
-            terminalLaunch.StartPromptedAgent
+            (fun provider -> terminalLaunch.StartPromptedAgent provider None)
             activityStore
             autoSyncStore
 
@@ -1099,7 +1099,7 @@ let internal worktreeApiWithLaunchUsing
                       let path = WorktreePath.value req.Path
                       let provider = CodingToolStatus.readConfiguredProvider path
                       return!
-                          terminalLaunch.StartPromptedAgent provider req.Path req.Prompt
+                          terminalLaunch.StartPromptedAgent provider req.Model req.Path req.Prompt
                           |> terminalStart
                   })
           focusSession = fun wtPath ->
@@ -1194,7 +1194,7 @@ let internal worktreeApiWithLaunchUsing
                                   | Some worktrees when worktrees |> List.exists (fun wt -> pathEquals wt.Path newPath) ->
                                       agent.Post(SchedulerState.StateMsg.UpdateWorktreeList(repoId, worktrees))
 
-                                      match! terminalLaunch.StartPromptedAgent provider (WorktreePath newPath) wrapped with
+                                      match! terminalLaunch.StartPromptedAgent provider None (WorktreePath newPath) wrapped with
                                       | Ok _ -> ()
                                       | Error error ->
                                           let reason = JsonConvert.SerializeObject(PromptedLaunchError.message error)
@@ -1247,7 +1247,7 @@ let internal worktreeApiWithLaunchUsing
                       let provider = CodingToolStatus.readConfiguredProvider path
                       let startPrompted () =
                           let prompt = CodingToolStatus.actionPrompt provider req.Action
-                          terminalLaunch.StartPromptedAgent provider req.Path prompt
+                          terminalLaunch.StartPromptedAgent provider req.Model req.Path prompt
                           |> terminalStart
 
                       match req.Action with
@@ -1365,7 +1365,7 @@ let internal worktreeApiWithLaunchUsing
                                                           let provider = CodingToolStatus.readConfiguredProvider path
                                                           let prompt = CanvasPrompt.continueWorking path request.Filename
                                                           Log.log "API" $"sendCanvasMessage: launching an interaction terminal for {request.Filename}"
-                                                          match! terminalLaunch.StartPromptedAgent provider request.WorktreePath prompt |> Async.Catch with
+                                                          match! terminalLaunch.StartPromptedAgent provider None request.WorktreePath prompt |> Async.Catch with
                                                           | Choice1Of2(Ok started) ->
                                                               return! completeLaunch launchAt started.TerminalId
                                                           | Choice1Of2(Error error) ->

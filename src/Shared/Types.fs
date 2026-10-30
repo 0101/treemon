@@ -461,11 +461,13 @@ type ActionKind =
 
 type ActionRequest =
     { Path: WorktreePath
-      Action: ActionKind }
+      Action: ActionKind
+      Model: string option }
 
 type LaunchRequest =
     { Path: WorktreePath
-      Prompt: string }
+      Prompt: string
+      Model: string option }
 
 type CreateWorktreeRequest =
     { RepoId: string

@@ -24,13 +24,21 @@ type BuildNewSessionCommandTests() =
 
     [<Test>]
     member _.``New session starts without a caller supplied identity or shell prompt``() =
-        let result = (build (Some CodingToolProvider.CopilotCli) NewSession).AsShellString
+        let result = (build (Some CodingToolProvider.CopilotCli) (NewSession None)).AsShellString
         Assert.That(result, Is.EqualTo("copilot --experimental --yolo"))
 
     [<Test>]
     member _.``None provider falls back to the default``() =
-        let result = (build None NewSession).AsShellString
+        let result = (build None (NewSession None)).AsShellString
         Assert.That(result, Is.EqualTo("copilot --experimental --yolo"))
+
+    [<TestCase("gpt-6.1-sol", "gpt-6.1-sol")>]
+    [<TestCase("model's-name", "model''s-name")>]
+    [<TestCase("$(Write-Output injected); --continue", "$(Write-Output injected); --continue")>]
+    member _.``New session passes the model as one quoted argument``(model: string, escaped: string) =
+        let result = (build None (NewSession(Some model))).AsShellString
+
+        Assert.That(result, Is.EqualTo($"copilot --experimental --yolo --model='{escaped}'"))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -75,7 +83,7 @@ type PermissionFlagInvariantTests() =
     static member InvariantCases : obj array seq =
         seq {
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box Start |]
-            yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box NewSession |]
+            yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (NewSession None) |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Resume (Some "abc")) |]
             yield [| box CodingToolProvider.CopilotCli; box "--yolo"; box (Resume None) |]
         }
@@ -93,7 +101,7 @@ type ExtensionDiscoveryFlagInvariantTests() =
 
     static member InvocationCases : obj array seq =
         seq {
-            yield [| box NewSession |]
+            yield [| box (NewSession None) |]
             yield [| box (Resume (Some "abc")) |]
             yield [| box (Resume None) |]
             yield [| box (NonInteractive "hello") |]

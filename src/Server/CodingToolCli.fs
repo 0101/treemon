@@ -4,7 +4,7 @@ open Shared
 
 type InvocationMode =
     | Start
-    | NewSession
+    | NewSession of model: string option
     | Resume of sessionId: string option
     | NonInteractive of prompt: string
 
@@ -28,9 +28,14 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
     | CodingToolProvider.CopilotCli, Start ->
         { Executable = "copilot"
           Args = "--yolo" }
-    | CodingToolProvider.CopilotCli, NewSession ->
+    | CodingToolProvider.CopilotCli, NewSession model ->
+        let modelArgument =
+            model
+            |> Option.map (fun value -> $" --model={quoted value}")
+            |> Option.defaultValue ""
+
         { Executable = "copilot"
-          Args = withExtensionDiscovery "--yolo" }
+          Args = withExtensionDiscovery $"--yolo{modelArgument}" }
     | CodingToolProvider.CopilotCli, Resume (Some id) ->
         { Executable = "copilot"
           Args = withExtensionDiscovery $"--yolo --session-id={quoted id}" }

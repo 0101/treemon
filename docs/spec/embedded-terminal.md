@@ -188,7 +188,11 @@ native-kill prompt remain tied only to a tracked Windows Terminal window. Existi
 status continues to show whether an embedded agent is working.
 
 Fresh prompted launches run `copilot --experimental --yolo`, letting Copilot create its own durable
-session ID. Treemon reserves the complete initial instruction before launch, then binds delivery
+session ID. Every `tm launch` action accepts an optional `--model <model-id>`, carried through its
+shared launch request and passed as a single quoted Copilot `--model` argument. Model names are
+validated by Copilot rather than a Treemon-maintained list. Omitting the option preserves Copilot's
+model selection; dashboard and automatic launches do not override it.
+Treemon reserves the complete initial instruction before launch, then binds delivery
 to the exact returned terminal. That terminal's registered extension receives the `startup-prompt`
 over the bridge and submits the original text through `session.send`. Prompt text never passes
 through shell arguments: Windows CMD shims do not reliably preserve multiline or quoted data.

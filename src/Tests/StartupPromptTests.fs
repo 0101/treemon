@@ -50,6 +50,7 @@ let private start timeout launch close path prompt =
           CloseTerminal = close
           Timeout = timeout }
         None
+        None
         path
         prompt
     |> Async.StartAsTask
@@ -67,11 +68,13 @@ let private assertStarted expected (result: Result<EmbeddedTerminalStartResult, 
 [<NonParallelizable>]
 type StartupPromptTests() =
 
-    [<TestCase("AgentDoc")>]
-    [<TestCase("SystemView")>]
-    [<TestCase("worktree")>]
-    member _.``full initial prompt crosses the bridge and launch waits for acceptance``(kind: string) =
+    [<TestCase("AgentDoc", "")>]
+    [<TestCase("SystemView", "")>]
+    [<TestCase("worktree", "")>]
+    [<TestCase("worktree", "gpt-6.1-sol")>]
+    member _.``full initial prompt crosses the bridge and launch waits for acceptance``(kind: string, model: string) =
         withBridges 1 (fun bridges ->
+            let selectedModel = if model = "" then None else Some model
             let listener, url = List.exactlyOne bridges
             let path = WorktreePath(uniquePath "owner's repo with spaces & %PATH%")
             let sessionId = Guid.NewGuid().ToString()
@@ -91,19 +94,24 @@ type StartupPromptTests() =
 
             let incoming = listener.GetContextAsync()
             let launched =
-                start
-                    (TimeSpan.FromSeconds 5.0)
-                    (fun requestedPath command ->
-                        async {
-                            commands.Enqueue(requestedPath, command)
-                            register (WorktreePath.value path) (Some sessionId) url
-                            return Ok expectedStart
-                        })
-                    (fun id ->
-                        closes.Enqueue id
-                        async.Return(Ok EmbeddedTerminalSnapshot.empty))
+                TerminalLaunch.startPromptedAgentWith
+                    { StartCommand =
+                        fun requestedPath command ->
+                            async {
+                                commands.Enqueue(requestedPath, command)
+                                register (WorktreePath.value path) (Some sessionId) url
+                                return Ok expectedStart
+                            }
+                      CloseTerminal =
+                        fun id ->
+                            closes.Enqueue id
+                            async.Return(Ok EmbeddedTerminalSnapshot.empty)
+                      Timeout = TimeSpan.FromSeconds 5.0 }
+                    None
+                    selectedModel
                     path
                     prompt
+                |> Async.StartAsTask
 
             let context = await incoming
             let wireKind, deliveredPrompt = readPrompt context
@@ -115,7 +123,9 @@ type StartupPromptTests() =
                 Assert.That(
                     commands.ToArray(),
                     Is.EqualTo(
-                        [| path, "copilot --experimental --yolo" |]))
+                        [| path,
+                           if model = "" then "copilot --experimental --yolo"
+                           else $"copilot --experimental --yolo --model='{model}'" |]))
                 Assert.That(closes, Is.Empty))
 
             if kind = "AgentDoc" || kind = "SystemView" then
@@ -846,6 +856,7 @@ type StartupPromptTests() =
                             async.Return(Ok EmbeddedTerminalSnapshot.empty)
                       Timeout = TimeSpan.FromSeconds 5.0 }
                     None
+                    None
                     path
                     "Initial task"
             let launched = Async.StartAsTask(operation, cancellationToken = caller.Token)
@@ -864,14 +875,16 @@ type StartupPromptTests() =
 [<Platform("Win")>]
 type StartupCommandTransportTests() =
 
-    [<Test>]
-    member _.``CMD launcher receives fresh startup flags without a session selector``() =
+    [<TestCase("")>]
+    [<TestCase("gpt-6.1-sol")>]
+    member _.``CMD launcher receives fresh startup flags and optional model without a session selector``(model: string) =
         withTempDir "treemon-startup argv owner's fixture" (fun root ->
+            let selectedModel = if model = "" then None else Some model
             let scriptPath = Path.Combine(root, "launch.ps1")
             let shimPath = Path.Combine(root, "copilot.cmd")
             let recordingPath = Path.Combine(root, "argv.jsonl")
             let command =
-                CodingToolCli.build None CodingToolCli.NewSession
+                CodingToolCli.build None (CodingToolCli.NewSession selectedModel)
                 |> _.AsShellString
 
             File.WriteAllText(
@@ -913,4 +926,5 @@ type StartupCommandTransportTests() =
             Assert.That(
                 arguments,
                 Is.EqualTo(
-                    [ "--no-auto-update"; "--experimental"; "--yolo" ])))
+                    [ "--no-auto-update"; "--experimental"; "--yolo"
+                      yield! selectedModel |> Option.map (fun value -> $"--model={value}") |> Option.toList ])))

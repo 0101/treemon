@@ -1425,7 +1425,7 @@ let update msg model =
                 path
                 (fun () ->
                     worktreeApi.Value.launchAction
-                        { Path = path; Action = action })
+                        { Path = path; Action = action; Model = None })
                 model
         | None ->
             model, Cmd.none
@@ -1449,7 +1449,7 @@ let update msg model =
                     path
                     (fun () ->
                         worktreeApi.Value.launchAction
-                            { Path = path; Action = action })
+                            { Path = path; Action = action; Model = None })
                 clearAfter
             ]
 

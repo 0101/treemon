@@ -43,6 +43,9 @@ tm launch --path <worktree-path> --create-pr
 
 Exactly one action must be specified per launch. The `--prompt-file` option accepts a path to a markdown file containing instructions. The file is copied into the worktree at `.agents/prompt.md` and the agent is directed to read it.
 
+Any launch action accepts `--model <model-id>` to select the Copilot model for that launch.
+Omit it to keep Copilot's configured model selection.
+
 ### Create a worktree
 
 ```bash
