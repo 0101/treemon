@@ -1,12 +1,22 @@
 module Server.TerminalLaunch
 
 open System
-open System.Text.Json
 open System.Threading
 open Shared
 open Server.SessionActivity
 
 let internal startupPromptTimeout = TimeSpan.FromMinutes 2.0
+
+type internal PromptedAgentRequest =
+    { Provider: CodingToolProvider option
+      Prompt: string
+      Diagnostics: PromptedLaunchDiagnostics.Attempt }
+
+let internal request provider path prompt =
+    { Provider = provider
+      Prompt = prompt
+      Diagnostics =
+        PromptedLaunchDiagnostics.create (SessionId(Guid.NewGuid().ToString())) path }
 
 type internal PromptedAgentDependencies =
     { StartCommand:
@@ -15,50 +25,55 @@ type internal PromptedAgentDependencies =
         EmbeddedTerminalId -> Async<Result<EmbeddedTerminalSnapshot, string>>
       Timeout: TimeSpan }
 
-let internal startPromptedAgentWith dependencies provider worktreePath prompt =
+let internal startPromptedAgentWith dependencies (request: PromptedAgentRequest) =
+    let diagnostics = request.Diagnostics
+    let worktreePath = diagnostics.WorktreePath
     let operation = async {
         let command =
-            CodingToolCli.build provider CodingToolCli.NewSession
+            CodingToolCli.build request.Provider CodingToolCli.NewSession
+        diagnostics.Emit(
+            PromptedLaunchDiagnostics.Event.CommandStarting(
+                request.Provider, command.AsShellString, request.Prompt.Length, dependencies.Timeout))
 
         let! attempt =
             SessionBridge.startWithPrompt
                 dependencies.Timeout
-                (WorktreePath.value worktreePath)
-                prompt
-                (fun () -> dependencies.StartCommand worktreePath command.AsShellString)
+                diagnostics
+                request.Prompt
+                (fun () ->
+                    async {
+                        let! result = dependencies.StartCommand worktreePath command.AsShellString
+                        match result with
+                        | Ok started ->
+                            diagnostics.Emit(PromptedLaunchDiagnostics.Event.TerminalStarted started.TerminalId)
+                        | Error error ->
+                            diagnostics.Emit(
+                                PromptedLaunchDiagnostics.Event.Failed(
+                                    PromptedLaunchDiagnostics.Failure.TerminalStartFailed error))
+                        return result
+                    })
 
         match attempt with
         | SessionBridge.StartupResult.Accepted started -> return Ok started
-        | SessionBridge.StartupResult.LaunchFailed error ->
-            let path = JsonSerializer.Serialize(WorktreePath.value worktreePath)
-            Log.log "TerminalLaunch" $"Prompted terminal start failed for worktree={path}: {JsonSerializer.Serialize error}"
+        | SessionBridge.StartupResult.LaunchFailed _ ->
             return Error PromptedLaunchError.TerminalStartFailed
         | SessionBridge.StartupResult.PromptFailed(started, failure) ->
+            diagnostics.Emit PromptedLaunchDiagnostics.Event.CleanupStarted
             let! cleanup =
                 dependencies.CloseTerminal started.TerminalId
                 |> Async.Catch
 
-            match cleanup with
-            | Choice1Of2(Ok _) -> return Error(PromptedLaunchError.StartupFailed failure)
-            | Choice1Of2(Error cleanupError) ->
-                Log.log
-                    "TerminalLaunch"
-                    $"Prompted launch cleanup failed for terminal={EmbeddedTerminalId.value started.TerminalId}: {JsonSerializer.Serialize cleanupError}"
-                return
-                    Error(
-                        PromptedLaunchError.StartupCleanupFailed(
-                            failure,
-                            started.TerminalId))
-            | Choice2Of2 ex ->
-                Log.logException
-                    "TerminalLaunch"
-                    $"Failed to close prompted launch terminal={EmbeddedTerminalId.value started.TerminalId}"
-                    ex
-                return
-                    Error(
-                        PromptedLaunchError.StartupCleanupFailed(
-                            failure,
-                            started.TerminalId))
+            let cleanupResult =
+                match cleanup with
+                | Choice1Of2 result -> result |> Result.map ignore
+                | Choice2Of2 ex -> Error(ex.ToString())
+
+            diagnostics.Emit(PromptedLaunchDiagnostics.Event.CleanupCompleted cleanupResult)
+
+            return
+                match cleanupResult with
+                | Ok () -> Error(PromptedLaunchError.StartupFailed failure)
+                | Error _ -> Error(PromptedLaunchError.StartupCleanupFailed(failure, started.TerminalId))
     }
 
     let guarded =
@@ -66,8 +81,9 @@ let internal startPromptedAgentWith dependencies provider worktreePath prompt =
             try
                 return! operation
             with ex ->
-                let path = JsonSerializer.Serialize(WorktreePath.value worktreePath)
-                Log.logException "TerminalLaunch" $"Prompted launch failed for worktree={path}" ex
+                diagnostics.Emit(
+                    PromptedLaunchDiagnostics.Event.Failed(
+                        PromptedLaunchDiagnostics.Failure.Unexpected ex))
                 return Error PromptedLaunchError.Unexpected
         }
 
@@ -86,10 +102,11 @@ type internal Operations =
         string ->
         Async<Result<EmbeddedTerminalStartResult, string>>
       StartPromptedAgent:
-        CodingToolProvider option ->
-        WorktreePath ->
-        string ->
+        PromptedAgentRequest ->
         Async<Result<EmbeddedTerminalStartResult, PromptedLaunchError>> }
+
+let internal start (operations: Operations) provider path prompt =
+    operations.StartPromptedAgent(request provider path prompt)
 
 let internal create sessionAgent embeddedTerminal prepareSessionClose : Operations =
     let prompted =
@@ -101,6 +118,4 @@ let internal create sessionAgent embeddedTerminal prepareSessionClose : Operatio
     { OpenNativeTerminal = SessionManager.spawnTerminal sessionAgent
       StartEmbeddedTerminal = EmbeddedTerminal.start embeddedTerminal
       StartEmbeddedCommand = prompted.StartCommand
-      StartPromptedAgent =
-        fun provider path prompt ->
-            startPromptedAgentWith prompted provider path prompt }
+      StartPromptedAgent = startPromptedAgentWith prompted }

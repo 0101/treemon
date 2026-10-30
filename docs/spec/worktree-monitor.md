@@ -83,6 +83,12 @@ Machine-level configuration persists in `~/.treemon/config.json` (or `$TREEMON_C
 - Log routing is selected from server arguments, not an environment variable, so terminals and
   other child processes cannot inherit the production log destination. `treemon.ps1` continues to
   capture production stdout and stderr in separate timestamped `treemon-prod*.log` files.
+- Append failures are reported to stderr with the failed record instead of being silently ignored.
+  A creation request whose initial diagnostic record cannot be saved returns a nonfatal warning;
+  worktree creation and the existing launch behavior still proceed.
+- `[Launch]` entries contain one escaped JSON object per event. A `launchId`, worktree path,
+  sequence number, elapsed milliseconds, last reached milestone, and eventual terminal ID correlate
+  creation, setup, discovery, prompted startup, and cleanup without per-heartbeat noise.
 
 ### Production Lifecycle
 
@@ -243,10 +249,15 @@ A "+" button on each repo header opens a modal to create new worktrees without l
   modal directs the user to manual cleanup and a dashboard reload before reusing the path.
 - After creation, an optional `post-fork.ps1` (Windows) / `post-fork.sh` (Unix) in the repo root runs **inside the new worktree**, receiving `{worktreePath} {sourceRepoRoot} {baseRef} {branchName}`. It is for setup only (symlinks, dependency install). Because setup can be slow, it runs **asynchronously in a background task** *after* the create call returns, capped at a **5-minute timeout** (a run that exceeds it is treated as a failure). Its lifecycle is tracked in `CardEventLog` (`PostForkStarted` → `PostForkEnded(status)`), and the client refreshes those card events through `getSyncStatus` on the normal dashboard poll. The existing post-fork event is visible while setup is running. It disappears after success, while a genuine failure or timeout remains visible; failure is non-fatal since the worktree already exists.
 - Legacy `fork.ps1`/`fork.sh` scripts are **no longer executed** — Treemon now owns forking. If one is present, creation still succeeds but returns a warning to migrate setup steps into `post-fork.*`.
-- Warnings returned by `createWorktree` (`Result<string list, string>`) now carry **only the legacy-fork-script advisory** and are surfaced in the modal (UI) or console (CLI); running and failed post-fork setup is surfaced on the card (successful runs stay hidden), not through this return value. Internally, `forkWorktree` performs the fork (returning a `ForkResult`) and `runPostFork` runs the hook.
+- Warnings returned by `createWorktree` (`Result<string list, string>`) carry the legacy-fork-script advisory and an initial-log-persistence warning when applicable, surfaced in the modal (UI) or console (CLI); running and failed post-fork setup is surfaced on the card (successful runs stay hidden), not through this return value. Internally, `forkWorktree` performs the fork (returning a `ForkResult`) and `runPostFork` runs the hook.
 - Modal shows creating animation, then auto-closes on clean success, or shows warnings / error
 - Server expedites worktree list refresh for the repo so the new card appears quickly
-- **Optional prompt** — a multi-line textarea below the source-branch dropdown. A non-blank value auto-launches a coding-agent session in the new worktree; **Enter inserts a newline** (it does not submit — the Create button submits, Escape closes), and a blank/whitespace prompt is a no-op (identical to the no-prompt flow). The prompt rides the create request as a `string option`.
+- **Optional prompt** — a multi-line textarea below the source-branch dropdown. A non-blank value auto-launches a coding-agent session in the new worktree; **Enter inserts a newline** (it does not submit — the Create button submits, Escape closes), and a blank/whitespace prompt is a no-op (identical to the no-prompt flow). The prompt rides the create request as a `string option`, preserving its original whitespace and line breaks.
+- Before Git creation or deferred setup, `creation-requested` saves the complete original prompt
+  in `data.originalPrompt` and the selected skill in `data.skill` of a local `[Launch]` record,
+  alongside repository and branch context. JSON escaping preserves multiline, quoted, and Unicode
+  content without allowing it to forge log events. The prompt is not truncated or replaced by its
+  skill-wrapped invocation, and startup queue removal does not remove this persisted record.
 - **Skill selection** — a radio group between the source-branch dropdown and the prompt textarea chooses which skill wraps the prompt on launch. A built-in **None** option (always present) sends the prompt **verbatim**; each configured skill wraps it. The chosen skill rides the create request as a `string option` (`None` ⇒ verbatim). The offered skills are the machine-level `worktreeSkills` list (see below); the first entry is the default selection. When no skills are configured the only option is None, and a subtle hint next to it points at `~/.treemon/config.json` (`worktreeSkills`).
 - On a non-blank prompt the server, after a successful create, **fire-and-forget** starts a
   background launch that waits for post-fork setup to finish (success or failure), then starts an
@@ -261,6 +272,12 @@ A "+" button on each repo header opens a modal to create new worktrees without l
   failed listing or a listing missing the newly created path skips launch rather than starting an
   unmonitored, unprompted session. The diagnostic identifies the repository and new worktree as
   escaped data, distinguishes those discovery failures, and includes the count for a missing path.
+- The same `launchId` follows post-fork completion or failure, discovery, command submission,
+  exact-terminal start, bridge matching, prompt delivery, SDK acceptance or failure, and cleanup.
+  Startup diagnostics distinguish an absent bridge, unrelated sessions, the expected bridge in
+  another worktree, a matching bridge not dispatched, and delivery without observed acceptance.
+  HTTP rejection records status and response length, not response content. The trace reports the
+  last observed milestone; it does not infer an external CLI's unseen internal failure.
 - The offered skills are config-driven: the machine-level `~/.treemon/config.json` `worktreeSkills` (a string array, blank entries dropped, **empty by default**), surfaced to the client via `DashboardResponse.WorktreeSkills` (like `EditorName`).
 
 ### Native Session Management
@@ -430,6 +447,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/PathUtils.fs` | Canonical path normalization and `RepoId` / `WorktreePath` construction |
 | `src/Server/SessionManager.fs` | Explicit native card-terminal spawn/focus/kill and persistence |
 | `src/Server/TerminalLaunch.fs` | Shared native-versus-embedded terminal launch policy |
+| `src/Server/PromptedLaunchDiagnostics.fs` | Correlated creation/startup trace and recoverable original creation-prompt logging |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
 | `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, TerminalHost update overlay, subscriptions, and top-level view wiring |
 | `src/Client/CardViews.fs` | Worktree card rendering, including the persistent circular two-arrow auto-sync toggle, action buttons, badges, and event-log helpers |

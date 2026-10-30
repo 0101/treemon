@@ -784,7 +784,7 @@ let internal worktreeApiWithLaunchUsing
     let autoSyncDependencies =
         RefreshScheduler.autoSyncDependencies
             agent
-            terminalLaunch.StartPromptedAgent
+            (TerminalLaunch.start terminalLaunch)
             activityStore
             autoSyncStore
 
@@ -1099,7 +1099,7 @@ let internal worktreeApiWithLaunchUsing
                       let path = WorktreePath.value req.Path
                       let provider = CodingToolStatus.readConfiguredProvider path
                       return!
-                          terminalLaunch.StartPromptedAgent provider req.Path req.Prompt
+                          TerminalLaunch.start terminalLaunch provider req.Path req.Prompt
                           |> terminalStart
                   })
           focusSession = fun wtPath ->
@@ -1152,13 +1152,34 @@ let internal worktreeApiWithLaunchUsing
                       |> Result.requireSome $"Unknown repo: {req.RepoId}"
 
                   let branchName = BranchName.value req.BranchName
-                  let! deletedPaths = DeletedWorktreeStore.readAtPath deletedWorktreeFile
                   let newPath = Shared.PathUtils.siblingWorktreePath root branchName
+                  let diagnostics =
+                      PromptedLaunchDiagnostics.create
+                          (SessionActivity.SessionId(Guid.NewGuid().ToString()))
+                          (WorktreePath newPath)
+                  let promptWarnings =
+                      match diagnostics.Record(PromptedLaunchDiagnostics.Event.CreationRequested req) with
+                      | Ok() -> []
+                      | Error _ ->
+                          [ "The creation prompt and diagnostics could not be saved to the server log. See server stderr for the failed record." ]
+                  let reportCreationError message =
+                      diagnostics.Emit(
+                          PromptedLaunchDiagnostics.Event.Failed(
+                              PromptedLaunchDiagnostics.Failure.CreationFailed message))
+                      message
+                  let! deletedPaths =
+                      DeletedWorktreeStore.readAtPath deletedWorktreeFile
+                      |> Result.mapError reportCreationError
 
                   if deletedPaths |> Set.exists (fun path -> pathEquals path newPath) then
-                      return! Error "This worktree path is hidden by a deleted-worktree record. Run /cleaning-deleted-worktrees before reusing it."
+                      return!
+                          Error(reportCreationError "This worktree path is hidden by a deleted-worktree record. Run /cleaning-deleted-worktrees before reusing it.")
 
-                  let! fork = GitWorktree.forkWorktree root (BranchName.value req.BaseBranch) branchName
+                  diagnostics.Emit(PromptedLaunchDiagnostics.Event.Progress PromptedLaunchDiagnostics.Milestone.CreatingWorktree)
+                  let! fork =
+                      GitWorktree.forkWorktree root (BranchName.value req.BaseBranch) branchName
+                      |> AsyncResult.mapError reportCreationError
+                  diagnostics.Emit(PromptedLaunchDiagnostics.Event.Progress PromptedLaunchDiagnostics.Milestone.WorktreeCreated)
                   agent.Post(SchedulerState.StateMsg.ExpediteRefresh repoId)
 
                   // Fire-and-forget: when a prompt was supplied, start an embedded coding-agent
@@ -1184,30 +1205,37 @@ let internal worktreeApiWithLaunchUsing
                               | Some skill -> CodingToolStatus.skillInvocation provider skill prompt
                               | None -> prompt
                           async {
-                              let context =
-                                  $"worktree={JsonConvert.SerializeObject newPath} repository={JsonConvert.SerializeObject root}"
-
                               try
+                                  diagnostics.Emit(
+                                      PromptedLaunchDiagnostics.Event.Progress PromptedLaunchDiagnostics.Milestone.DiscoveringWorktree)
                                   let! worktrees = GitWorktree.listWorktrees root
 
                                   match worktrees with
                                   | Some worktrees when worktrees |> List.exists (fun wt -> pathEquals wt.Path newPath) ->
+                                      diagnostics.Emit(PromptedLaunchDiagnostics.Event.WorktreeDiscovered worktrees.Length)
                                       agent.Post(SchedulerState.StateMsg.UpdateWorktreeList(repoId, worktrees))
 
-                                      match! terminalLaunch.StartPromptedAgent provider (WorktreePath newPath) wrapped with
-                                      | Ok _ -> ()
-                                      | Error error ->
-                                          let reason = JsonConvert.SerializeObject(PromptedLaunchError.message error)
-                                          Log.log "API" $"Auto-launch failed for {context}: {reason}"
+                                      let! result =
+                                          terminalLaunch.StartPromptedAgent
+                                              { Provider = provider
+                                                Prompt = wrapped
+                                                Diagnostics = diagnostics }
+                                      diagnostics.Emit(
+                                          PromptedLaunchDiagnostics.Event.LaunchCompleted(
+                                              result |> Result.map (fun _ -> ()) |> Result.mapError PromptedLaunchError.message))
                                   | None ->
-                                      Log.log "API" $"Auto-launch failed for {context}: could not list repository worktrees"
+                                      diagnostics.Emit(
+                                          PromptedLaunchDiagnostics.Event.Failed PromptedLaunchDiagnostics.Failure.DiscoveryFailed)
                                   | Some worktrees ->
-                                      Log.log "API" $"Auto-launch failed for {context}: newly created path absent from {worktrees.Length} discovered worktrees"
+                                      diagnostics.Emit(
+                                          PromptedLaunchDiagnostics.Event.Failed(
+                                              PromptedLaunchDiagnostics.Failure.WorktreeNotDiscovered worktrees.Length))
                               with ex ->
-                                  Log.logException "API" $"Auto-launch crashed for {context}" ex
+                                  diagnostics.Emit(
+                                      PromptedLaunchDiagnostics.Event.Failed(PromptedLaunchDiagnostics.Failure.Unexpected ex))
                           }
                           |> Async.Start
-                      | _ -> ()
+                      | _ -> diagnostics.Emit PromptedLaunchDiagnostics.Event.AutoLaunchSkipped
 
                   // Post-fork setup (junctions, bd init, npm install) can take minutes, so run it in
                   // the background and surface its lifecycle on the worktree card via CardEventLog —
@@ -1216,29 +1244,32 @@ let internal worktreeApiWithLaunchUsing
                   // finishes (success or failure); with no post-fork script there is nothing to wait
                   // for, so launch immediately.
                   match GitWorktree.postForkScriptPath root with
-                  | None -> launchPromptSession ()
+                  | None ->
+                      diagnostics.Emit PromptedLaunchDiagnostics.Event.PostForkSkipped
+                      launchPromptSession ()
                   | Some _ ->
                       let eventKey = scopedBranchKey repoId branchName
                       Async.Start(
                           async {
                               try
+                                  diagnostics.Emit(
+                                      PromptedLaunchDiagnostics.Event.Progress PromptedLaunchDiagnostics.Milestone.PostForkStarted)
                                   cardLog.Post(CardEventLog.PostForkStarted eventKey)
                                   let! result = GitWorktree.runPostFork root fork.WorktreePath fork.BaseRef branchName
+                                  diagnostics.Emit(PromptedLaunchDiagnostics.Event.PostForkCompleted result)
                                   let status =
                                       match result with
                                       | Ok () -> StepStatus.Succeeded
-                                      | Error msg ->
-                                          Log.log "API" $"post-fork setup failed for {branchName}: {msg}"
-                                          StepStatus.Failed msg
+                                      | Error msg -> StepStatus.Failed msg
                                   cardLog.Post(CardEventLog.PostForkEnded(eventKey, status))
                                   agent.Post(SchedulerState.StateMsg.ExpediteRefresh repoId)
                               with ex ->
-                                  Log.log "API" $"post-fork background task faulted for {branchName}: {ex.Message}"
+                                  diagnostics.Emit(PromptedLaunchDiagnostics.Event.PostForkCrashed ex)
                                   cardLog.Post(CardEventLog.PostForkEnded(eventKey, StepStatus.Failed ex.Message))
                               launchPromptSession ()
                           })
 
-                  return fork.Warnings
+                  return fork.Warnings @ promptWarnings
               }
           launchAction = fun req ->
               withValidatedPathValue req.Path "launchAction" (PromptedLaunchError.UnknownWorktree >> Error) (fun () ->
@@ -1247,7 +1278,7 @@ let internal worktreeApiWithLaunchUsing
                       let provider = CodingToolStatus.readConfiguredProvider path
                       let startPrompted () =
                           let prompt = CodingToolStatus.actionPrompt provider req.Action
-                          terminalLaunch.StartPromptedAgent provider req.Path prompt
+                          TerminalLaunch.start terminalLaunch provider req.Path prompt
                           |> terminalStart
 
                       match req.Action with
@@ -1365,7 +1396,7 @@ let internal worktreeApiWithLaunchUsing
                                                           let provider = CodingToolStatus.readConfiguredProvider path
                                                           let prompt = CanvasPrompt.continueWorking path request.Filename
                                                           Log.log "API" $"sendCanvasMessage: launching an interaction terminal for {request.Filename}"
-                                                          match! terminalLaunch.StartPromptedAgent provider request.WorktreePath prompt |> Async.Catch with
+                                                          match! TerminalLaunch.start terminalLaunch provider request.WorktreePath prompt |> Async.Catch with
                                                           | Choice1Of2(Ok started) ->
                                                               return! completeLaunch launchAt started.TerminalId
                                                           | Choice1Of2(Error error) ->

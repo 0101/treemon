@@ -166,6 +166,38 @@ type LogDestinationTests() =
             | Ok() ->
                 Assert.Fail("Unusable log directory was accepted"))
 
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    [<NonParallelizable>]
+    member _.``stderr failures do not escape logging and retain both diagnostic failures``(closed: bool) =
+        withTempDir "treemon-log-unavailable-sinks" (fun root ->
+            let stderrError: exn =
+                if closed then ObjectDisposedException "stderr"
+                else IOException "stderr write failed"
+            let writeError: Log.WriteError =
+                { Path = root
+                  Exception = IOException "log append failed" }
+            let diagnostics =
+                PromptedLaunchDiagnostics.Attempt(
+                    SessionActivity.SessionId "unavailable-sinks",
+                    Shared.WorktreePath root,
+                    (fun () -> 0L),
+                    (fun _ -> Error writeError))
+
+            Tests.LaunchLogFixture.withCurrentLog root (fun () ->
+                Tests.LaunchLogFixture.withUnavailableStderr stderrError (fun () ->
+                    Log.log "Tests" "Nonfatal diagnostic write"
+                    match diagnostics.Record PromptedLaunchDiagnostics.Event.AutoLaunchSkipped with
+                    | Ok() -> Assert.Fail("An unavailable log was reported as persisted")
+                    | Error error ->
+                        Assert.That(error.Path, Is.EqualTo writeError.Path)
+                        match error.Exception with
+                        | :? AggregateException as aggregate ->
+                            Assert.That(
+                                aggregate.InnerExceptions |> Seq.toList,
+                                Is.EqualTo([ writeError.Exception; stderrError ]))
+                        | error -> Assert.Fail($"Both diagnostic failures were not retained: {error}"))))
+
 [<TestFixture>]
 [<Category("E2E")>]
 type FixtureServerLogTests() =

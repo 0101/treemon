@@ -165,7 +165,11 @@ type ClockTests() =
               Target = QueuedTarget.Session(SendTarget.DurableSession(SessionId "startup-deadline"))
               Prompt = Prompt.startup "Initial task"
               LastFailure = None
-              Delivery = PromptDelivery.Startup(completion, deadline.Token) }
+              Delivery =
+                PromptDelivery.Startup(
+                    completion,
+                    deadline.Token,
+                    PromptedLaunchDiagnostics.create (SessionId "startup-deadline") (WorktreePath "startup-deadline")) }
 
         Assert.That(cleanExpired clock [ reserved ], Is.EqualTo([ reserved ]))
         deadline.Cancel()
@@ -944,11 +948,15 @@ type PromptTransportTests() =
     [<Test>]
     member _.``Bridge failure formatting excludes the response body``() =
         let secretBody = $"first line{Environment.NewLine}secret-token=abc123"
-        let failure = formatPostFailure 503 secretBody
+        let failure =
+            PromptedLaunchDiagnostics.deliveryFailureDetails(
+                PromptedLaunchDiagnostics.DeliveryFailure.HttpRejected(503, secretBody.Length))
+            |> System.Text.Json.JsonSerializer.Serialize
+        use document = System.Text.Json.JsonDocument.Parse failure
 
         Assert.Multiple(fun () ->
-            Assert.That(failure, Does.Contain "status=503")
-            Assert.That(failure, Does.Contain $"bodyLength={secretBody.Length}")
+            Assert.That(document.RootElement.GetProperty("status").GetInt32(), Is.EqualTo 503)
+            Assert.That(document.RootElement.GetProperty("bodyLength").GetInt32(), Is.EqualTo secretBody.Length)
             Assert.That(failure, Does.Not.Contain "first line")
             Assert.That(failure, Does.Not.Contain "secret-token"))
 
