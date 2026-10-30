@@ -81,9 +81,25 @@ charts remain usable even when no live group survives the Focus window.
 
 ## Technical Approach
 
-`BeadsStatus` reads the canonical beads issue export once per refresh and derives both the card
-summary and the feature-free planning projection. Parent-child edges determine whether an open task
-is Planned, Queued, or Loose.
+`BeadsStatus` derives the card summary and feature-free planning projection from
+one snapshot per refresh. When `.beads/beads.db` exists, it reads all issues and
+their directed parent-child edges in one read-only SQLite query using the
+existing SQLite dependency. No CLI process, export, daemon, or database write is
+needed. Each refresh observes committed database changes, including WAL commits;
+a missing or newer JSONL export cannot override the database.
+
+When no database exists, `.beads/issues.jsonl` remains supported as a JSONL-only
+store. No storage, an empty database, or an empty export produces zero counts.
+An unreadable, corrupt, or unsupported database fails the refresh rather than
+falling back to an export. Storage read failures retain the previous counts and
+generated page and are reported by the scheduler's Beads refresh diagnostics.
+
+The card summary counts every issue type in the open, in-progress, blocked, and
+closed statuses, without a list limit. Features are excluded only from the
+planning projection. A parent-child edge has `issue_id = child` and
+`depends_on_id = parent`; a blocks edge or reversed edge never supplies that
+child's parent. Only the direct parent feature's status determines whether an
+open task is Planned, Queued, or Loose.
 
 `OverviewData.aggregate` is the single pure aggregation boundary. The client projects eligible
 worktrees through `WorktreeFocus` before calling it; server-side capture keeps the complete input.

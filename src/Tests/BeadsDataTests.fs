@@ -1,8 +1,13 @@
 module Tests.BeadsDataTests
 
+open System
+open System.IO
+open Microsoft.Data.Sqlite
 open NUnit.Framework
 open Shared
 open Server.BeadsStatus
+open Server.RefreshScheduler
+open Server.SchedulerState
 
 /// Tests for the .beads/issues.jsonl parser and status summary in Server.BeadsStatus — the
 /// beads-schema knowledge isolated in that module. They pin the parent-child edge direction
@@ -140,3 +145,237 @@ type BeadsDataTests() =
         Assert.That(planning.Loose, Is.EqualTo(1))
         Assert.That(planning.Planned, Is.EqualTo(0))
         Assert.That(planning.Queued, Is.EqualTo(0))
+
+[<TestFixture>]
+[<Category("Integration")>]
+[<Category("Fast")>]
+type BeadsStorageTests() =
+
+    let repoId = RepoId "beads-fixture"
+
+    let withWorktree action =
+        let path =
+            Path.GetFullPath(
+                Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".agents", $"beads-test-{Guid.NewGuid():N}")
+            )
+        Directory.CreateDirectory(Path.Combine(path, ".beads")) |> ignore
+
+        try
+            action path
+        finally
+            Directory.Delete(path, true)
+
+    let databasePath path = Path.Combine(path, ".beads", "beads.db")
+    let exportPath path = Path.Combine(path, ".beads", "issues.jsonl")
+    let pagePath path = Path.Combine(path, ".agents", "canvas", "beads.html")
+
+    let readBytes path =
+        use stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+        use buffer = new MemoryStream()
+        stream.CopyTo(buffer)
+        buffer.ToArray()
+
+    let createDatabase path rows =
+        SqliteTestDatabase.execute (databasePath path) (
+            """
+CREATE TABLE issues (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'open',
+    issue_type TEXT NOT NULL DEFAULT 'task'
+);
+CREATE TABLE dependencies (
+    issue_id TEXT NOT NULL,
+    depends_on_id TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'blocks',
+    PRIMARY KEY (issue_id, depends_on_id),
+    FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE,
+    FOREIGN KEY (depends_on_id) REFERENCES issues(id) ON DELETE CASCADE
+);
+""" + rows)
+
+    let refresh (agent: MailboxProcessor<StateMsg>) path =
+        let services =
+            { StartPromptedAgent =
+                fun _ _ _ -> async.Return(Error PromptedLaunchError.TerminalStartFailed)
+              ActivityStore = None
+              MergedPrStore = Server.MergedPrStore.create (Path.Combine(path, "merged-prs.json"))
+              AutoSyncStore = Server.AutoSyncStore.create (Path.Combine(path, "auto-sync.json")) }
+
+        executeTask agent services (Map.ofList [ repoId, path ]) (RefreshBeads(repoId, path))
+        |> Async.RunSynchronously
+
+    let register (agent: MailboxProcessor<StateMsg>) path =
+        agent.Post(UpdateWorktreeList(repoId, [ { Path = path; Head = "fixture"; Branch = Some "fixture" } ]))
+
+    let readRepo (agent: MailboxProcessor<StateMsg>) =
+        (agent.PostAndAsyncReply(GetState) |> Async.RunSynchronously).Repos[repoId]
+
+    [<Test>]
+    member _.``Database-only refresh counts every status and directed parent relationship and provisions the page``() =
+        withWorktree (fun path ->
+            createDatabase path """
+INSERT INTO issues (id, status, issue_type) VALUES
+('feature-open', 'open', 'feature'),
+('feature-active', 'in_progress', 'feature'),
+('feature-blocked', 'blocked', 'feature'),
+('feature-closed', 'closed', 'feature'),
+('planned', 'open', 'task'),
+('queued', 'open', 'task'),
+('blocks-only', 'open', 'task'),
+('reverse-edge', 'open', 'task'),
+('nested', 'open', 'task'),
+('loose', 'open', 'task'),
+('under-blocked', 'open', 'task'),
+('under-closed', 'open', 'task'),
+('active', 'in_progress', 'task'),
+('blocked', 'blocked', 'bug'),
+('done', 'closed', 'task');
+INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES
+('planned', 'feature-open', 'parent-child'),
+('planned', 'feature-active', 'blocks'),
+('queued', 'feature-active', 'PARENT-CHILD'),
+('blocks-only', 'feature-active', 'blocks'),
+('feature-active', 'reverse-edge', 'parent-child'),
+('nested', 'planned', 'parent-child'),
+('under-blocked', 'feature-blocked', 'parent-child'),
+('under-closed', 'feature-closed', 'parent-child');
+"""
+            let before = readBytes (databasePath path)
+            use agent = createAgent ()
+            register agent path
+            refresh agent path
+            let repo = readRepo agent
+
+            Assert.Multiple(fun () ->
+                Assert.That(repo.BeadsData[path], Is.EqualTo({ Open = 9; InProgress = 2; Blocked = 2; Closed = 2 }))
+                Assert.That(
+                    repo.PlanningData[path],
+                    Is.EqualTo({ Planned = 1; Queued = 1; Loose = 6; InProgress = 1; Blocked = 1; Closed = 1 }))
+                Assert.That(File.ReadAllText(pagePath path), Is.EqualTo(Server.BeadspaceTemplate.html))
+                Assert.That(readBytes (databasePath path), Is.EqualTo(before), "Reading must not change the database")
+                Assert.That(File.Exists(exportPath path), Is.False, "Reading must not create an export")))
+
+    [<Test>]
+    member _.``Database remains authoritative over a newer export and reads later WAL commits without writing``() =
+        withWorktree (fun path ->
+            createDatabase path "INSERT INTO issues (id) VALUES ('task');"
+            let staleExport = """{"id":"stale","issue_type":"task","status":"closed"}"""
+            File.WriteAllText(exportPath path, staleExport)
+            File.SetLastWriteTimeUtc(exportPath path, DateTime(2030, 1, 1, 0, 0, 0, DateTimeKind.Utc))
+
+            use writer = SqliteTestDatabase.openConnection (databasePath path)
+            use command = writer.CreateCommand()
+            command.CommandText <- "PRAGMA journal_mode=WAL;"
+            Assert.That(command.ExecuteScalar(), Is.EqualTo("wal"), "Fixture must use WAL")
+            Assert.That(
+                getBeadsData path |> Async.RunSynchronously,
+                Is.EqualTo(
+                    ({ Open = 1; InProgress = 0; Blocked = 0; Closed = 0 },
+                     { BeadsPlanning.zero with Loose = 1 })))
+
+            command.CommandText <- """
+UPDATE issues SET status = 'closed' WHERE id = 'task';
+INSERT INTO issues (id, status) VALUES ('new', 'blocked');
+"""
+            command.ExecuteNonQuery() |> ignore
+            let before = readBytes (databasePath path)
+            let walBefore = readBytes (databasePath path + "-wal")
+            let summary, planning = getBeadsData path |> Async.RunSynchronously
+
+            Assert.Multiple(fun () ->
+                Assert.That(summary, Is.EqualTo({ Open = 0; InProgress = 0; Blocked = 1; Closed = 1 }))
+                Assert.That(planning, Is.EqualTo({ BeadsPlanning.zero with Blocked = 1; Closed = 1 }))
+                Assert.That(File.ReadAllText(exportPath path), Is.EqualTo(staleExport))
+                Assert.That(readBytes (databasePath path), Is.EqualTo(before))
+                Assert.That(readBytes (databasePath path + "-wal"), Is.EqualTo(walBefore))))
+
+    [<Test>]
+    member _.``Closed-only database is not filtered or limited and still provisions the page``() =
+        withWorktree (fun path ->
+            let rows =
+                [ 1 .. 75 ]
+                |> List.map (fun id -> $"('closed-{id}', 'closed')")
+                |> String.concat ","
+            createDatabase path $"INSERT INTO issues (id, status) VALUES {rows};"
+            use agent = createAgent ()
+            register agent path
+            refresh agent path
+            let repo = readRepo agent
+
+            Assert.Multiple(fun () ->
+                Assert.That(repo.BeadsData[path], Is.EqualTo({ BeadsSummary.zero with Closed = 75 }))
+                Assert.That(repo.PlanningData[path], Is.EqualTo({ BeadsPlanning.zero with Closed = 75 }))
+                Assert.That(File.ReadAllText(pagePath path), Is.EqualTo(Server.BeadspaceTemplate.html))))
+
+    [<Test>]
+    member _.``JSONL-only worktree preserves summary planning and page provisioning without creating a database``() =
+        withWorktree (fun path ->
+            File.WriteAllText(exportPath path, """{"id":"feature","status":"in_progress","issue_type":"feature"}
+{"id":"task","status":"open","issue_type":"task","dependencies":[{"issue_id":"task","depends_on_id":"feature","type":"parent-child"}]}""")
+            use agent = createAgent ()
+            register agent path
+            refresh agent path
+            let repo = readRepo agent
+
+            Assert.Multiple(fun () ->
+                Assert.That(repo.BeadsData[path], Is.EqualTo({ Open = 1; InProgress = 1; Blocked = 0; Closed = 0 }))
+                Assert.That(repo.PlanningData[path], Is.EqualTo({ BeadsPlanning.zero with Queued = 1 }))
+                Assert.That(File.ReadAllText(pagePath path), Is.EqualTo(Server.BeadspaceTemplate.html))
+                Assert.That(File.Exists(databasePath path), Is.False)))
+
+    [<Test>]
+    member _.``Empty database overrides nonempty export and removes a previously provisioned page``() =
+        withWorktree (fun path ->
+            createDatabase path "INSERT INTO issues (id) VALUES ('task');"
+            File.WriteAllText(exportPath path, """{"id":"stale","status":"open","issue_type":"task"}""")
+            use agent = createAgent ()
+            register agent path
+            refresh agent path
+            SqliteTestDatabase.execute (databasePath path) "DELETE FROM issues;"
+            refresh agent path
+            let repo = readRepo agent
+
+            Assert.Multiple(fun () ->
+                Assert.That(repo.BeadsData[path], Is.EqualTo(BeadsSummary.zero))
+                Assert.That(repo.PlanningData[path], Is.EqualTo(BeadsPlanning.zero))
+                Assert.That(File.Exists(pagePath path), Is.False)))
+
+    [<TestCase("corrupt")>]
+    [<TestCase("unsupported-schema")>]
+    [<TestCase("database-directory")>]
+    member _.``Database errors fail the refresh without falling back to export or clearing the last good state``(failure: string) =
+        withWorktree (fun path ->
+            createDatabase path "INSERT INTO issues (id) VALUES ('task');"
+            use agent = createAgent ()
+            register agent path
+            refresh agent path
+            File.Delete(databasePath path)
+            if failure = "corrupt" then
+                File.WriteAllText(databasePath path, "not a database")
+            elif failure = "database-directory" then
+                Directory.CreateDirectory(databasePath path) |> ignore
+            else
+                SqliteTestDatabase.execute (databasePath path) "CREATE TABLE unrelated (id TEXT);"
+            File.WriteAllText(exportPath path, """{"id":"stale","status":"closed","issue_type":"task"}""")
+
+            Assert.Throws<SqliteException>(fun () -> refresh agent path) |> ignore
+            let repo = readRepo agent
+
+            Assert.Multiple(fun () ->
+                Assert.That(repo.BeadsData[path], Is.EqualTo({ BeadsSummary.zero with Open = 1 }))
+                Assert.That(repo.PlanningData[path], Is.EqualTo({ BeadsPlanning.zero with Loose = 1 }))
+                Assert.That(File.ReadAllText(pagePath path), Is.EqualTo(Server.BeadspaceTemplate.html))))
+
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member _.``Absent storage and empty JSONL produce zero without creating storage``(emptyExport: bool) =
+        withWorktree (fun path ->
+            if emptyExport then
+                File.WriteAllText(exportPath path, "")
+            else
+                Directory.Delete(Path.Combine(path, ".beads"))
+
+            Assert.That(
+                getBeadsData path |> Async.RunSynchronously,
+                Is.EqualTo((BeadsSummary.zero, BeadsPlanning.zero)))
+            Assert.That(File.Exists(databasePath path), Is.False))
